@@ -1,0 +1,29 @@
+name: Bug Report
+description: Create a report to help us improve didit-sdk
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to report a bug!
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Provide a minimal code snippet reproducing the problem.
+      render: python
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: SDK and Python Version
+      description: e.g. didit-sdk 0.1.0, Python 3.12.3
+    validations:
+      required: true

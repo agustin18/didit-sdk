@@ -1,0 +1,19 @@
+name: Feature Request
+description: Suggest an idea or feature for didit-sdk
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Motivation
+      description: Is your feature request related to a problem or missing Didit API capability?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution / API Design
+      description: How should the proposed API look and behave?
+      render: python
+    validations:
+      required: true

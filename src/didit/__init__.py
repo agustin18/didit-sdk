@@ -16,6 +16,7 @@ from didit.errors import (
     DiditRateLimitError,
     DiditServerError,
     DiditSignatureError,
+    DiditTimeoutError,
 )
 from didit.models.decision import (
     AMLData,
@@ -48,6 +49,7 @@ __all__ = [
     "DiditRateLimitError",
     "DiditServerError",
     "DiditSignatureError",
+    "DiditTimeoutError",
     "DocumentData",
     "Language",
     "ReviewData",

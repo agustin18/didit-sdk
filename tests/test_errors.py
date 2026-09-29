@@ -9,6 +9,7 @@ from didit.errors import (
     DiditRateLimitError,
     DiditServerError,
     DiditSignatureError,
+    DiditTimeoutError,
 )
 
 
@@ -16,6 +17,7 @@ class TestErrors:
     def test_didit_error_inheritance(self) -> None:
         assert issubclass(DiditConfigurationError, DiditError)
         assert issubclass(DiditSignatureError, DiditError)
+        assert issubclass(DiditTimeoutError, DiditError)
         assert issubclass(DiditAPIError, DiditError)
         assert issubclass(DiditAuthenticationError, DiditAPIError)
         assert issubclass(DiditNotFoundError, DiditAPIError)

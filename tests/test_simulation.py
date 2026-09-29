@@ -59,6 +59,19 @@ class TestSimulatedDidit:
         assert declined.review is not None
         assert declined.review.decision_reason == "Document expired or forged"
 
+    def test_poll_decision_in_simulation(self) -> None:
+        from didit.errors import DiditTimeoutError
+
+        client = SimulatedDidit()
+        session = client.sessions.create(vendor_data="u_poll", workflow_id="wf")
+        # Pending session raises DiditTimeoutError on polling
+        with pytest.raises(DiditTimeoutError, match="without terminal outcome"):
+            client.sessions.poll_decision(session.session_id, timeout=0.01)
+
+        client.approve_session(session.session_id)
+        polled = client.sessions.poll_decision(session.session_id)
+        assert polled.status == SessionStatus.APPROVED
+
     def test_not_found_session(self) -> None:
         client = SimulatedDidit(webhook_secret="whsec_sim")
         with pytest.raises(DiditNotFoundError):
@@ -117,3 +130,15 @@ class TestSimulatedAsyncDidit:
         session = await client.sessions.create(vendor_data="u1", workflow_id="wf1")
         with pytest.raises(DiditConfigurationError):
             client.generate_webhook_event(session.session_id)
+
+    async def test_async_poll_decision_in_simulation(self) -> None:
+        from didit.errors import DiditTimeoutError
+
+        client = SimulatedAsyncDidit()
+        session = await client.sessions.create(vendor_data="u_async_poll", workflow_id="wf")
+        with pytest.raises(DiditTimeoutError, match="without terminal outcome"):
+            await client.sessions.poll_decision(session.session_id, timeout=0.01)
+
+        client.approve_session(session.session_id)
+        polled = await client.sessions.poll_decision(session.session_id)
+        assert polled.status == SessionStatus.APPROVED

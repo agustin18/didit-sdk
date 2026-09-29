@@ -127,6 +127,28 @@ class TestDiditSyncClient:
         assert decision.biometrics.face_match is True
 
     @respx.mock
+    def test_poll_decision_success(self, client: Didit, base_url: str) -> None:
+        route = respx.get(f"{base_url}/session/sess_poll/decision/").mock(
+            side_effect=[
+                Response(200, json={"session_id": "sess_poll", "status": "In Progress"}),
+                Response(200, json={"session_id": "sess_poll", "status": "Approved"}),
+            ]
+        )
+        decision = client.sessions.poll_decision("sess_poll", timeout=1.0, interval=0.001)
+        assert route.call_count == 2
+        assert decision.status == SessionStatus.APPROVED
+
+    @respx.mock
+    def test_poll_decision_timeout(self, client: Didit, base_url: str) -> None:
+        from didit.errors import DiditTimeoutError
+
+        respx.get(f"{base_url}/session/sess_poll_to/decision/").mock(
+            return_value=Response(200, json={"session_id": "sess_poll_to", "status": "In Progress"})
+        )
+        with pytest.raises(DiditTimeoutError, match="timed out after"):
+            client.sessions.poll_decision("sess_poll_to", timeout=0.01, interval=0.02)
+
+    @respx.mock
     @pytest.mark.parametrize(
         ("status_code", "exc_type"),
         [

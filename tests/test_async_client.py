@@ -121,6 +121,36 @@ class TestAsyncDiditClient:
         await async_client.aclose()
 
     @respx.mock
+    async def test_poll_decision_success(self, async_client: AsyncDidit, base_url: str) -> None:
+        route = respx.get(f"{base_url}/session/sess_poll_async/decision/").mock(
+            side_effect=[
+                Response(200, json={"session_id": "sess_poll_async", "status": "In Progress"}),
+                Response(200, json={"session_id": "sess_poll_async", "status": "Approved"}),
+            ]
+        )
+        decision = await async_client.sessions.poll_decision(
+            "sess_poll_async", timeout=1.0, interval=0.001
+        )
+        assert route.call_count == 2
+        assert decision.status == SessionStatus.APPROVED
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_poll_decision_timeout(self, async_client: AsyncDidit, base_url: str) -> None:
+        from didit.errors import DiditTimeoutError
+
+        respx.get(f"{base_url}/session/sess_poll_to_async/decision/").mock(
+            return_value=Response(
+                200, json={"session_id": "sess_poll_to_async", "status": "In Progress"}
+            )
+        )
+        with pytest.raises(DiditTimeoutError, match="timed out after"):
+            await async_client.sessions.poll_decision(
+                "sess_poll_to_async", timeout=0.01, interval=0.02
+            )
+        await async_client.aclose()
+
+    @respx.mock
     @pytest.mark.parametrize(
         ("status_code", "exc_type"),
         [

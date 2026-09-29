@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import TYPE_CHECKING
 
+from didit.errors import DiditTimeoutError
 from didit.models.decision import DecisionResponse
 from didit.models.enums import Language
 from didit.models.session import CreateSessionRequest, SessionResponse
@@ -65,6 +68,25 @@ class SessionsResource:
         decision.raw_data = data
         return decision
 
+    def poll_decision(
+        self,
+        session_id: str,
+        *,
+        timeout: float = 60.0,
+        interval: float = 2.0,
+    ) -> DecisionResponse:
+        """Poll the decision endpoint until a terminal verification status is reached."""
+        deadline = time.time() + timeout
+        while True:
+            decision = self.get_decision(session_id)
+            if decision.status.is_terminal:
+                return decision
+            if time.time() + interval > deadline:
+                raise DiditTimeoutError(
+                    f"Polling decision for session '{session_id}' timed out after {timeout} seconds"
+                )
+            time.sleep(interval)
+
 
 class AsyncSessionsResource:
     """Asynchronous resource for managing Didit verification sessions."""
@@ -107,3 +129,22 @@ class AsyncSessionsResource:
         decision = DecisionResponse.model_validate(data)
         decision.raw_data = data
         return decision
+
+    async def poll_decision(
+        self,
+        session_id: str,
+        *,
+        timeout: float = 60.0,
+        interval: float = 2.0,
+    ) -> DecisionResponse:
+        """Poll the decision endpoint asynchronously until a terminal status is reached."""
+        deadline = time.time() + timeout
+        while True:
+            decision = await self.get_decision(session_id)
+            if decision.status.is_terminal:
+                return decision
+            if time.time() + interval > deadline:
+                raise DiditTimeoutError(
+                    f"Polling decision for session '{session_id}' timed out after {timeout} seconds"
+                )
+            await asyncio.sleep(interval)

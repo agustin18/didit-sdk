@@ -7,7 +7,11 @@ import time
 import uuid
 from typing import Any
 
-from didit.errors import DiditConfigurationError, DiditNotFoundError
+from didit.errors import (
+    DiditConfigurationError,
+    DiditNotFoundError,
+    DiditTimeoutError,
+)
 from didit.models.decision import (
     AMLData,
     BiometricsData,
@@ -133,6 +137,20 @@ class SimulatedSessionsResource:
     def get_decision(self, session_id: str) -> DecisionResponse:
         return self._storage.get_decision(session_id)
 
+    def poll_decision(
+        self,
+        session_id: str,
+        *,
+        timeout: float = 60.0,
+        interval: float = 2.0,
+    ) -> DecisionResponse:
+        decision = self.get_decision(session_id)
+        if not decision.status.is_terminal:
+            raise DiditTimeoutError(
+                f"Polling simulated session '{session_id}' timed out without terminal outcome"
+            )
+        return decision
+
 
 class SimulatedAsyncSessionsResource:
     """Asynchronous in-memory sessions resource."""
@@ -160,6 +178,20 @@ class SimulatedAsyncSessionsResource:
 
     async def get_decision(self, session_id: str) -> DecisionResponse:
         return self._storage.get_decision(session_id)
+
+    async def poll_decision(
+        self,
+        session_id: str,
+        *,
+        timeout: float = 60.0,
+        interval: float = 2.0,
+    ) -> DecisionResponse:
+        decision = await self.get_decision(session_id)
+        if not decision.status.is_terminal:
+            raise DiditTimeoutError(
+                f"Polling simulated session '{session_id}' timed out without terminal outcome"
+            )
+        return decision
 
 
 class SimulatedDidit:

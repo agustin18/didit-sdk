@@ -58,8 +58,11 @@ session = client.sessions.create(
 print(f"Verification URL: {session.url}")
 print(f"Session ID: {session.session_id}")
 
-# Fetch verification decision
+# Fetch verification decision immediately:
 decision = client.sessions.get_decision(session.session_id)
+
+# Or poll until a terminal outcome (Approved or Declined) is reached:
+decision = client.sessions.poll_decision(session.session_id, timeout=60.0, interval=2.0)
 if decision.status == SessionStatus.APPROVED:
     print(f"User approved! Document: {decision.document.document_number}")
 ```

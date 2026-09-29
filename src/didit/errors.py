@@ -18,6 +18,10 @@ class DiditSignatureError(DiditError):
     """Raised when a webhook signature fails cryptographic verification or freshness check."""
 
 
+class DiditTimeoutError(DiditError):
+    """Raised when an operation such as polling exceeds the configured timeout limit."""
+
+
 class DiditAPIError(DiditError):
     """Raised when the Didit API returns an HTTP error status code."""
 
