@@ -384,3 +384,52 @@ class TestFastAPIWebhookGuard:
         resp2 = test_client.post("/webhook-pure-sync", content=raw_body, headers=headers)
         assert resp2.status_code == 200
         assert resp2.json()["detail"] == "Duplicate webhook event acknowledged"
+
+
+class TestIntegrationsLazyLoading:
+    def test_lazy_attribute_access_success(self) -> None:
+        import didit.integrations as pkg
+
+        assert pkg.DiditWebhookGuard is not None
+        assert pkg.didit_webhook_view is not None
+        assert pkg.parse_django_webhook is not None
+        assert pkg.didit_webhook is not None
+        assert pkg.parse_flask_webhook is not None
+
+    def test_unknown_attribute_raises_attribute_error(self) -> None:
+        import didit.integrations as pkg
+
+        with pytest.raises(AttributeError, match="has no attribute 'unknown_attr'"):
+            _ = pkg.unknown_attr  # type: ignore[attr-defined]
+
+    def test_missing_fastapi_raises_informative_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sys
+
+        import didit.integrations as pkg
+
+        monkeypatch.setitem(sys.modules, "didit.integrations.fastapi", None)
+        monkeypatch.delattr(pkg, "fastapi", raising=False)
+        with pytest.raises(ImportError, match="FastAPI is required"):
+            _ = pkg.__getattr__("DiditWebhookGuard")
+
+    def test_missing_django_raises_informative_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import sys
+
+        import didit.integrations as pkg
+
+        monkeypatch.setitem(sys.modules, "didit.integrations.django", None)
+        monkeypatch.delattr(pkg, "django", raising=False)
+        with pytest.raises(ImportError, match="Django is required"):
+            _ = pkg.__getattr__("didit_webhook_view")
+
+    def test_missing_flask_raises_informative_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import sys
+
+        import didit.integrations as pkg
+
+        monkeypatch.setitem(sys.modules, "didit.integrations.flask", None)
+        monkeypatch.delattr(pkg, "flask", raising=False)
+        with pytest.raises(ImportError, match="Flask is required"):
+            _ = pkg.__getattr__("didit_webhook")
