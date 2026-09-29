@@ -52,6 +52,36 @@ class TestSimulatedDidit:
         assert "x-signature-v2" in headers or "X-Signature-V2" in headers
         assert verify_webhook_signature(raw_body, headers, "whsec_sim") is True
 
+    def test_approve_session_custom_fields(self) -> None:
+        from didit.models.decision import AMLData, BiometricsData, ReviewData
+
+        client = SimulatedDidit()
+        session = client.sessions.create(vendor_data="u_custom", workflow_id="wf")
+
+        bio = BiometricsData(face_match=False, liveness_check=False, score=0.1)
+        aml = AMLData(pep_detected=True, sanctions_detected=False, adverse_media_detected=False)
+        review = ReviewData(reviewed_by="manual_agent", decision_reason="Flagged for manual review")
+
+        decision = client.approve_session(
+            session.session_id,
+            biometrics=bio,
+            aml=aml,
+            review=review,
+        )
+        assert decision.status == SessionStatus.APPROVED
+        assert len(decision.id_verifications) == 1
+        assert decision.id_verifications[0].status == "Approved"
+        assert len(decision.liveness_checks) == 1
+        assert decision.liveness_checks[0].status == "Declined"
+        assert decision.liveness_checks[0].score == 0.1
+        assert len(decision.face_matches) == 1
+        assert decision.face_matches[0].status == "Declined"
+        assert decision.face_matches[0].score == 0.1
+        assert len(decision.aml_screenings) == 1
+        assert decision.aml_screenings[0].status == "Declined"
+        assert len(decision.reviews) == 1
+        assert decision.reviews[0].reviewed_by == "manual_agent"
+
     def test_decline_session(self) -> None:
         client = SimulatedDidit(webhook_secret="whsec_sim")
         session = client.sessions.create(vendor_data="user_declined", workflow_id="wf_sim")
@@ -110,6 +140,7 @@ class TestSimulatedDidit:
         assert "timestamp" in parsed
         assert "event_id" in parsed
         assert parsed["event_id"].startswith("evt_")
+        assert parsed["webhook_type"] == "status.updated"
         assert headers["X-Timestamp"] == str(parsed["timestamp"])
 
 

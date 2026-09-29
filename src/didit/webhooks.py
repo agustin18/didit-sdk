@@ -158,27 +158,24 @@ def verify_webhook_signature(
 
     signed_timestamp = body.get("timestamp")
     if signed_timestamp is None:
-        # Fallback to created_at only if timestamp is absent
         signed_timestamp = body.get("created_at")
 
-    if isinstance(signed_timestamp, bool) or not isinstance(signed_timestamp, (int, float)):
+    if isinstance(signed_timestamp, bool) or not isinstance(signed_timestamp, int):
         return False
 
-    signed_ts_int = int(signed_timestamp)
-    if not timestamp_is_fresh(signed_ts_int, max_age):
+    if not timestamp_is_fresh(signed_timestamp, max_age):
         return False
 
-    # Header is defense-in-depth: if present, it must strictly match signed timestamp
+    # Header is defense-in-depth: if present, it must strictly match signed timestamp string
     header_timestamp = lower_headers.get("x-timestamp")
-    if header_timestamp is not None:
-        try:
-            if int(header_timestamp.strip()) != signed_ts_int:
-                return False
-        except ValueError:
-            return False
+    if header_timestamp is not None and header_timestamp != str(signed_timestamp):
+        return False
 
     if signature_v2:
-        expected_v2 = compute_signature(secret, body, version="v2")
+        try:
+            expected_v2 = compute_signature(secret, body, version="v2")
+        except (UnicodeEncodeError, ValueError, RecursionError):
+            return False
         if _signature_matches(expected_v2, signature_v2):
             return True
 

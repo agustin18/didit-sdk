@@ -35,7 +35,7 @@ from didit.models.webhook import WebhookPayload
 from didit.simulation import SimulatedAsyncDidit, SimulatedDidit
 from didit.webhooks import parse_webhook_payload, verify_webhook_signature
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "AMLData",

@@ -17,35 +17,45 @@ from didit.models.webhook import WebhookPayload
 
 class TestSessionStatus:
     @pytest.mark.parametrize(
-        ("status", "is_decided", "is_closed", "requires_review", "requires_user_action"),
+        (
+            "status",
+            "is_decided",
+            "is_ended_without_decision",
+            "is_poll_complete",
+            "requires_review",
+            "requires_user_action",
+        ),
         [
-            (SessionStatus.NOT_STARTED, False, False, False, True),
-            (SessionStatus.IN_PROGRESS, False, False, False, True),
-            (SessionStatus.IN_REVIEW, False, False, True, False),
-            (SessionStatus.APPROVED, True, True, False, False),
-            (SessionStatus.DECLINED, True, True, False, False),
-            (SessionStatus.EXPIRED, False, True, False, False),
-            (SessionStatus.ABANDONED, False, True, False, False),
-            (SessionStatus.KYC_EXPIRED, True, True, False, False),
-            (SessionStatus.RESUBMITTED, False, False, False, True),
-            (SessionStatus.AWAITING_USER, False, False, False, True),
+            (SessionStatus.NOT_STARTED, False, False, False, False, True),
+            (SessionStatus.IN_PROGRESS, False, False, False, False, True),
+            (SessionStatus.IN_REVIEW, False, False, False, True, False),
+            (SessionStatus.APPROVED, True, False, True, False, False),
+            (SessionStatus.DECLINED, True, False, True, False, False),
+            (SessionStatus.EXPIRED, False, True, True, False, False),
+            (SessionStatus.ABANDONED, False, True, True, False, False),
+            (SessionStatus.KYC_EXPIRED, True, False, True, False, False),
+            (SessionStatus.RESUBMITTED, False, False, False, False, True),
+            (SessionStatus.AWAITING_USER, False, False, False, False, True),
         ],
     )
     def test_status_properties(
         self,
         status: SessionStatus,
         is_decided: bool,
-        is_closed: bool,
+        is_ended_without_decision: bool,
+        is_poll_complete: bool,
         requires_review: bool,
         requires_user_action: bool,
     ) -> None:
         assert status.is_decided is is_decided
-        assert status.is_closed is is_closed
+        assert status.is_ended_without_decision is is_ended_without_decision
+        assert status.is_poll_complete is is_poll_complete
         assert status.requires_review is requires_review
         assert status.requires_user_action is requires_user_action
         # Backward compatibility properties
         assert status.is_in_review is requires_review
-        assert status.is_terminal is is_closed
+        assert status.is_closed is is_poll_complete
+        assert status.is_terminal is is_poll_complete
 
     def test_status_string_equivalence(self) -> None:
         assert SessionStatus.APPROVED == "Approved"
@@ -206,80 +216,111 @@ class TestDecisionResponse:
         # Extra fields preserved via extra="allow"
         assert getattr(decision, "custom_upstream_metric", None) == 42
 
-    def test_decision_response_property_setters_and_edge_cases(self) -> None:
-        decision = DecisionResponse(session_id="sess_setters", status=SessionStatus.IN_PROGRESS)
+    def test_decision_response_model_validate_does_not_mutate_caller_dict(self) -> None:
+        import copy
 
-        # Empty initial state
-        assert decision.document is None
-        assert decision.biometrics is None
-        assert decision.aml is None
-        assert decision.review is None
+        raw = {
+            "session_id": "sess_immutable",
+            "status": "Approved",
+            "document": {
+                "first_name": "John",
+                "last_name": "Doe",
+            },
+            "biometrics": {
+                "face_match": True,
+            },
+        }
+        raw_copy = copy.deepcopy(raw)
+        DecisionResponse.model_validate(raw)
+        assert raw == raw_copy
+        assert "document" in raw
+        assert "biometrics" in raw
 
-        # Document setter & clear
-        decision.document = DocumentData(
-            first_name="Alice",
-            last_name="Smith",
-            is_valid=False,
+    def test_decision_response_read_only_accessors_and_multi_node_preservation(self) -> None:
+        from didit.models.decision import IdVerificationResult
+
+        node_a = IdVerificationResult(
+            first_name="Alice", last_name="Smith", document_number="A1", status="Approved"
         )
+        node_b = IdVerificationResult(
+            first_name="Bob", last_name="Jones", document_number="B2", status="Approved"
+        )
+
+        decision = DecisionResponse(
+            session_id="sess_multi",
+            status=SessionStatus.APPROVED,
+            id_verifications=[node_a, node_b],
+        )
+
+        # Accessing .document returns first node and preserves array
         assert decision.document is not None
         assert decision.document.first_name == "Alice"
-        assert decision.document.is_valid is False
-        assert decision.id_verifications[0].status == "Declined"
+        assert len(decision.id_verifications) == 2
+        assert decision.id_verifications[1].first_name == "Bob"
 
-        decision.document = None
-        assert decision.document is None
-        assert len(decision.id_verifications) == 0
+        # Accessors are read-only to prevent destructive overwriting of V3 arrays
+        with pytest.raises(AttributeError):
+            decision.document = DocumentData(first_name="Mallory")  # type: ignore[misc]
 
-        # Biometrics setter & clear
-        decision.biometrics = BiometricsData(
-            face_match=False,
-            liveness_check=True,
-            score=0.92,
+        with pytest.raises(AttributeError):
+            decision.biometrics = BiometricsData(face_match=True)  # type: ignore[misc]
+
+        with pytest.raises(AttributeError):
+            decision.aml = AMLData(pep_detected=False)  # type: ignore[misc]
+
+        with pytest.raises(AttributeError):
+            decision.review = ReviewData(reviewed_by="auditor")  # type: ignore[misc]
+
+        # NFC verifications field present
+        assert decision.nfc_verifications == []
+        decision.nfc_verifications.append({"status": "Approved", "chip_authenticated": True})
+        assert len(decision.nfc_verifications) == 1
+
+        # Empty decision returns None for all legacy properties
+        empty_dec = DecisionResponse(session_id="s_empty", status=SessionStatus.NOT_STARTED)
+        assert empty_dec.document is None
+        assert empty_dec.biometrics is None
+        assert empty_dec.aml is None
+        assert empty_dec.review is None
+
+        # Biometrics branch variations
+        from didit.models.decision import FaceMatchResult, LivenessResult
+
+        d_face_only = DecisionResponse(
+            session_id="s_face",
+            status=SessionStatus.APPROVED,
+            face_matches=[FaceMatchResult(status="Approved", score=0.88)],
         )
-        assert decision.biometrics is not None
-        assert decision.biometrics.liveness_check is True
-        assert decision.biometrics.face_match is False
-        assert decision.biometrics.score == 0.92
+        assert d_face_only.biometrics is not None
+        assert d_face_only.biometrics.face_match is True
+        assert d_face_only.biometrics.liveness_check is None
+        assert d_face_only.biometrics.score == 0.88
 
-        decision.biometrics = None
-        assert decision.biometrics is None
-        assert len(decision.liveness_checks) == 0
-        assert len(decision.face_matches) == 0
-
-        # Biometrics partial cases
-        decision.biometrics = BiometricsData(liveness_check=False)
-        assert decision.biometrics.face_match is None
-        assert decision.biometrics.liveness_check is False
-
-        decision.biometrics = BiometricsData(face_match=True)
-        assert decision.biometrics.face_match is True
-        assert decision.biometrics.liveness_check is None
-
-        # AML setter & clear
-        decision.aml = AMLData(pep_detected=True, sanctions_detected=False)
-        assert decision.aml is not None
-        assert decision.aml.pep_detected is True
-        assert decision.aml_screenings[0].status == "Declined"
-
-        decision.aml = AMLData(
-            pep_detected=False,
-            sanctions_detected=False,
-            adverse_media_detected=False,
+        d_live_noscore = DecisionResponse(
+            session_id="s_live_noscore",
+            status=SessionStatus.APPROVED,
+            liveness_checks=[LivenessResult(status="Approved", score=None)],
+            face_matches=[FaceMatchResult(status="Approved", score=0.77)],
         )
-        assert decision.aml_screenings[0].status == "Approved"
+        assert d_live_noscore.biometrics is not None
+        assert d_live_noscore.biometrics.score == 0.77
 
-        decision.aml = None
-        assert decision.aml is None
-        assert len(decision.aml_screenings) == 0
+        d_live_only_noscore = DecisionResponse(
+            session_id="s_live_only",
+            status=SessionStatus.APPROVED,
+            liveness_checks=[LivenessResult(status="Approved", score=None)],
+        )
+        assert d_live_only_noscore.biometrics is not None
+        assert d_live_only_noscore.biometrics.score is None
 
-        # Review setter & clear
-        decision.review = ReviewData(reviewed_by="analyst_1", decision_reason="Verified")
-        assert decision.review is not None
-        assert decision.review.reviewed_by == "analyst_1"
-
-        decision.review = None
-        assert decision.review is None
-        assert len(decision.reviews) == 0
+        d_face_noscore = DecisionResponse(
+            session_id="s_face_none",
+            status=SessionStatus.APPROVED,
+            face_matches=[FaceMatchResult(status=None, score=None)],
+        )
+        assert d_face_noscore.biometrics is not None
+        assert d_face_noscore.biometrics.face_match is None
+        assert d_face_noscore.biometrics.score is None
 
         # Migration hook with non-dict input
         assert DecisionResponse._migrate_legacy_singular_fields(42) == 42
@@ -366,3 +407,13 @@ class TestWebhookPayload:
         assert wh.decision is not None
         assert wh.decision.status == SessionStatus.APPROVED
         assert getattr(wh, "custom_payload_field", None) == "preserved"
+
+    @pytest.mark.parametrize("wv", [4, "v1.2", None])
+    def test_workflow_version_accepts_int_and_str(self, wv: int | str | None) -> None:
+        raw = {
+            "session_id": "sess_1",
+            "status": "Approved",
+            "workflow_version": wv,
+        }
+        wh = WebhookPayload.model_validate(raw)
+        assert wh.workflow_version == wv

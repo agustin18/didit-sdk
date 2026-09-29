@@ -291,6 +291,36 @@ class TestVerifyWebhookSignature:
         headers = {"X-Signature-V2": sig, "X-Timestamp": str(now_ts)}
         assert verify_webhook_signature(raw_body, headers, secret) is True
 
+    def test_lone_surrogate_in_json_does_not_raise(self, secret: str) -> None:
+        now_ts = int(time.time())
+        raw = b'{"timestamp":' + str(now_ts).encode() + b',"value":"\\ud800"}'
+        headers = {"X-Signature-V2": "a" * 64, "X-Timestamp": str(now_ts)}
+        assert verify_webhook_signature(raw, headers, secret) is False
+
+    def test_strict_literal_header_timestamp_matching(self, secret: str) -> None:
+        now_ts = int(time.time())
+        payload = {"session_id": "sess_strict", "status": "Approved", "timestamp": now_ts}
+        raw_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        sig = compute_signature(secret, payload, version="v2")
+
+        # Non-literal integer formatting in header must be rejected
+        for non_literal in [f"+{now_ts}", f"00{now_ts}", f" {now_ts} "]:
+            headers = {"X-Signature-V2": sig, "X-Timestamp": non_literal}
+            assert verify_webhook_signature(raw_body, headers, secret) is False
+
+        # Exact literal match passes
+        headers = {"X-Signature-V2": sig, "X-Timestamp": str(now_ts)}
+        assert verify_webhook_signature(raw_body, headers, secret) is True
+
+    def test_v2_requires_integer_timestamp(self, secret: str) -> None:
+        now_ts = int(time.time())
+        # Payload with float timestamp should fail under strict integer V2 contract
+        payload_float = {"session_id": "s_flt", "status": "Approved", "timestamp": float(now_ts)}
+        raw_body = json.dumps(payload_float, ensure_ascii=False).encode("utf-8")
+        sig = compute_signature(secret, payload_float, version="v2")
+        headers = {"X-Signature-V2": sig, "X-Timestamp": str(now_ts)}
+        assert verify_webhook_signature(raw_body, headers, secret) is False
+
 
 class TestParseWebhookPayload:
     @pytest.fixture

@@ -33,8 +33,8 @@ class WebhookPayload(BaseModel):
         default=None, description="Originating environment e.g. sandbox or production"
     )
     workflow_id: str | None = Field(default=None, description="Associated workflow identifier")
-    workflow_version: str | None = Field(
-        default=None, description="Workflow configuration version string"
+    workflow_version: int | str | None = Field(
+        default=None, description="Workflow configuration version string or integer"
     )
     vendor_data: str | None = Field(default=None, description="Echoed vendor reference")
     metadata: dict[str, Any] | None = Field(

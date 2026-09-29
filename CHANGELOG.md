@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-09-29
+
+### Security & Contractual Fidelity Fixes
+- **NEW-HIGH-01 (`workflow_version` Contractual Compatibility):** Updated `WebhookPayload.workflow_version` to `int | str | None = Field(default=None)` to accept integer workflow versions (e.g. `workflow_version: 4` used by upstream Didit production webhooks and fixtures) without triggering Pydantic `ValidationError` and remote 500 errors.
+- **NEW-MEDIUM-01 (Malformed Unicode Surrogates & JSON Depth Guard):** Guarded `verify_webhook_signature` against `UnicodeEncodeError` (caused by un-paired lone surrogate codepoints e.g. `\ud800`), `ValueError`, and `RecursionError` in the canonical JSON serialization pipeline, returning `False` gracefully instead of throwing unhandled 500 exceptions.
+- **NEW-MEDIUM-02 (Read-Only Compatibility Accessors & Multi-Node Preservation):** Converted `.document`, `.biometrics`, `.aml`, and `.review` on `DecisionResponse` into read-only compatibility properties to prevent destructive overwriting of multi-node Didit V3 verification arrays.
+- **NEW-MEDIUM-03 (Immutability of Caller Dictionaries):** Deep-copied input dictionaries in `DecisionResponse._migrate_legacy_singular_fields` prior to populating plural arrays, ensuring caller-supplied dictionaries are never mutated in-place.
+- **NEW-MEDIUM-04 (Simulator Webhook Event Type Alignment):** Updated `SimulatedDidit.generate_webhook_event` and `SimulatedAsyncDidit.generate_webhook_event` to emit `"webhook_type": "status.updated"` matching Didit V3 webhook standards.
+- **NEW-MEDIUM-05 (State Machine & Polling Precision):** Added `is_ended_without_decision` (`Expired`, `Abandoned`) and `is_poll_complete` (`is_decided or is_ended_without_decision`) to `SessionStatus`. Updated `poll_decision()` across client and simulation resources to poll until `is_poll_complete`.
+- **NEW-LOW/MEDIUM-06 (NFC Verifications Support):** Added `nfc_verifications: list[dict[str, Any]] = Field(default_factory=list)` to `DecisionResponse` to capture passport/eID chip authentication nodes.
+- **Strict Literal Timestamp Matching:** Enforced exact literal string equality between `X-Timestamp` header and the signed payload `timestamp` integer (`header_timestamp == str(signed_timestamp)`), rejecting leading signs, padding zeroes, and float-formatted timestamps.
+- **Packaging:** Included `NOTICE` file in `sdist` distribution targets in `pyproject.toml`.
+
 ## [0.1.1] - 2026-09-29
 
 ### Security & Correctness Fixes

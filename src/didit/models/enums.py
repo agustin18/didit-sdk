@@ -42,15 +42,22 @@ class SessionStatus(str, Enum):
         )
 
     @property
-    def is_closed(self) -> bool:
-        """Return True if the session lifecycle has concluded."""
+    def is_ended_without_decision(self) -> bool:
+        """Return True if session expired or was abandoned before completion."""
         return self in (
-            SessionStatus.APPROVED,
-            SessionStatus.DECLINED,
             SessionStatus.EXPIRED,
             SessionStatus.ABANDONED,
-            SessionStatus.KYC_EXPIRED,
         )
+
+    @property
+    def is_poll_complete(self) -> bool:
+        """Return True if polling cycle has concluded (decided or ended without decision)."""
+        return self.is_decided or self.is_ended_without_decision
+
+    @property
+    def is_closed(self) -> bool:
+        """Return True if the session lifecycle has concluded."""
+        return self.is_poll_complete
 
     @property
     def requires_review(self) -> bool:

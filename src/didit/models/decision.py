@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -123,7 +124,7 @@ class DecisionResponse(BaseModel):
     """Complete verification decision returned by Didit V3 API.
 
     Uses ``extra='allow'`` to preserve all upstream fields without silent data loss.
-    Provides backward-compatible singular accessors for legacy code.
+    Provides backward-compatible read-only singular accessors for legacy code.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -144,6 +145,9 @@ class DecisionResponse(BaseModel):
     )
     aml_screenings: list[AMLScreeningResult] = Field(
         default_factory=list, description="AML and sanctions screening results"
+    )
+    nfc_verifications: list[dict[str, Any]] = Field(
+        default_factory=list, description="NFC chip verification results"
     )
     phone_verifications: list[dict[str, Any]] = Field(
         default_factory=list, description="Phone verification results"
@@ -173,27 +177,30 @@ class DecisionResponse(BaseModel):
         if not isinstance(data, dict):
             return data
 
+        # Deep copy to ensure caller input dictionary is never mutated in-place
+        migrated = copy.deepcopy(data)
+
         # Normalize legacy document field
-        if "document" in data and "id_verifications" not in data:
-            doc = data.pop("document")
+        if "document" in migrated and "id_verifications" not in migrated:
+            doc = migrated.pop("document")
             if doc and isinstance(doc, dict):
                 if "status" not in doc and "is_valid" in doc:
                     doc["status"] = "Approved" if doc["is_valid"] else "Declined"
-                data["id_verifications"] = [doc]
+                migrated["id_verifications"] = [doc]
 
         # Normalize legacy biometrics field
-        if "biometrics" in data:
-            bio = data.pop("biometrics")
+        if "biometrics" in migrated:
+            bio = migrated.pop("biometrics")
             if bio and isinstance(bio, dict):
-                if "liveness_checks" not in data and "liveness_check" in bio:
-                    data["liveness_checks"] = [
+                if "liveness_checks" not in migrated and "liveness_check" in bio:
+                    migrated["liveness_checks"] = [
                         {
                             "status": "Approved" if bio["liveness_check"] else "Declined",
                             "score": bio.get("score"),
                         }
                     ]
-                if "face_matches" not in data and "face_match" in bio:
-                    data["face_matches"] = [
+                if "face_matches" not in migrated and "face_match" in bio:
+                    migrated["face_matches"] = [
                         {
                             "status": "Approved" if bio["face_match"] else "Declined",
                             "score": bio.get("score"),
@@ -201,22 +208,22 @@ class DecisionResponse(BaseModel):
                     ]
 
         # Normalize legacy aml field
-        if "aml" in data and "aml_screenings" not in data:
-            aml = data.pop("aml")
+        if "aml" in migrated and "aml_screenings" not in migrated:
+            aml = migrated.pop("aml")
             if aml and isinstance(aml, dict):
-                data["aml_screenings"] = [aml]
+                migrated["aml_screenings"] = [aml]
 
         # Normalize legacy review field
-        if "review" in data and "reviews" not in data:
-            rev = data.pop("review")
+        if "review" in migrated and "reviews" not in migrated:
+            rev = migrated.pop("review")
             if rev and isinstance(rev, dict):
-                data["reviews"] = [rev]
+                migrated["reviews"] = [rev]
 
-        return data
+        return migrated
 
     @property
     def document(self) -> DocumentData | None:
-        """Backward-compatible view of first document verification."""
+        """Backward-compatible read-only view of first document verification."""
         if not self.id_verifications:
             return None
         v = self.id_verifications[0]
@@ -234,31 +241,9 @@ class DecisionResponse(BaseModel):
             is_valid=is_valid,
         )
 
-    @document.setter
-    def document(self, val: DocumentData | None) -> None:
-        if val is None:
-            self.id_verifications = []
-        else:
-            self.id_verifications = [
-                IdVerificationResult(
-                    first_name=val.first_name,
-                    last_name=val.last_name,
-                    document_number=val.document_number,
-                    country=val.country,
-                    document_type=val.document_type,
-                    date_of_birth=val.date_of_birth,
-                    expiration_date=val.expiration_date,
-                    status=(
-                        "Approved"
-                        if val.is_valid
-                        else ("Declined" if val.is_valid is False else None)
-                    ),
-                )
-            ]
-
     @property
     def biometrics(self) -> BiometricsData | None:
-        """Backward-compatible view of biometric matching."""
+        """Backward-compatible read-only view of biometric matching."""
         if not self.liveness_checks and not self.face_matches:
             return None
         live = self.liveness_checks[0] if self.liveness_checks else None
@@ -270,34 +255,9 @@ class DecisionResponse(BaseModel):
             score=score,
         )
 
-    @biometrics.setter
-    def biometrics(self, val: BiometricsData | None) -> None:
-        if val is None:
-            self.liveness_checks = []
-            self.face_matches = []
-        else:
-            if val.liveness_check is not None or val.score is not None:
-                self.liveness_checks = [
-                    LivenessResult(
-                        status="Approved" if val.liveness_check else "Declined",
-                        score=val.score,
-                    )
-                ]
-            else:
-                self.liveness_checks = []
-            if val.face_match is not None:
-                self.face_matches = [
-                    FaceMatchResult(
-                        status="Approved" if val.face_match else "Declined",
-                        score=val.score,
-                    )
-                ]
-            else:
-                self.face_matches = []
-
     @property
     def aml(self) -> AMLData | None:
-        """Backward-compatible view of AML screening."""
+        """Backward-compatible read-only view of AML screening."""
         if not self.aml_screenings:
             return None
         s = self.aml_screenings[0]
@@ -307,34 +267,7 @@ class DecisionResponse(BaseModel):
             adverse_media_detected=s.adverse_media_detected,
         )
 
-    @aml.setter
-    def aml(self, val: AMLData | None) -> None:
-        if val is None:
-            self.aml_screenings = []
-        else:
-            self.aml_screenings = [
-                AMLScreeningResult(
-                    status=(
-                        "Declined"
-                        if (
-                            val.pep_detected or val.sanctions_detected or val.adverse_media_detected
-                        )
-                        else "Approved"
-                    ),
-                    pep_detected=val.pep_detected,
-                    sanctions_detected=val.sanctions_detected,
-                    adverse_media_detected=val.adverse_media_detected,
-                )
-            ]
-
     @property
     def review(self) -> ReviewData | None:
-        """Backward-compatible view of review data."""
+        """Backward-compatible read-only view of review data."""
         return self.reviews[0] if self.reviews else None
-
-    @review.setter
-    def review(self, val: ReviewData | None) -> None:
-        if val is None:
-            self.reviews = []
-        else:
-            self.reviews = [val]

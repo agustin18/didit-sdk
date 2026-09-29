@@ -14,9 +14,13 @@ from didit.errors import (
 )
 from didit.models.decision import (
     AMLData,
+    AMLScreeningResult,
     BiometricsData,
     DecisionResponse,
     DocumentData,
+    FaceMatchResult,
+    IdVerificationResult,
+    LivenessResult,
     ReviewData,
 )
 from didit.models.enums import Language, SessionStatus
@@ -82,19 +86,53 @@ class _SimulatedStorage:
 
         session.status = SessionStatus.APPROVED
         decision.status = SessionStatus.APPROVED
-        decision.document = document or DocumentData(
+
+        doc = document or DocumentData(
             document_type="passport",
             document_number="SIM12345678",
             country="ESP",
             is_valid=True,
         )
-        decision.biometrics = biometrics or BiometricsData(
-            face_match=True, liveness_check=True, score=0.99
-        )
-        decision.aml = aml or AMLData(
+        bio = biometrics or BiometricsData(face_match=True, liveness_check=True, score=0.99)
+        aml_data = aml or AMLData(
             pep_detected=False, sanctions_detected=False, adverse_media_detected=False
         )
-        decision.review = review
+
+        id_verif = IdVerificationResult(
+            document_type=doc.document_type,
+            document_number=doc.document_number,
+            country=doc.country,
+            first_name=doc.first_name,
+            last_name=doc.last_name,
+            date_of_birth=doc.date_of_birth,
+            expiration_date=doc.expiration_date,
+            status="Approved" if doc.is_valid is not False else "Declined",
+        )
+        decision.id_verifications = [id_verif]
+
+        liveness = LivenessResult(
+            status="Approved" if bio.liveness_check is not False else "Declined",
+            score=bio.score if bio.score is not None else (0.99 if bio.liveness_check else 0.0),
+        )
+        decision.liveness_checks = [liveness]
+
+        face_match = FaceMatchResult(
+            status="Approved" if bio.face_match is not False else "Declined",
+            score=bio.score if bio.score is not None else (0.99 if bio.face_match else 0.0),
+        )
+        decision.face_matches = [face_match]
+
+        is_aml_approved = not (
+            aml_data.pep_detected or aml_data.sanctions_detected or aml_data.adverse_media_detected
+        )
+        aml_result = AMLScreeningResult(
+            status="Approved" if is_aml_approved else "Declined",
+            pep_detected=aml_data.pep_detected,
+            sanctions_detected=aml_data.sanctions_detected,
+            adverse_media_detected=aml_data.adverse_media_detected,
+        )
+        decision.aml_screenings = [aml_result]
+        decision.reviews = [review] if review else []
         return decision.model_copy(deep=True)
 
     def decline(
@@ -110,7 +148,7 @@ class _SimulatedStorage:
 
         session.status = SessionStatus.DECLINED
         decision.status = SessionStatus.DECLINED
-        decision.review = ReviewData(reviewed_by="simulator", decision_reason=reason)
+        decision.reviews = [ReviewData(reviewed_by="simulator", decision_reason=reason)]
         return decision.model_copy(deep=True)
 
 
@@ -149,7 +187,7 @@ class SimulatedSessionsResource:
         interval: float = 2.0,
     ) -> DecisionResponse:
         decision = self.get_decision(session_id)
-        if not decision.status.is_terminal:
+        if not decision.status.is_poll_complete:
             raise DiditTimeoutError(
                 f"Polling simulated session '{session_id}' timed out without terminal outcome"
             )
@@ -191,7 +229,7 @@ class SimulatedAsyncSessionsResource:
         interval: float = 2.0,
     ) -> DecisionResponse:
         decision = await self.get_decision(session_id)
-        if not decision.status.is_terminal:
+        if not decision.status.is_poll_complete:
             raise DiditTimeoutError(
                 f"Polling simulated session '{session_id}' timed out without terminal outcome"
             )
@@ -250,7 +288,7 @@ class SimulatedDidit:
             "timestamp": now,
             "created_at": now,
             "event_id": f"evt_{uuid.uuid4().hex}",
-            "webhook_type": "session.updated",
+            "webhook_type": "status.updated",
             "environment": "sandbox",
             "workflow_id": session.workflow_id,
             "vendor_data": session.vendor_data,
@@ -318,7 +356,7 @@ class SimulatedAsyncDidit:
             "timestamp": now,
             "created_at": now,
             "event_id": f"evt_{uuid.uuid4().hex}",
-            "webhook_type": "session.updated",
+            "webhook_type": "status.updated",
             "environment": "sandbox",
             "workflow_id": session.workflow_id,
             "vendor_data": session.vendor_data,

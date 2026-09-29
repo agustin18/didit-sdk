@@ -79,7 +79,7 @@ class SessionsResource:
         deadline = time.time() + timeout
         while True:
             decision = self.get_decision(session_id)
-            if decision.status.is_terminal:
+            if decision.status.is_poll_complete:
                 return decision
             if time.time() + interval > deadline:
                 raise DiditTimeoutError(
@@ -141,7 +141,7 @@ class AsyncSessionsResource:
         deadline = time.time() + timeout
         while True:
             decision = await self.get_decision(session_id)
-            if decision.status.is_terminal:
+            if decision.status.is_poll_complete:
                 return decision
             if time.time() + interval > deadline:
                 raise DiditTimeoutError(

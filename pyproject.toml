@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "didit-sdk"
-version = "0.1.1"
+version = "0.1.2"
 description = "Unofficial Python SDK for Didit (didit.me) Identity Verification & KYC"
 readme = "README.md"
 license = "MIT"
@@ -72,6 +72,7 @@ include = [
     "/tests",
     "/README.md",
     "/LICENSE",
+    "/NOTICE",
     "/pyproject.toml",
 ]
 exclude = [

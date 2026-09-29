@@ -30,6 +30,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
+      - name: Check uv lockfile consistency
+        run: uv lock --check
+
       - name: Check code formatting
         run: uv run ruff format --check .
 
