@@ -1,3 +1,3 @@
 """Version definition for didit-sdk."""
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"

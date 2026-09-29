@@ -18,12 +18,13 @@ Unofficial, community-maintained Python client for the [Didit](https://didit.me)
 
 - **Ergonomic Sync & Async**: Dual-client architecture built on top of high-performance `httpx`.
 - **Strictly Typed & Validated**: 100% type annotations (PEP 561 compliant with `py.typed`) and robust Pydantic v2 domain models.
-- **Didit V3 API Alignment**: Full fidelity to upstream V3 schemas (`id_verifications[]`, `liveness_checks[]`, `face_matches[]`, `aml_screenings[]`, `reviews[]`) with forward compatibility (`extra="allow"`) and backward-compatible property accessors.
+- **Didit V3 API Alignment**: Full fidelity to upstream V3 schemas (`id_verifications[]`, `liveness_checks[]`, `face_matches[]`, `aml_screenings[]`, `reviews[]`, `warnings[]`) with forward compatibility (`extra="allow"`), verification warnings helper (`decision.has_warning(...)`), and backward-compatible property accessors.
 - **Complete Session Lifecycle**: Covers all 10 documented Didit session statuses (`Not Started`, `In Progress`, `In Review`, `Approved`, `Declined`, `Expired`, `Abandoned`, `Kyc Expired`, `Resubmitted`, `Awaiting User`) with granular state inspection (`is_decided`, `is_closed`, `requires_review`, `requires_user_action`).
-- **Cryptographic Security**: Constant-time HMAC-SHA256 signature verification (`X-Signature-V2` & `X-Signature`), full UTF-8 Unicode canonical JSON support (`ensure_ascii=False`, `allow_nan=False`), and authoritative signed body anti-replay verification with strict header matching.
-- **FastAPI Integration**: Plug-and-play `DiditWebhookGuard` dependency for securing webhook endpoints with zero boilerplate.
-- **Zero-Network Simulation Mode**: Built-in `SimulatedDidit` and `SimulatedAsyncDidit` to run unit tests and local end-to-end user flows completely offline without live credentials.
-- **Resilient Error Hierarchy**: Typed exceptions (`DiditAuthenticationError`, `DiditRateLimitError`, `DiditNotFoundError`, `DiditServerError`) with automated rate-limit retry duration parsing.
+- **Cryptographic Security & DoS Defense**: Constant-time HMAC-SHA256 signature verification (`X-Signature-V2` & `X-Signature`), full UTF-8 Unicode canonical JSON support (`ensure_ascii=False`, `allow_nan=False`), authoritative signed body anti-replay verification with strict header matching, and bounded body limits (HTTP 413) to prevent memory exhaustion.
+- **Webhook Deduplication**: Thread-safe in-memory and atomic Redis deduplication stores (`InMemoryWebhookDedupStore`, `RedisWebhookDedupStore`, `AsyncRedisWebhookDedupStore`) with configurable duplicate actions (`respond_ok`, `pass`, `raise`).
+- **Multi-Framework Integrations**: Native adapters for **FastAPI** (`DiditWebhookGuard`), **Django** (`@didit_webhook_view`), and **Flask** (`@didit_webhook`).
+- **Resilient HTTP Engine**: Deterministic jittered exponential backoff retries with fail-fast budget timers for transient errors (HTTP 429, 502, 503, 504).
+- **High-Fidelity Sandbox Parity**: Predefined outcome simulation slugs (`approve`, `decline_document_expired`, `decline_face_mismatch`, `decline_aml_hit`, `review_suspicious`, `resubmit`) and calibrated 0–100 biometric confidence scoring.
 
 ---
 
@@ -33,8 +34,16 @@ Unofficial, community-maintained Python client for the [Didit](https://didit.me)
 # Core SDK (httpx + pydantic)
 pip install didit-sdk
 
-# With FastAPI integration
+# With framework integrations
 pip install "didit-sdk[fastapi]"
+pip install "didit-sdk[django]"
+pip install "didit-sdk[flask]"
+
+# With Redis webhook deduplication store
+pip install "didit-sdk[redis]"
+
+# All optional dependencies
+pip install "didit-sdk[all]"
 ```
 
 ---
@@ -49,12 +58,13 @@ from didit import Didit, SessionStatus
 # Initialize client (falls back to DIDIT_API_KEY environment variable if omitted)
 client = Didit(api_key="your_api_key", webhook_secret="your_webhook_secret")
 
-# Create a verification session
+# Create a verification session with sandbox outcome scenario
 session = client.sessions.create(
     vendor_data="user_12345",
     workflow_id="wf_kyc_standard",
     callback="https://yourapp.com/kyc/complete",
     language="es",
+    sandbox_scenario="approve",
 )
 
 print(f"Verification URL: {session.url}")
@@ -67,6 +77,8 @@ decision = client.sessions.get_decision(session.session_id)
 decision = client.sessions.poll_decision(session.session_id, timeout=60.0, interval=2.0)
 if decision.status == SessionStatus.APPROVED:
     print(f"User approved! Document: {decision.document.document_number}")
+    if decision.has_warning("DOCUMENT_POOR_QUALITY"):
+        print("Note: Document quality was flagged.")
 ```
 
 ### 2. Asynchronous Client (`asyncio`)
@@ -84,7 +96,7 @@ async def main():
         )
         print(f"Session URL: {session.url}")
 
-        decision = await client.sessions.get_decision(session.session_id)
+        decision = await client.sessions.poll_decision(session.session_id, timeout=30.0)
         if decision.status.is_terminal:
             print(f"Final outcome: {decision.status}")
 
@@ -94,35 +106,64 @@ asyncio.run(main())
 
 ---
 
-## Securing Webhooks with FastAPI
+## Webhook Integrations & Deduplication
 
-Didit dispatches signed HTTP POST events upon verification completion. `didit-sdk` provides a dedicated FastAPI dependency to verify signatures in constant time and prevent replay attacks:
+Didit dispatches signed HTTP POST events upon verification completion. `didit-sdk` provides native, production-grade adapters with streaming body limits (HTTP 413) and distributed deduplication:
+
+### FastAPI
 
 ```python
 from fastapi import FastAPI, Depends
-from didit import WebhookPayload, SessionStatus
+from didit import WebhookPayload, SessionStatus, RedisWebhookDedupStore
 from didit.integrations.fastapi import DiditWebhookGuard
 
 app = FastAPI()
+guard = DiditWebhookGuard(
+    secret="whsec_...",
+    dedup_store=RedisWebhookDedupStore.from_url("redis://localhost:6379/0"),
+    duplicate_action="respond_ok",
+)
 
-# Guard reads secret from argument or DIDIT_WEBHOOK_SECRET env var
-webhook_guard = DiditWebhookGuard(secret="whsec_...")
 
-
-@app.post("/api/v1/webhooks/didit")
-async def handle_didit_event(
-    payload: WebhookPayload = Depends(webhook_guard),
-):
-    print(f"Received event for session: {payload.session_id}")
-
+@app.post("/webhooks/didit")
+async def handle_webhook(payload: WebhookPayload = Depends(guard)):
     if payload.status == SessionStatus.APPROVED:
-        # Mark user verified in your database
+        # Idempotently process approved KYC verification
         ...
-    elif payload.status == SessionStatus.DECLINED:
-        # Handle rejection
-        ...
+    return {"status": "ok"}
+```
 
-    return {"received": True}
+### Django
+
+```python
+from django.http import HttpRequest, HttpResponse
+from didit import WebhookPayload, SessionStatus
+from didit.integrations.django import didit_webhook_view
+
+
+@didit_webhook_view(secret="whsec_...")
+def my_webhook_view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+    if payload.status == SessionStatus.APPROVED:
+        ...
+    return HttpResponse(status=200)
+```
+
+### Flask
+
+```python
+from flask import Flask
+from didit import WebhookPayload, SessionStatus
+from didit.integrations.flask import didit_webhook
+
+app = Flask(__name__)
+
+
+@app.route("/webhooks/didit", methods=["POST"])
+@didit_webhook(secret="whsec_...")
+def handle_didit(payload: WebhookPayload):
+    if payload.status == SessionStatus.APPROVED:
+        ...
+    return {"status": "ok"}, 200
 ```
 
 ---
