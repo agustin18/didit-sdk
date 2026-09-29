@@ -31,10 +31,20 @@ from didit.webhooks import compute_signature
 SUPPORTED_SANDBOX_SCENARIOS: set[str] = {
     "approve",
     "decline_document_expired",
-    "decline_face_mismatch",
+    "decline_could_not_recognize_document",
+    "decline_mrz_validation",
+    "decline_minimum_age",
+    "decline_face_match_low_similarity",
+    "decline_liveness_attack",
     "decline_aml_hit",
-    "review_suspicious",
-    "resubmit",
+    "decline_ip_blocklist",
+    "decline_poa_address_mismatch",
+    "decline_nfc_chip_not_verified",
+    "decline_database_no_match",
+    "review_aml_possible_match",
+    "review_face_match_borderline",
+    "review_poa_partial_match",
+    "decline_kyb_registry_mismatch",
 }
 
 
@@ -85,82 +95,196 @@ class _SimulatedStorage:
         elif scenario == "decline_document_expired":
             session.status = SessionStatus.DECLINED
             decision.status = SessionStatus.DECLINED
+            warn = VerificationWarning(
+                code="DOCUMENT_EXPIRED",
+                message="Document has expired",
+                severity="high",
+            )
             decision.id_verifications = [
                 IdVerificationResult(
                     document_type="passport",
                     status="Declined",
                     country="ESP",
                     expiration_date="2020-01-01",
+                    warnings=[warn],
                 )
             ]
-            decision.warnings = [
-                VerificationWarning(
-                    code="DOCUMENT_EXPIRED",
-                    message="Document has expired",
-                    severity="high",
-                )
-            ]
+            decision.warnings = [warn]
             decision.reviews = [
                 ReviewData(reviewed_by="system", decision_reason="Document expired")
             ]
-        elif scenario == "decline_face_mismatch":
+        elif scenario == "decline_could_not_recognize_document":
             session.status = SessionStatus.DECLINED
             decision.status = SessionStatus.DECLINED
-            decision.face_matches = [FaceMatchResult(status="Declined", score=15.0)]
-            decision.warnings = [
-                VerificationWarning(
-                    code="FACE_MISMATCH",
-                    message="Facial biometric similarity below threshold",
-                    severity="high",
-                )
+            warn = VerificationWarning(
+                code="UNRECOGNIZED_DOCUMENT",
+                message="Document could not be recognized",
+                severity="high",
+            )
+            decision.id_verifications = [IdVerificationResult(status="Declined", warnings=[warn])]
+            decision.warnings = [warn]
+        elif scenario == "decline_mrz_validation":
+            session.status = SessionStatus.DECLINED
+            decision.status = SessionStatus.DECLINED
+            warn = VerificationWarning(
+                code="MRZ_CHECKSUM_FAILED",
+                message="MRZ checksum validation failed",
+                severity="high",
+            )
+            decision.id_verifications = [IdVerificationResult(status="Declined", warnings=[warn])]
+            decision.warnings = [warn]
+        elif scenario == "decline_minimum_age":
+            session.status = SessionStatus.DECLINED
+            decision.status = SessionStatus.DECLINED
+            warn = VerificationWarning(
+                code="MINIMUM_AGE_NOT_MET",
+                message="Minimum age requirement not met",
+                severity="high",
+            )
+            decision.id_verifications = [
+                IdVerificationResult(status="Declined", date_of_birth="2015-01-01", warnings=[warn])
             ]
+            decision.warnings = [warn]
+        elif scenario == "decline_face_match_low_similarity":
+            session.status = SessionStatus.DECLINED
+            decision.status = SessionStatus.DECLINED
+            warn = VerificationWarning(
+                code="LOW_FACE_MATCH_SIMILARITY",
+                message="Facial biometric similarity below threshold",
+                severity="high",
+            )
+            decision.face_matches = [
+                FaceMatchResult(status="Declined", score=15.0, warnings=[warn])
+            ]
+            decision.warnings = [warn]
             decision.reviews = [ReviewData(reviewed_by="system", decision_reason="Face mismatch")]
+        elif scenario == "decline_liveness_attack":
+            session.status = SessionStatus.DECLINED
+            decision.status = SessionStatus.DECLINED
+            warn = VerificationWarning(
+                code="SPOOF_DETECTED",
+                message="Liveness spoof presentation attack detected",
+                severity="critical",
+            )
+            decision.liveness_checks = [
+                LivenessResult(status="Declined", score=5.0, warnings=[warn])
+            ]
+            decision.warnings = [warn]
         elif scenario == "decline_aml_hit":
             session.status = SessionStatus.DECLINED
             decision.status = SessionStatus.DECLINED
+            warn = VerificationWarning(
+                code="AML_MATCH_CONFIRMED",
+                message="Confirmed match on sanctions list",
+                severity="critical",
+            )
             decision.aml_screenings = [
                 AMLScreeningResult(
                     status="Declined",
                     pep_detected=True,
                     sanctions_detected=True,
+                    warnings=[warn],
                 )
             ]
-            decision.warnings = [
-                VerificationWarning(
-                    code="AML_SANCTION_MATCH",
-                    message="Matches identified on international sanctions list",
-                    severity="critical",
-                )
-            ]
+            decision.warnings = [warn]
             decision.reviews = [
                 ReviewData(reviewed_by="system", decision_reason="AML screening match")
             ]
-        elif scenario == "review_suspicious":
+        elif scenario == "decline_ip_blocklist":
+            session.status = SessionStatus.DECLINED
+            decision.status = SessionStatus.DECLINED
+            warn = VerificationWarning(
+                code="IP_RISK_HIGH",
+                message="Client IP address flagged on security blocklist",
+                severity="high",
+            )
+            decision.ip_analyses = [{"status": "Declined", "risk_level": "high"}]
+            decision.warnings = [warn]
+        elif scenario == "decline_poa_address_mismatch":
+            session.status = SessionStatus.DECLINED
+            decision.status = SessionStatus.DECLINED
+            warn = VerificationWarning(
+                code="POA_ADDRESS_MISMATCH",
+                message="Proof of address does not match provided address",
+                severity="high",
+            )
+            decision.poa_verifications = [{"status": "Declined"}]
+            decision.warnings = [warn]
+        elif scenario == "decline_nfc_chip_not_verified":
+            session.status = SessionStatus.DECLINED
+            decision.status = SessionStatus.DECLINED
+            warn = VerificationWarning(
+                code="NFC_CHIP_FAILED",
+                message="NFC chip cryptographic authentication failed",
+                severity="high",
+            )
+            decision.nfc_verifications = [{"status": "Declined", "chip_authenticated": False}]
+            decision.warnings = [warn]
+        elif scenario == "decline_database_no_match":
+            session.status = SessionStatus.DECLINED
+            decision.status = SessionStatus.DECLINED
+            warn = VerificationWarning(
+                code="DATABASE_NO_MATCH",
+                message="No record found in authoritative database",
+                severity="high",
+            )
+            decision.database_validations = [{"status": "Declined"}]
+            decision.warnings = [warn]
+        elif scenario == "review_aml_possible_match":
             session.status = SessionStatus.IN_REVIEW
             decision.status = SessionStatus.IN_REVIEW
-            decision.warnings = [
-                VerificationWarning(
-                    code="SUSPICIOUS_DOCUMENT",
-                    message="Document exhibits visual irregularities",
-                    severity="medium",
+            warn = VerificationWarning(
+                code="POSSIBLE_MATCH_FOUND",
+                message="Potential name match on AML watchlist",
+                severity="medium",
+            )
+            decision.aml_screenings = [
+                AMLScreeningResult(status="In Review", pep_detected=True, warnings=[warn])
+            ]
+            decision.warnings = [warn]
+            decision.reviews = [
+                ReviewData(
+                    reviewed_by="compliance_lead",
+                    decision_reason="Potential AML hit requires human analyst review",
                 )
             ]
+        elif scenario == "review_face_match_borderline":
+            session.status = SessionStatus.IN_REVIEW
+            decision.status = SessionStatus.IN_REVIEW
+            warn = VerificationWarning(
+                code="LOW_FACE_MATCH_SIMILARITY",
+                message="Borderline facial similarity score",
+                severity="medium",
+            )
+            decision.face_matches = [
+                FaceMatchResult(status="In Review", score=68.0, warnings=[warn])
+            ]
+            decision.warnings = [warn]
             decision.reviews = [
                 ReviewData(
                     reviewed_by="fraud_engine",
-                    decision_reason="Flagged for manual review",
+                    decision_reason="Borderline face match requires manual inspection",
                 )
             ]
-        elif scenario == "resubmit":
-            session.status = SessionStatus.RESUBMITTED
-            decision.status = SessionStatus.RESUBMITTED
-            decision.warnings = [
-                VerificationWarning(
-                    code="IMAGE_BLURRY",
-                    message="Front of identity document was out of focus",
-                    severity="medium",
-                )
-            ]
+        elif scenario == "review_poa_partial_match":
+            session.status = SessionStatus.IN_REVIEW
+            decision.status = SessionStatus.IN_REVIEW
+            warn = VerificationWarning(
+                code="POA_PARTIAL_MATCH",
+                message="Proof of address partially matches profile",
+                severity="medium",
+            )
+            decision.poa_verifications = [{"status": "In Review"}]
+            decision.warnings = [warn]
+        elif scenario == "decline_kyb_registry_mismatch":
+            session.status = SessionStatus.DECLINED
+            decision.status = SessionStatus.DECLINED
+            warn = VerificationWarning(
+                code="REGISTRY_MISMATCH",
+                message="Company registry data mismatch",
+                severity="high",
+            )
+            decision.warnings = [warn]
 
         return session.model_copy(deep=True)
 

@@ -58,3 +58,5 @@ class WebhookPayload(BaseModel):
             f"status={self.status.value!r}, "
             f"webhook_type={self.webhook_type!r})"
         )
+
+    __str__ = __repr__

@@ -4,13 +4,14 @@ import pytest
 import respx
 from httpx import Response
 
-from didit.client import Didit
+from didit.client import AsyncDidit, Didit
 from didit.config import DiditConfig
 from didit.errors import (
     DiditAPIError,
     DiditAuthenticationError,
     DiditConfigurationError,
     DiditNotFoundError,
+    DiditPermissionError,
     DiditRateLimitError,
     DiditServerError,
     DiditTimeoutError,
@@ -94,11 +95,11 @@ class TestDiditSyncClient:
         resp = client.sessions.create(
             vendor_data="usr_sb",
             workflow_id="wf_test",
-            sandbox_scenario="decline_face_mismatch",
+            sandbox_scenario="decline_face_match_low_similarity",
         )
         assert route.called
         req_json = json.loads(route.calls.last.request.content.decode("utf-8"))
-        assert req_json["sandbox_scenario"] == "decline_face_mismatch"
+        assert req_json["sandbox_scenario"] == "decline_face_match_low_similarity"
         assert resp.session_id == "sess_sb"
 
     @respx.mock
@@ -240,16 +241,25 @@ class TestDiditSyncClient:
             client.sessions.poll_decision("sess_503", timeout=1.0, tolerate_transient_errors=False)
 
     @respx.mock
+    def test_poll_decision_non_transient_5xx_raises_immediately(
+        self, client: Didit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/sess_501/decision/").mock(
+            return_value=Response(501, json={"error": "not implemented"})
+        )
+        with pytest.raises(DiditServerError) as exc_info:
+            client.sessions.poll_decision("sess_501", timeout=5.0, tolerate_transient_errors=True)
+        assert exc_info.value.status_code == 501
+
+    @respx.mock
     def test_poll_decision_transient_error_timeout_exhausted(
         self, client: Didit, base_url: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         respx.get(f"{base_url}/session/sess_to/decision/").mock(
             return_value=Response(503, json={"error": "service down"})
         )
-        ticks = [100.0, 100.0, 105.0]
-        monkeypatch.setattr(
-            "didit.resources.sessions.time.monotonic", lambda: ticks.pop(0) if ticks else 105.0
-        )
+        ticks = [100.0, 100.0, 100.0, 105.0]
+        monkeypatch.setattr("time.monotonic", lambda: ticks.pop(0) if ticks else 105.0)
         with pytest.raises(DiditTimeoutError) as exc_info:
             client.sessions.poll_decision(
                 "sess_to", timeout=2.0, interval=0.01, tolerate_transient_errors=True
@@ -261,7 +271,7 @@ class TestDiditSyncClient:
         ("status_code", "exc_type"),
         [
             (401, DiditAuthenticationError),
-            (403, DiditAuthenticationError),
+            (403, DiditPermissionError),
             (404, DiditNotFoundError),
             (500, DiditServerError),
             (503, DiditServerError),
@@ -377,14 +387,33 @@ class TestDiditSyncClient:
         c.close()
 
     def test_requestor_property_and_with_options(self, client: Didit, base_url: str) -> None:
+        from didit.errors import DiditConfigurationError
         from didit.transport import RequestOptions, _SyncRequestor
 
         assert isinstance(client.requestor, _SyncRequestor)
 
-        bound = client.with_options(RequestOptions(idempotency_key="bound_key"))
+        bound = client.with_options(RequestOptions(timeout=15.0))
         assert bound is not client
         assert bound.requestor._default_options is not None
-        assert bound.requestor._default_options.idempotency_key == "bound_key"
+        assert bound.requestor._default_options.timeout == 15.0
+
+        with pytest.raises(DiditConfigurationError) as exc_info:
+            client.with_options(RequestOptions(idempotency_key="bound_key"))
+        assert "idempotency_key cannot be set as a client-level default option" in str(
+            exc_info.value
+        )
+
+        with pytest.raises(DiditConfigurationError):
+            Didit(
+                api_key="test_key",
+                default_options=RequestOptions(idempotency_key="client_level_key"),
+            )
+
+        with pytest.raises(DiditConfigurationError):
+            AsyncDidit(
+                api_key="test_key",
+                default_options=RequestOptions(idempotency_key="client_level_key"),
+            )
 
     @respx.mock
     def test_sessions_resource_raw_client_compat(self, base_url: str) -> None:

@@ -1,4 +1,3 @@
-import inspect
 import os
 from collections.abc import Callable
 from typing import Literal
@@ -9,6 +8,7 @@ from didit.config import DEFAULT_WEBHOOK_MAX_AGE_SECONDS
 from didit.dedup import (
     AsyncWebhookDedupStore,
     WebhookDedupStore,
+    aclaim_webhook_event,
     compute_dedup_key,
 )
 from didit.errors import DiditConfigurationError, DiditSignatureError
@@ -133,16 +133,9 @@ class DiditWebhookGuard:
                 )
                 dedup_key = compute_dedup_key(payload, signature=sig)
 
-            if hasattr(self.dedup_store, "aclaim") and callable(self.dedup_store.aclaim):
-                is_new = await self.dedup_store.aclaim(
-                    dedup_key, ttl_seconds=self.dedup_ttl_seconds
-                )
-            else:
-                claim_res = self.dedup_store.claim(dedup_key, ttl_seconds=self.dedup_ttl_seconds)
-                if inspect.isawaitable(claim_res):
-                    is_new = bool(await claim_res)
-                else:
-                    is_new = bool(claim_res)
+            is_new = await aclaim_webhook_event(
+                self.dedup_store, dedup_key, ttl_seconds=self.dedup_ttl_seconds
+            )
 
             if not is_new:
                 if self.duplicate_action == "respond_ok":

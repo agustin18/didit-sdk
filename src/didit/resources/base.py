@@ -1,6 +1,7 @@
 """Base utilities and error handling for Didit API resources."""
 
-import contextlib
+import datetime
+import email.utils
 
 import httpx
 
@@ -12,6 +13,26 @@ from didit.errors import (
     DiditRateLimitError,
     DiditServerError,
 )
+
+
+def parse_retry_after(retry_after_header: str | None) -> float | None:
+    """Parse Retry-After header into seconds (supporting int/float and RFC 7231 date)."""
+    if not retry_after_header:
+        return None
+    header_val = retry_after_header.strip()
+    try:
+        val = float(header_val)
+        return max(0.0, val)
+    except ValueError:
+        pass
+
+    try:
+        dt = email.utils.parsedate_to_datetime(header_val)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        delta = (dt - now).total_seconds()
+        return max(0.0, delta)
+    except Exception:
+        return None
 
 
 def handle_http_error(response: httpx.Response) -> None:
@@ -72,11 +93,7 @@ def handle_http_error(response: httpx.Response) -> None:
             details=details,
         )
     if status == 429:
-        retry_after_str = headers.get("retry-after")
-        retry_after: float | None = None
-        if retry_after_str:
-            with contextlib.suppress(ValueError):
-                retry_after = float(retry_after_str)
+        retry_after = parse_retry_after(headers.get("retry-after"))
         raise DiditRateLimitError(
             message,
             status_code=status,

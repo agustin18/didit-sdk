@@ -444,25 +444,32 @@ class TestWebhookPayload:
         assert "IdVerificationResult" in id_repr
 
         live = LivenessResult(node_id="live_1", status="Approved", score=99.0)
-        assert repr(live) == "LivenessResult(node_id='live_1', status='Approved', score=99.0)"
+        assert repr(live) == "LivenessResult(node_id='live_1', status='Approved')"
+        assert str(live) == repr(live)
 
         face = FaceMatchResult(node_id="face_1", status="Approved", score=98.5)
-        assert repr(face) == "FaceMatchResult(node_id='face_1', status='Approved', score=98.5)"
+        assert repr(face) == "FaceMatchResult(node_id='face_1', status='Approved')"
+        assert str(face) == repr(face)
 
         aml = AMLScreeningResult(node_id="aml_1", status="Approved", pep_detected=False)
         assert repr(aml) == "AMLScreeningResult(node_id='aml_1', status='Approved')"
+        assert str(aml) == repr(aml)
 
         doc = DocumentData(document_type="id_card", country="ESP", is_valid=True)
-        assert repr(doc) == "DocumentData(document_type='id_card', country='ESP', is_valid=True)"
+        assert repr(doc) == "DocumentData(document_type='id_card', is_valid=True)"
+        assert str(doc) == repr(doc)
 
         bio = BiometricsData(face_match=True, liveness_check=True, score=98.0)
-        assert repr(bio) == "BiometricsData(face_match=True, liveness_check=True, score=98.0)"
+        assert repr(bio) == "BiometricsData(face_match=True, liveness_check=True)"
+        assert str(bio) == repr(bio)
 
         aml_data = AMLData(pep_detected=False, sanctions_detected=False)
         assert repr(aml_data) == "AMLData(pep_detected=False, sanctions_detected=False)"
+        assert str(aml_data) == repr(aml_data)
 
         rev = ReviewData(reviewed_by="auditor_42", decision_reason="Verified clean")
-        assert repr(rev) == "ReviewData(reviewed_by='auditor_42', decision_reason='Verified clean')"
+        assert repr(rev) == "ReviewData(reviewed_by='auditor_42', has_reason=True)"
+        assert str(rev) == repr(rev)
 
         dec = DecisionResponse(
             session_id="sess_pii_check",
@@ -557,7 +564,7 @@ class TestWebhookPayload:
         assert raw["session_id"] == raw_copy["session_id"]
 
     def test_verification_warnings_model_and_methods(self) -> None:
-        from didit.models.decision import VerificationWarning
+        from didit.models.decision import IdVerificationResult, VerificationWarning
 
         warning = VerificationWarning(
             code="DOC_EXPIRING_SOON",
@@ -579,6 +586,36 @@ class TestWebhookPayload:
         assert decision.has_warning("DOC_EXPIRING_SOON") is True
         assert decision.has_warning("UNKNOWN_WARNING") is False
         assert decision.warning_codes == ["DOC_EXPIRING_SOON"]
+
+        coerced = VerificationWarning.model_validate("STRING_WARN")
+        assert coerced.code == "STRING_WARN"
+        assert coerced.message == "STRING_WARN"
+
+        # Heterogeneous warning structures in check nodes
+        raw_node = IdVerificationResult()
+        object.__setattr__(
+            raw_node,
+            "warnings",
+            [
+                VerificationWarning(code="OBJ_WARN", message="from obj"),
+                {"code": "DICT_WARN", "message": "from dict"},
+                {"code": "DICT_WARN", "message": "duplicate dict"},
+                VerificationWarning(code=None, message="no code"),
+                "STR_WARN",
+                12345,  # Unhandled type skipped
+            ],
+        )
+        nested_dec = DecisionResponse(
+            session_id="sess_hetero",
+            status=SessionStatus.APPROVED,
+            id_verifications=[raw_node],
+        )
+        assert nested_dec.has_warning("OBJ_WARN") is True
+        assert nested_dec.has_warning("DICT_WARN") is True
+        assert nested_dec.has_warning("STR_WARN") is True
+        assert "OBJ_WARN" in nested_dec.warning_codes
+        assert "DICT_WARN" in nested_dec.warning_codes
+        assert "STR_WARN" in nested_dec.warning_codes
 
         dump = decision.redacted_dump()
         assert "warnings" in dump

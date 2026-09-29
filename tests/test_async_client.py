@@ -11,6 +11,7 @@ from didit.errors import (
     DiditAuthenticationError,
     DiditConfigurationError,
     DiditNotFoundError,
+    DiditPermissionError,
     DiditRateLimitError,
     DiditServerError,
     DiditTimeoutError,
@@ -267,16 +268,28 @@ class TestAsyncDiditClient:
         await async_client.aclose()
 
     @respx.mock
+    async def test_async_poll_decision_non_transient_5xx_raises_immediately(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/sess_501_async/decision/").mock(
+            return_value=Response(501, json={"error": "not implemented"})
+        )
+        with pytest.raises(DiditServerError) as exc_info:
+            await async_client.sessions.poll_decision(
+                "sess_501_async", timeout=5.0, tolerate_transient_errors=True
+            )
+        assert exc_info.value.status_code == 501
+        await async_client.aclose()
+
+    @respx.mock
     async def test_async_poll_decision_transient_error_timeout_exhausted(
         self, async_client: AsyncDidit, base_url: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         respx.get(f"{base_url}/session/sess_to_async/decision/").mock(
             return_value=Response(503, json={"error": "service down"})
         )
-        ticks = [100.0, 100.0, 105.0]
-        monkeypatch.setattr(
-            "didit.resources.sessions.time.monotonic", lambda: ticks.pop(0) if ticks else 105.0
-        )
+        ticks = [100.0, 100.0, 100.0, 105.0]
+        monkeypatch.setattr("time.monotonic", lambda: ticks.pop(0) if ticks else 105.0)
         with pytest.raises(DiditTimeoutError) as exc_info:
             await async_client.sessions.poll_decision(
                 "sess_to_async", timeout=2.0, interval=0.01, tolerate_transient_errors=True
@@ -289,7 +302,7 @@ class TestAsyncDiditClient:
         ("status_code", "exc_type"),
         [
             (401, DiditAuthenticationError),
-            (403, DiditAuthenticationError),
+            (403, DiditPermissionError),
             (404, DiditNotFoundError),
             (500, DiditServerError),
             (503, DiditServerError),
@@ -379,10 +392,16 @@ class TestAsyncDiditClient:
 
         assert isinstance(async_client.requestor, _AsyncRequestor)
 
-        bound = async_client.with_options(RequestOptions(idempotency_key="async_bound_key"))
+        bound = async_client.with_options(RequestOptions(timeout=15.0))
         assert bound is not async_client
         assert bound.requestor._default_options is not None
-        assert bound.requestor._default_options.idempotency_key == "async_bound_key"
+        assert bound.requestor._default_options.timeout == 15.0
+
+        with pytest.raises(DiditConfigurationError) as exc_info:
+            async_client.with_options(RequestOptions(idempotency_key="async_bound_key"))
+        assert "idempotency_key cannot be set as a client-level default option" in str(
+            exc_info.value
+        )
         await async_client.aclose()
 
     @respx.mock

@@ -131,18 +131,15 @@ def timestamp_is_fresh(
     return abs(int(time.time()) - ts) <= max_age_seconds
 
 
-def verify_webhook_signature(
+def _verify_decoded_webhook(
     raw_body: bytes,
+    body: dict[str, Any],
     headers: Mapping[str, str],
     secret: str,
     *,
     max_age_seconds: int | None = None,
 ) -> bool:
-    """Verify cryptographic authenticity and freshness of an incoming Didit webhook.
-
-    Enforces authoritative signed timestamp freshness (H-01), UTF-8 canonical JSON (H-02),
-    and safe signature validation avoiding remote 500s (M-04).
-    """
+    """Internal single-pass signature and freshness verification for pre-parsed JSON."""
     if not secret:
         return False
 
@@ -155,11 +152,6 @@ def verify_webhook_signature(
     if not signature_v2 and not signature_v1:
         return False
 
-    try:
-        body = decode_webhook_json(raw_body)
-    except (ValueError, UnicodeDecodeError, RecursionError):
-        return False
-
     signed_timestamp = body.get("timestamp")
     if signed_timestamp is None:
         signed_timestamp = body.get("created_at")
@@ -170,7 +162,6 @@ def verify_webhook_signature(
     if not timestamp_is_fresh(signed_timestamp, max_age):
         return False
 
-    # Header is defense-in-depth: if present, it must strictly match signed timestamp string
     header_timestamp = lower_headers.get("x-timestamp")
     if header_timestamp is not None and header_timestamp != str(signed_timestamp):
         return False
@@ -191,6 +182,32 @@ def verify_webhook_signature(
     return False
 
 
+def verify_webhook_signature(
+    raw_body: bytes,
+    headers: Mapping[str, str],
+    secret: str,
+    *,
+    max_age_seconds: int | None = None,
+) -> bool:
+    """Verify cryptographic authenticity and freshness of an incoming Didit webhook.
+
+    Enforces authoritative signed timestamp freshness (H-01), UTF-8 canonical JSON (H-02),
+    and safe signature validation avoiding remote 500s (M-04).
+    """
+    try:
+        body = decode_webhook_json(raw_body)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return False
+
+    return _verify_decoded_webhook(
+        raw_body,
+        body,
+        headers,
+        secret,
+        max_age_seconds=max_age_seconds,
+    )
+
+
 def parse_webhook_payload(
     raw_body: bytes,
     headers: Mapping[str, str],
@@ -208,7 +225,13 @@ def parse_webhook_payload(
     except (ValueError, UnicodeDecodeError, RecursionError) as err:
         raise DiditSignatureError("Invalid JSON or unsupported webhook format") from err
 
-    if not verify_webhook_signature(raw_body, headers, secret, max_age_seconds=max_age_seconds):
+    if not _verify_decoded_webhook(
+        raw_body,
+        body_dict,
+        headers,
+        secret,
+        max_age_seconds=max_age_seconds,
+    ):
         raise DiditSignatureError("Webhook signature verification failed or timestamp is expired")
 
     parsed = WebhookPayload.model_validate(body_dict)
