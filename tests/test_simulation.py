@@ -192,3 +192,78 @@ class TestSimulatedAsyncDidit:
         client.approve_session(session.session_id)
         polled = await client.sessions.poll_decision(session.session_id)
         assert polled.status == SessionStatus.APPROVED
+
+    def test_simulation_biometrics_0_to_100_scale(self) -> None:
+        client = SimulatedDidit()
+        session = client.sessions.create(vendor_data="u_scale", workflow_id="wf")
+        decision = client.approve_session(session.session_id)
+        assert decision.biometrics is not None
+        assert decision.biometrics.score == 99.0
+        assert decision.liveness_checks[0].score == 99.0
+        assert decision.face_matches[0].score == 99.0
+
+    @pytest.mark.parametrize(
+        ("scenario", "expected_status", "expected_warning_code"),
+        [
+            ("approve", SessionStatus.APPROVED, None),
+            ("decline_document_expired", SessionStatus.DECLINED, "DOCUMENT_EXPIRED"),
+            ("decline_face_mismatch", SessionStatus.DECLINED, "FACE_MISMATCH"),
+            ("decline_aml_hit", SessionStatus.DECLINED, "AML_SANCTION_MATCH"),
+            ("review_suspicious", SessionStatus.IN_REVIEW, "SUSPICIOUS_DOCUMENT"),
+            ("resubmit", SessionStatus.RESUBMITTED, "IMAGE_BLURRY"),
+        ],
+    )
+    def test_sandbox_scenarios(
+        self,
+        scenario: str,
+        expected_status: SessionStatus,
+        expected_warning_code: str | None,
+    ) -> None:
+        client = SimulatedDidit()
+        session = client.sessions.create(
+            vendor_data="custom_user",
+            workflow_id="wf_sandbox",
+            sandbox_scenario=scenario,
+        )
+        assert session.status == expected_status
+        decision = client.sessions.get_decision(session.session_id)
+        assert decision.status == expected_status
+
+        if expected_warning_code:
+            assert decision.has_warning(expected_warning_code) is True
+            assert expected_warning_code in decision.warning_codes
+
+    def test_sandbox_scenario_via_vendor_data(self) -> None:
+        client = SimulatedDidit()
+        session = client.sessions.create(
+            vendor_data="decline_document_expired",
+            workflow_id="wf_sandbox",
+        )
+        assert session.status == SessionStatus.DECLINED
+        decision = client.sessions.get_decision(session.session_id)
+        assert decision.status == SessionStatus.DECLINED
+        assert decision.has_warning("DOCUMENT_EXPIRED") is True
+
+    def test_invalid_sandbox_scenario_raises(self) -> None:
+        from didit.errors import DiditConfigurationError
+
+        client = SimulatedDidit()
+        with pytest.raises(DiditConfigurationError, match="Unsupported sandbox scenario"):
+            client.sessions.create(
+                vendor_data="user_err",
+                workflow_id="wf",
+                sandbox_scenario="invalid_scenario_slug",
+            )
+
+    @pytest.mark.asyncio
+    async def test_async_sandbox_scenario(self) -> None:
+        client = SimulatedAsyncDidit()
+        session = await client.sessions.create(
+            vendor_data="user_async_sb",
+            workflow_id="wf",
+            sandbox_scenario="review_suspicious",
+        )
+        assert session.status == SessionStatus.IN_REVIEW
+        decision = await client.sessions.get_decision(session.session_id)
+        assert decision.status == SessionStatus.IN_REVIEW
+        assert decision.has_warning("SUSPICIOUS_DOCUMENT") is True

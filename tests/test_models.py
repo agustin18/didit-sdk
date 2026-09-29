@@ -555,3 +555,40 @@ class TestWebhookPayload:
         assert "aml" in raw
         assert "review" in raw
         assert raw["session_id"] == raw_copy["session_id"]
+
+    def test_verification_warnings_model_and_methods(self) -> None:
+        from didit.models.decision import VerificationWarning
+
+        warning = VerificationWarning(
+            code="DOC_EXPIRING_SOON",
+            message="Document expires in less than 30 days",
+            severity="low",
+            details={"days_left": 15},
+        )
+        assert warning.code == "DOC_EXPIRING_SOON"
+        assert warning.message == "Document expires in less than 30 days"
+        assert warning.severity == "low"
+        assert warning.details == {"days_left": 15}
+        assert "DOC_EXPIRING_SOON" in repr(warning)
+
+        decision = DecisionResponse(
+            session_id="sess_warn",
+            status=SessionStatus.APPROVED,
+            warnings=[warning],
+        )
+        assert decision.has_warning("DOC_EXPIRING_SOON") is True
+        assert decision.has_warning("UNKNOWN_WARNING") is False
+        assert decision.warning_codes == ["DOC_EXPIRING_SOON"]
+
+        dump = decision.redacted_dump()
+        assert "warnings" in dump
+        assert len(dump["warnings"]) == 1
+        assert dump["warnings"][0]["code"] == "DOC_EXPIRING_SOON"
+
+    def test_create_session_request_sandbox_scenario(self) -> None:
+        req = CreateSessionRequest(
+            workflow_id="wf_1",
+            vendor_data="user_1",
+            sandbox_scenario="decline_document_expired",
+        )
+        assert req.sandbox_scenario == "decline_document_expired"

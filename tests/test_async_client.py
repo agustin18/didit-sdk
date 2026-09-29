@@ -1,4 +1,4 @@
-"""Unit tests for the asynchronous Didit client."""
+import json
 
 import pytest
 import respx
@@ -76,6 +76,32 @@ class TestAsyncDiditClient:
         assert req.headers["content-type"] == "application/json"
         assert resp.session_id == "sess_async_123"
         assert resp.status == SessionStatus.IN_PROGRESS
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_create_session_with_sandbox_scenario(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        route = respx.post(f"{base_url}/session/").mock(
+            return_value=Response(
+                201,
+                json={
+                    "session_id": "sess_sb_async",
+                    "status": "In Progress",
+                    "workflow_id": "wf_test",
+                    "vendor_data": "usr_sb",
+                },
+            )
+        )
+        resp = await async_client.sessions.create(
+            vendor_data="usr_sb",
+            workflow_id="wf_test",
+            sandbox_scenario="approve",
+        )
+        assert route.called
+        req_json = json.loads(route.calls.last.request.content.decode("utf-8"))
+        assert req_json["sandbox_scenario"] == "approve"
+        assert resp.session_id == "sess_sb_async"
         await async_client.aclose()
 
     @respx.mock

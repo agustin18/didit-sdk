@@ -45,6 +45,7 @@ class SessionsResource:
         workflow_id: str,
         callback: str | None = None,
         language: Language | str | None = None,
+        sandbox_scenario: str | None = None,
         options: RequestOptions | None = None,
     ) -> SessionResponse:
         """Create a new verification session.
@@ -54,6 +55,8 @@ class SessionsResource:
             workflow_id: Didit workflow ID configuration.
             callback: Optional URL Didit will redirect the user to after completing verification.
             language: Optional UI language code for the hosted flow (e.g. 'es', 'en').
+            sandbox_scenario: Optional Didit sandbox outcome slug e.g. 'approve',
+                'decline_document_expired'.
 
         Returns:
             SessionResponse: Containing session_id, url, token, and status.
@@ -64,6 +67,7 @@ class SessionsResource:
             vendor_data=vendor_data,
             callback=callback,
             language=lang_str,
+            sandbox_scenario=sandbox_scenario,
         ).model_dump(exclude_none=True)
 
         resp = self._requestor.request("POST", "/session/", json=payload, options=options)
@@ -196,6 +200,7 @@ class AsyncSessionsResource:
         workflow_id: str,
         callback: str | None = None,
         language: Language | str | None = None,
+        sandbox_scenario: str | None = None,
         options: RequestOptions | None = None,
     ) -> SessionResponse:
         """Create a new verification session asynchronously."""
@@ -205,6 +210,7 @@ class AsyncSessionsResource:
             vendor_data=vendor_data,
             callback=callback,
             language=lang_str,
+            sandbox_scenario=sandbox_scenario,
         ).model_dump(exclude_none=True)
 
         resp = await self._requestor.request("POST", "/session/", json=payload, options=options)

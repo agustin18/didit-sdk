@@ -1,4 +1,4 @@
-"""Unit tests for the synchronous Didit client."""
+import json
 
 import pytest
 import respx
@@ -77,6 +77,29 @@ class TestDiditSyncClient:
         assert resp.session_id == "sess_123"
         assert resp.status == SessionStatus.IN_PROGRESS
         assert resp.url == "https://verify.didit.me/sess_123"
+
+    @respx.mock
+    def test_create_session_with_sandbox_scenario(self, client: Didit, base_url: str) -> None:
+        route = respx.post(f"{base_url}/session/").mock(
+            return_value=Response(
+                201,
+                json={
+                    "session_id": "sess_sb",
+                    "status": "In Progress",
+                    "workflow_id": "wf_test",
+                    "vendor_data": "usr_sb",
+                },
+            )
+        )
+        resp = client.sessions.create(
+            vendor_data="usr_sb",
+            workflow_id="wf_test",
+            sandbox_scenario="decline_face_mismatch",
+        )
+        assert route.called
+        req_json = json.loads(route.calls.last.request.content.decode("utf-8"))
+        assert req_json["sandbox_scenario"] == "decline_face_mismatch"
+        assert resp.session_id == "sess_sb"
 
     @respx.mock
     def test_get_session_success(self, client: Didit, base_url: str) -> None:
