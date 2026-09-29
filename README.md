@@ -7,10 +7,10 @@
 [![Checked with mypy](https://img.shields.io/badge/mypy-strict-blue)](https://mypy-lang.org/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-Official-grade, community-maintained Python SDK for [Didit](https://didit.me) Identity Verification & KYC.
+Unofficial, community-maintained Python client for the [Didit](https://didit.me) Identity Verification API.
 
 > [!IMPORTANT]
-> **Legal Disclaimer**: This is an independent, community-driven open-source project and is **not** officially affiliated with, endorsed by, or sponsored by Didit Protocol Inc. All trademarks, service marks, and company names are the property of their respective owners.
+> **Legal Notice**: This is an independent, community-driven open-source project and is **not** officially affiliated with, endorsed by, or sponsored by Didit Protocol Inc. All trademarks, service marks, and company names are the property of their respective owners. See [NOTICE](NOTICE) for details.
 
 ---
 
@@ -18,7 +18,9 @@ Official-grade, community-maintained Python SDK for [Didit](https://didit.me) Id
 
 - **Ergonomic Sync & Async**: Dual-client architecture built on top of high-performance `httpx`.
 - **Strictly Typed & Validated**: 100% type annotations (PEP 561 compliant with `py.typed`) and robust Pydantic v2 domain models.
-- **Cryptographic Security**: Constant-time HMAC-SHA256 signature verification supporting canonical JSON float-normalization (`X-Signature-V2`) and replay-attack protection via timestamp freshness windows.
+- **Didit V3 API Alignment**: Full fidelity to upstream V3 schemas (`id_verifications[]`, `liveness_checks[]`, `face_matches[]`, `aml_screenings[]`, `reviews[]`) with forward compatibility (`extra="allow"`) and backward-compatible property accessors.
+- **Complete Session Lifecycle**: Covers all 10 documented Didit session statuses (`Not Started`, `In Progress`, `In Review`, `Approved`, `Declined`, `Expired`, `Abandoned`, `Kyc Expired`, `Resubmitted`, `Awaiting User`) with granular state inspection (`is_decided`, `is_closed`, `requires_review`, `requires_user_action`).
+- **Cryptographic Security**: Constant-time HMAC-SHA256 signature verification (`X-Signature-V2` & `X-Signature`), full UTF-8 Unicode canonical JSON support (`ensure_ascii=False`, `allow_nan=False`), and authoritative signed body anti-replay verification with strict header matching.
 - **FastAPI Integration**: Plug-and-play `DiditWebhookGuard` dependency for securing webhook endpoints with zero boilerplate.
 - **Zero-Network Simulation Mode**: Built-in `SimulatedDidit` and `SimulatedAsyncDidit` to run unit tests and local end-to-end user flows completely offline without live credentials.
 - **Resilient Error Hierarchy**: Typed exceptions (`DiditAuthenticationError`, `DiditRateLimitError`, `DiditNotFoundError`, `DiditServerError`) with automated rate-limit retry duration parsing.

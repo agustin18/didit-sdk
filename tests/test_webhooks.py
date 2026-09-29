@@ -50,6 +50,25 @@ class TestCanonicalJson:
         canonical = canonical_json(body)
         assert canonical == '{"a":2,"m":{"a":20,"b":10},"z":1}'
 
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            ({"name": "José"}, '{"name":"José"}'),
+            ({"name": "Müller-Ünlü"}, '{"name":"Müller-Ünlü"}'),
+            ({"city": "北京"}, '{"city":"北京"}'),
+        ],
+    )
+    def test_canonical_json_unicode_characters(
+        self, body: dict[str, object], expected: str
+    ) -> None:
+        assert canonical_json(body) == expected
+
+    def test_canonical_json_rejects_nan_and_infinity(self) -> None:
+        with pytest.raises(ValueError):
+            canonical_json({"val": float("nan")})
+        with pytest.raises(ValueError):
+            canonical_json({"val": float("inf")})
+
 
 class TestComputeSignature:
     def test_compute_signature_v2(self) -> None:
@@ -132,40 +151,92 @@ class TestVerifyWebhookSignature:
         return {
             "session_id": "sess_123",
             "status": "Approved",
-            "created_at": int(time.time()),
+            "timestamp": int(time.time()),
         }
 
     def test_valid_v2_signature(self, secret: str, payload_dict: dict[str, object]) -> None:
-        raw_body = json.dumps(payload_dict).encode("utf-8")
+        raw_body = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
         sig = compute_signature(secret, payload_dict, version="v2")
-        headers = {"X-Signature-V2": sig}
+        headers = {"X-Signature-V2": sig, "X-Timestamp": str(payload_dict["timestamp"])}
         assert verify_webhook_signature(raw_body, headers, secret) is True
 
     def test_valid_v1_legacy_signature(self, secret: str, payload_dict: dict[str, object]) -> None:
-        raw_body = json.dumps(payload_dict).encode("utf-8")
+        raw_body = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
         sig = compute_signature(secret, raw_body, version="v1")
-        headers = {"X-Signature": sig}
+        headers = {"X-Signature": sig, "X-Timestamp": str(payload_dict["timestamp"])}
         assert verify_webhook_signature(raw_body, headers, secret) is True
 
     def test_both_signatures_present_and_v2_valid(
         self, secret: str, payload_dict: dict[str, object]
     ) -> None:
-        raw_body = json.dumps(payload_dict).encode("utf-8")
+        raw_body = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
         sig_v2 = compute_signature(secret, payload_dict, version="v2")
         sig_v1 = compute_signature(secret, raw_body, version="v1")
-        headers = {"x-signature-v2": sig_v2, "x-signature": sig_v1}
+        headers = {
+            "x-signature-v2": sig_v2,
+            "x-signature": sig_v1,
+            "x-timestamp": str(payload_dict["timestamp"]),
+        }
         assert verify_webhook_signature(raw_body, headers, secret) is True
 
-    def test_timestamp_from_header(self, secret: str, payload_dict: dict[str, object]) -> None:
-        payload_no_ts = {"session_id": "sess_123", "status": "Approved"}
-        raw_body = json.dumps(payload_no_ts).encode("utf-8")
-        sig = compute_signature(secret, payload_no_ts, version="v2")
-        now_ts = str(int(time.time()))
-        headers = {"X-Signature-V2": sig, "X-Timestamp": now_ts}
-        assert verify_webhook_signature(raw_body, headers, secret) is True
+    def test_replay_attack_with_refreshed_header_fails(self, secret: str) -> None:
+        # H-01: payload timestamp is 1 hour old, attacker modifies only X-Timestamp header
+        old_ts = int(time.time()) - 3600
+        payload = {"session_id": "sess_replay", "status": "Approved", "timestamp": old_ts}
+        raw_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        sig = compute_signature(secret, payload, version="v2")
+
+        # Forged fresh header
+        headers = {
+            "X-Signature-V2": sig,
+            "X-Timestamp": str(int(time.time())),
+        }
+        assert verify_webhook_signature(raw_body, headers, secret) is False
+
+    def test_header_and_signed_timestamp_mismatch_fails(self, secret: str) -> None:
+        now_ts = int(time.time())
+        payload = {"session_id": "sess_1", "status": "Approved", "timestamp": now_ts}
+        raw_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        sig = compute_signature(secret, payload, version="v2")
+
+        headers = {
+            "X-Signature-V2": sig,
+            "X-Timestamp": str(now_ts + 1),  # Mismatch by 1 second
+        }
+        assert verify_webhook_signature(raw_body, headers, secret) is False
+
+    def test_boolean_or_invalid_signed_timestamp_fails(self, secret: str) -> None:
+        payload = {"session_id": "sess_bool", "status": "Approved", "timestamp": True}
+        raw_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        sig = compute_signature(secret, payload, version="v2")
+        headers = {"X-Signature-V2": sig}
+        assert verify_webhook_signature(raw_body, headers, secret) is False
+
+    def test_non_ascii_or_malformed_signature_does_not_raise(self, secret: str) -> None:
+        # M-04: non-ASCII characters or malformed hex in signature header must not raise TypeError
+        now_ts = int(time.time())
+        payload = {"session_id": "sess_malformed", "status": "Approved", "timestamp": now_ts}
+        raw_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+        headers_non_ascii = {
+            "X-Signature-V2": "é" * 64,
+            "X-Timestamp": str(now_ts),
+        }
+        assert verify_webhook_signature(raw_body, headers_non_ascii, secret) is False
+
+        headers_bad_len = {
+            "X-Signature-V2": "deadbeef",
+            "X-Timestamp": str(now_ts),
+        }
+        assert verify_webhook_signature(raw_body, headers_bad_len, secret) is False
+
+    def test_non_finite_json_in_webhook_fails(self, secret: str) -> None:
+        raw_body = b'{"session_id": "s1", "score": NaN, "timestamp": 1700000000}'
+        headers = {"X-Signature-V2": "a" * 64, "X-Timestamp": "1700000000"}
+        assert verify_webhook_signature(raw_body, headers, secret) is False
 
     def test_missing_or_empty_secret_fails(self, payload_dict: dict[str, object]) -> None:
-        raw_body = json.dumps(payload_dict).encode("utf-8")
+        raw_body = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
         assert verify_webhook_signature(raw_body, {"x-signature-v2": "any"}, "") is False
 
     @pytest.mark.parametrize(
@@ -181,20 +252,44 @@ class TestVerifyWebhookSignature:
         assert verify_webhook_signature(invalid_body, headers, secret) is False
 
     def test_expired_timestamp_fails(self, secret: str, payload_dict: dict[str, object]) -> None:
-        payload_dict["created_at"] = int(time.time()) - 1000  # 1000s ago
-        raw_body = json.dumps(payload_dict).encode("utf-8")
+        payload_dict["timestamp"] = int(time.time()) - 1000  # 1000s ago
+        raw_body = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
         sig = compute_signature(secret, payload_dict, version="v2")
-        headers = {"X-Signature-V2": sig}
+        headers = {"X-Signature-V2": sig, "X-Timestamp": str(payload_dict["timestamp"])}
         assert verify_webhook_signature(raw_body, headers, secret, max_age_seconds=300) is False
 
     def test_mismatched_signature_fails(self, secret: str, payload_dict: dict[str, object]) -> None:
-        raw_body = json.dumps(payload_dict).encode("utf-8")
-        headers = {"X-Signature-V2": "deadbeef" * 8}
+        raw_body = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
+        headers = {"X-Signature-V2": "deadbeef" * 8, "X-Timestamp": str(payload_dict["timestamp"])}
         assert verify_webhook_signature(raw_body, headers, secret) is False
 
     def test_missing_signatures_fails(self, secret: str, payload_dict: dict[str, object]) -> None:
-        raw_body = json.dumps(payload_dict).encode("utf-8")
+        raw_body = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
         assert verify_webhook_signature(raw_body, {}, secret) is False
+
+    def test_invalid_utf8_body_fails(self, secret: str) -> None:
+        headers = {"X-Signature-V2": "a" * 64}
+        assert verify_webhook_signature(b"\xff\xfe\x00", headers, secret) is False
+
+    def test_malformed_header_timestamp_fails(
+        self, secret: str, payload_dict: dict[str, object]
+    ) -> None:
+        raw_body = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
+        sig = compute_signature(secret, payload_dict, version="v2")
+        headers = {"X-Signature-V2": sig, "X-Timestamp": "not-an-integer"}
+        assert verify_webhook_signature(raw_body, headers, secret) is False
+
+    def test_timestamp_is_fresh_boolean_guard(self) -> None:
+        assert timestamp_is_fresh(True) is False
+        assert timestamp_is_fresh(False) is False
+
+    def test_fallback_to_created_at_when_timestamp_absent(self, secret: str) -> None:
+        now_ts = int(time.time())
+        payload = {"session_id": "sess_fallback", "status": "Approved", "created_at": now_ts}
+        raw_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        sig = compute_signature(secret, payload, version="v2")
+        headers = {"X-Signature-V2": sig, "X-Timestamp": str(now_ts)}
+        assert verify_webhook_signature(raw_body, headers, secret) is True
 
 
 class TestParseWebhookPayload:

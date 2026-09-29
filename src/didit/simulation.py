@@ -54,17 +54,17 @@ class _SimulatedStorage:
         )
         self.sessions[session_id] = session
         self.decisions[session_id] = decision
-        return session
+        return session.model_copy(deep=True)
 
     def get(self, session_id: str) -> SessionResponse:
         if session_id not in self.sessions:
             raise DiditNotFoundError(f"Simulated session '{session_id}' not found", status_code=404)
-        return self.sessions[session_id]
+        return self.sessions[session_id].model_copy(deep=True)
 
     def get_decision(self, session_id: str) -> DecisionResponse:
         if session_id not in self.decisions:
             raise DiditNotFoundError(f"Simulated session '{session_id}' not found", status_code=404)
-        return self.decisions[session_id]
+        return self.decisions[session_id].model_copy(deep=True)
 
     def approve(
         self,
@@ -75,8 +75,10 @@ class _SimulatedStorage:
         aml: AMLData | None = None,
         review: ReviewData | None = None,
     ) -> DecisionResponse:
-        session = self.get(session_id)
-        decision = self.get_decision(session_id)
+        if session_id not in self.sessions:
+            raise DiditNotFoundError(f"Simulated session '{session_id}' not found", status_code=404)
+        session = self.sessions[session_id]
+        decision = self.decisions[session_id]
 
         session.status = SessionStatus.APPROVED
         decision.status = SessionStatus.APPROVED
@@ -93,7 +95,7 @@ class _SimulatedStorage:
             pep_detected=False, sanctions_detected=False, adverse_media_detected=False
         )
         decision.review = review
-        return decision
+        return decision.model_copy(deep=True)
 
     def decline(
         self,
@@ -101,13 +103,15 @@ class _SimulatedStorage:
         *,
         reason: str = "Verification failed by simulated policy",
     ) -> DecisionResponse:
-        session = self.get(session_id)
-        decision = self.get_decision(session_id)
+        if session_id not in self.sessions:
+            raise DiditNotFoundError(f"Simulated session '{session_id}' not found", status_code=404)
+        session = self.sessions[session_id]
+        decision = self.decisions[session_id]
 
         session.status = SessionStatus.DECLINED
         decision.status = SessionStatus.DECLINED
         decision.review = ReviewData(reviewed_by="simulator", decision_reason=reason)
-        return decision
+        return decision.model_copy(deep=True)
 
 
 class SimulatedSessionsResource:
@@ -239,19 +243,24 @@ class SimulatedDidit:
 
         session = self._storage.get(session_id)
         decision = self._storage.get_decision(session_id)
+        now = int(time.time())
         payload: dict[str, Any] = {
             "session_id": session.session_id,
             "status": session.status.value,
-            "created_at": int(time.time()),
+            "timestamp": now,
+            "created_at": now,
+            "event_id": f"evt_{uuid.uuid4().hex}",
+            "webhook_type": "session.updated",
+            "environment": "sandbox",
             "workflow_id": session.workflow_id,
             "vendor_data": session.vendor_data,
             "decision": decision.model_dump(exclude_none=True),
         }
-        raw_body = json.dumps(payload).encode("utf-8")
+        raw_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         sig = compute_signature(wh_secret, payload, version="v2")
         headers = {
             "X-Signature-V2": sig,
-            "X-Timestamp": str(payload["created_at"]),
+            "X-Timestamp": str(now),
             "Content-Type": "application/json",
         }
         return raw_body, headers
@@ -302,19 +311,24 @@ class SimulatedAsyncDidit:
 
         session = self._storage.get(session_id)
         decision = self._storage.get_decision(session_id)
+        now = int(time.time())
         payload: dict[str, Any] = {
             "session_id": session.session_id,
             "status": session.status.value,
-            "created_at": int(time.time()),
+            "timestamp": now,
+            "created_at": now,
+            "event_id": f"evt_{uuid.uuid4().hex}",
+            "webhook_type": "session.updated",
+            "environment": "sandbox",
             "workflow_id": session.workflow_id,
             "vendor_data": session.vendor_data,
             "decision": decision.model_dump(exclude_none=True),
         }
-        raw_body = json.dumps(payload).encode("utf-8")
+        raw_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         sig = compute_signature(wh_secret, payload, version="v2")
         headers = {
             "X-Signature-V2": sig,
-            "X-Timestamp": str(payload["created_at"]),
+            "X-Timestamp": str(now),
             "Content-Type": "application/json",
         }
         return raw_body, headers

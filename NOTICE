@@ -1,0 +1,15 @@
+didit-sdk
+Copyright (c) 2026 Agustin Saiz
+
+This product includes software developed as an open-source, community-driven
+Python client library for interacting with the Didit Identity Verification API.
+
+TRADEMARK AND AFFILIATION NOTICE:
+This project is an independent community library and is NOT officially affiliated,
+associated, authorized, endorsed by, or in any way officially connected with
+Didit Protocol Inc., or any of its subsidiaries or affiliates.
+
+The name "Didit", as well as related names, marks, emblems, and images are
+registered trademarks of their respective owners. Use of the name "Didit" in
+this package and documentation is for identification and compatibility purposes
+only and does not imply any affiliation or endorsement by the trademark holder.

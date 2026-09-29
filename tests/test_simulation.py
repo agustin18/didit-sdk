@@ -1,5 +1,7 @@
 """Tests for in-memory simulated client."""
 
+import json
+
 import pytest
 
 from didit.errors import DiditNotFoundError
@@ -92,6 +94,23 @@ class TestSimulatedDidit:
         session = client.sessions.create(vendor_data="user_1", workflow_id="wf_1")
         with pytest.raises(DiditConfigurationError):
             client.generate_webhook_event(session.session_id)
+
+    def test_simulation_state_immutability(self) -> None:
+        client = SimulatedDidit()
+        session = client.sessions.create(vendor_data="u1", workflow_id="wf1")
+        session.status = SessionStatus.DECLINED
+        assert client.sessions.get(session.session_id).status == SessionStatus.NOT_STARTED
+
+    def test_generate_webhook_event_contains_v3_fields(self) -> None:
+        client = SimulatedDidit(webhook_secret="whsec_v3")
+        session = client.sessions.create(vendor_data="u1", workflow_id="wf1")
+        client.approve_session(session.session_id)
+        raw, headers = client.generate_webhook_event(session.session_id)
+        parsed = json.loads(raw.decode("utf-8"))
+        assert "timestamp" in parsed
+        assert "event_id" in parsed
+        assert parsed["event_id"].startswith("evt_")
+        assert headers["X-Timestamp"] == str(parsed["timestamp"])
 
 
 class TestSimulatedAsyncDidit:
