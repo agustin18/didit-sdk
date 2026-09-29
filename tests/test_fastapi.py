@@ -1,7 +1,6 @@
-"""Tests for FastAPI webhook integration guard."""
-
 import json
 import time
+from typing import Any
 
 import pytest
 from fastapi import Depends, FastAPI
@@ -120,7 +119,9 @@ class TestFastAPIWebhookGuard:
 
         test_client = TestClient(custom_app)
 
-        def stream_gen():
+        from collections.abc import Iterator
+
+        def stream_gen() -> Iterator[bytes]:
             yield b"a" * 30
             yield b"b" * 30
 
@@ -161,3 +162,225 @@ class TestFastAPIWebhookGuard:
         )
         assert resp.status_code == 400
         assert "Malformed JSON" in resp.json()["detail"]
+
+    def test_invalid_duplicate_action_raises(self) -> None:
+        with pytest.raises(ValueError, match="Invalid duplicate_action"):
+            DiditWebhookGuard(
+                secret=WEBHOOK_SECRET,
+                duplicate_action="invalid_action",  # type: ignore[arg-type]
+            )
+
+    def test_guard_dedup_respond_ok_action(self) -> None:
+        from didit.dedup import InMemoryWebhookDedupStore
+
+        store = InMemoryWebhookDedupStore()
+        guard_with_dedup = DiditWebhookGuard(
+            secret=WEBHOOK_SECRET,
+            dedup_store=store,
+            duplicate_action="respond_ok",
+        )
+        dedup_app = FastAPI()
+
+        @dedup_app.post("/webhook-dedup")
+        async def endpoint(payload: WebhookPayload = Depends(guard_with_dedup)) -> dict[str, str]:
+            return {"session_id": payload.session_id, "status": payload.status.value}
+
+        test_client = TestClient(dedup_app)
+        data = {
+            "event_id": "evt_fastapi_dedup_1",
+            "session_id": "sess_dedup_1",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        # First request succeeds normally
+        resp1 = test_client.post("/webhook-dedup", content=raw_body, headers=headers)
+        assert resp1.status_code == 200
+        assert resp1.json() == {"session_id": "sess_dedup_1", "status": "Approved"}
+
+        # Duplicate request returns 200 OK acknowledging duplicate without re-processing
+        resp2 = test_client.post("/webhook-dedup", content=raw_body, headers=headers)
+        assert resp2.status_code == 200
+        assert resp2.json()["detail"] == "Duplicate webhook event acknowledged"
+
+    def test_guard_dedup_pass_action(self) -> None:
+        from didit.dedup import InMemoryWebhookDedupStore
+
+        store = InMemoryWebhookDedupStore()
+        guard_pass = DiditWebhookGuard(
+            secret=WEBHOOK_SECRET,
+            dedup_store=store,
+            duplicate_action="pass",
+        )
+        app_pass = FastAPI()
+
+        @app_pass.post("/webhook-pass")
+        async def endpoint(payload: WebhookPayload = Depends(guard_pass)) -> dict[str, Any]:
+            return {"is_duplicate": payload.is_duplicate, "session_id": payload.session_id}
+
+        test_client = TestClient(app_pass)
+        data = {
+            "event_id": "evt_fastapi_pass",
+            "session_id": "sess_pass",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        # First call: not duplicate
+        resp1 = test_client.post("/webhook-pass", content=raw_body, headers=headers)
+        assert resp1.status_code == 200
+        assert resp1.json()["is_duplicate"] is False
+
+        # Second call: passed through with is_duplicate = True
+        resp2 = test_client.post("/webhook-pass", content=raw_body, headers=headers)
+        assert resp2.status_code == 200
+        assert resp2.json()["is_duplicate"] is True
+
+    def test_guard_dedup_raise_action(self) -> None:
+        from didit.dedup import InMemoryWebhookDedupStore
+
+        store = InMemoryWebhookDedupStore()
+        guard_raise = DiditWebhookGuard(
+            secret=WEBHOOK_SECRET,
+            dedup_store=store,
+            duplicate_action="raise",
+        )
+        app_raise = FastAPI()
+
+        @app_raise.post("/webhook-raise")
+        async def endpoint(payload: WebhookPayload = Depends(guard_raise)) -> dict[str, str]:
+            return {"ok": "true"}
+
+        test_client = TestClient(app_raise)
+        data = {
+            "event_id": "evt_fastapi_raise",
+            "session_id": "sess_raise",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp1 = test_client.post("/webhook-raise", content=raw_body, headers=headers)
+        assert resp1.status_code == 200
+
+        resp2 = test_client.post("/webhook-raise", content=raw_body, headers=headers)
+        assert resp2.status_code == 409
+        assert "Duplicate webhook event" in resp2.json()["detail"]
+
+    def test_guard_dedup_custom_key_builder(self) -> None:
+        from didit.dedup import InMemoryWebhookDedupStore
+
+        store = InMemoryWebhookDedupStore()
+        guard_custom = DiditWebhookGuard(
+            secret=WEBHOOK_SECRET,
+            dedup_store=store,
+            dedup_key_builder=lambda p, r: f"custom:{p.session_id}",
+            duplicate_action="respond_ok",
+        )
+        app_custom = FastAPI()
+
+        @app_custom.post("/webhook-custom")
+        async def endpoint(payload: WebhookPayload = Depends(guard_custom)) -> dict[str, str]:
+            return {"ok": "true"}
+
+        test_client = TestClient(app_custom)
+        data = {
+            "session_id": "sess_custom_key",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp1 = test_client.post("/webhook-custom", content=raw_body, headers=headers)
+        assert resp1.status_code == 200
+
+        # Custom key was claimed
+        assert store.claim("custom:sess_custom_key") is False
+
+    def test_guard_dedup_pure_async_store(self) -> None:
+        class PureAsyncStore:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def claim(self, key: str, ttl_seconds: int = 86400) -> bool:
+                self.calls += 1
+                return self.calls == 1
+
+        async_store = PureAsyncStore()
+        guard_async = DiditWebhookGuard(
+            secret=WEBHOOK_SECRET,
+            dedup_store=async_store,
+            duplicate_action="respond_ok",
+        )
+        app_async = FastAPI()
+
+        @app_async.post("/webhook-pure-async")
+        async def endpoint(payload: WebhookPayload = Depends(guard_async)) -> dict[str, str]:
+            return {"ok": "true"}
+
+        test_client = TestClient(app_async)
+        data = {
+            "event_id": "evt_pure_async",
+            "session_id": "sess_async",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp1 = test_client.post("/webhook-pure-async", content=raw_body, headers=headers)
+        assert resp1.status_code == 200
+
+        resp2 = test_client.post("/webhook-pure-async", content=raw_body, headers=headers)
+        assert resp2.status_code == 200
+        assert resp2.json()["detail"] == "Duplicate webhook event acknowledged"
+
+    def test_guard_dedup_pure_sync_store(self) -> None:
+        class PureSyncStore:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def claim(self, key: str, ttl_seconds: int = 86400) -> bool:
+                self.calls += 1
+                return self.calls == 1
+
+        sync_store = PureSyncStore()
+        guard_sync = DiditWebhookGuard(
+            secret=WEBHOOK_SECRET,
+            dedup_store=sync_store,
+            duplicate_action="respond_ok",
+        )
+        app_sync = FastAPI()
+
+        @app_sync.post("/webhook-pure-sync")
+        async def endpoint(payload: WebhookPayload = Depends(guard_sync)) -> dict[str, str]:
+            return {"ok": "true"}
+
+        test_client = TestClient(app_sync)
+        data = {
+            "event_id": "evt_pure_sync",
+            "session_id": "sess_sync",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp1 = test_client.post("/webhook-pure-sync", content=raw_body, headers=headers)
+        assert resp1.status_code == 200
+
+        resp2 = test_client.post("/webhook-pure-sync", content=raw_body, headers=headers)
+        assert resp2.status_code == 200
+        assert resp2.json()["detail"] == "Duplicate webhook event acknowledged"

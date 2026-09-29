@@ -18,6 +18,14 @@ class DiditSignatureError(DiditError):
     """Raised when a webhook signature fails cryptographic verification or freshness check."""
 
 
+class DiditDedupError(DiditError):
+    """Raised when webhook deduplication storage operations fail."""
+
+
+class DiditDedupSaturationError(DiditDedupError):
+    """Raised when in-memory deduplication store saturates without expired entries to evict."""
+
+
 class DiditTimeoutError(DiditError):
     """Raised when an operation such as polling exceeds the configured timeout limit."""
 
