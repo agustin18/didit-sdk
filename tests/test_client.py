@@ -30,6 +30,7 @@ def client(base_url: str) -> Didit:
         base_url=base_url,
         webhook_secret="whsec_sync_test",
         timeout=10.0,
+        max_retries=0,
     )
 
 
@@ -267,3 +268,40 @@ class TestDiditSyncClient:
         with pytest.raises(DiditConfigurationError, match="No webhook_secret configured"):
             c.parse_webhook(b"{}", {})
         c.close()
+
+    def test_requestor_property_and_with_options(self, client: Didit, base_url: str) -> None:
+        from didit.transport import RequestOptions, _SyncRequestor
+
+        assert isinstance(client.requestor, _SyncRequestor)
+
+        bound = client.with_options(RequestOptions(idempotency_key="bound_key"))
+        assert bound is not client
+        assert bound.requestor._default_options is not None
+        assert bound.requestor._default_options.idempotency_key == "bound_key"
+
+    @respx.mock
+    def test_sessions_resource_raw_client_compat(self, base_url: str) -> None:
+        import httpx
+
+        from didit.resources.sessions import SessionsResource
+
+        raw_http = httpx.Client(
+            base_url=base_url,
+            headers={"x-api-key": "raw_key", "Accept": "application/json"},
+        )
+        respx.get(f"{base_url}/session/sess_compat/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "session_id": "sess_compat",
+                    "status": "In Progress",
+                    "workflow_id": "wf",
+                    "vendor_data": "vd",
+                },
+            )
+        )
+        res = SessionsResource(raw_http)
+        assert res._http is raw_http
+        session = res.get("sess_compat")
+        assert session.session_id == "sess_compat"
+        raw_http.close()

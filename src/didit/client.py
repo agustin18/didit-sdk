@@ -11,6 +11,12 @@ from didit.config import DiditConfig
 from didit.errors import DiditConfigurationError
 from didit.models.webhook import WebhookPayload
 from didit.resources.sessions import AsyncSessionsResource, SessionsResource
+from didit.transport import (
+    RequestOptions,
+    RetryPolicy,
+    _AsyncRequestor,
+    _SyncRequestor,
+)
 from didit.webhooks import parse_webhook_payload, verify_webhook_signature
 
 
@@ -27,6 +33,8 @@ class Didit:
         webhook_secret: str | None = None,
         config: DiditConfig | None = None,
         http_client: httpx.Client | None = None,
+        retry_policy: RetryPolicy | None = None,
+        default_options: RequestOptions | None = None,
     ) -> None:
         if config is not None:
             self._config = config
@@ -41,15 +49,22 @@ class Didit:
 
         self._manage_http = http_client is None
         self._http = http_client or httpx.Client(
-            base_url=self._config.base_url,
-            headers={
-                "x-api-key": self._config.api_key,
-                "Accept": "application/json",
-            },
             timeout=self._config.timeout,
         )
+        self._default_options = default_options
+        self._retry_policy = retry_policy or RetryPolicy(
+            max_retries=self._config.max_retries,
+        )
+        self._requestor = _SyncRequestor(
+            self._http,
+            base_url=self._config.base_url,
+            api_key=self._config.api_key,
+            retry_policy=self._retry_policy,
+            default_timeout=self._config.timeout,
+            default_options=self._default_options,
+        )
 
-        self.sessions = SessionsResource(self._http)
+        self.sessions = SessionsResource(self._requestor)
 
     @property
     def config(self) -> DiditConfig:
@@ -60,6 +75,20 @@ class Didit:
     def http_client(self) -> httpx.Client:
         """Underlying httpx.Client instance."""
         return self._http
+
+    @property
+    def requestor(self) -> _SyncRequestor:
+        """Underlying sync request runner."""
+        return self._requestor
+
+    def with_options(self, options: RequestOptions) -> Didit:
+        """Return a new client clone with additional or overridden default options."""
+        return Didit(
+            config=self._config,
+            http_client=self._http,
+            retry_policy=self._retry_policy,
+            default_options=options,
+        )
 
     def verify_webhook(
         self,
@@ -122,6 +151,8 @@ class AsyncDidit:
         webhook_secret: str | None = None,
         config: DiditConfig | None = None,
         http_client: httpx.AsyncClient | None = None,
+        retry_policy: RetryPolicy | None = None,
+        default_options: RequestOptions | None = None,
     ) -> None:
         if config is not None:
             self._config = config
@@ -136,15 +167,22 @@ class AsyncDidit:
 
         self._manage_http = http_client is None
         self._http = http_client or httpx.AsyncClient(
-            base_url=self._config.base_url,
-            headers={
-                "x-api-key": self._config.api_key,
-                "Accept": "application/json",
-            },
             timeout=self._config.timeout,
         )
+        self._default_options = default_options
+        self._retry_policy = retry_policy or RetryPolicy(
+            max_retries=self._config.max_retries,
+        )
+        self._requestor = _AsyncRequestor(
+            self._http,
+            base_url=self._config.base_url,
+            api_key=self._config.api_key,
+            retry_policy=self._retry_policy,
+            default_timeout=self._config.timeout,
+            default_options=self._default_options,
+        )
 
-        self.sessions = AsyncSessionsResource(self._http)
+        self.sessions = AsyncSessionsResource(self._requestor)
 
     @property
     def config(self) -> DiditConfig:
@@ -155,6 +193,20 @@ class AsyncDidit:
     def http_client(self) -> httpx.AsyncClient:
         """Underlying httpx.AsyncClient instance."""
         return self._http
+
+    @property
+    def requestor(self) -> _AsyncRequestor:
+        """Underlying async request runner."""
+        return self._requestor
+
+    def with_options(self, options: RequestOptions) -> AsyncDidit:
+        """Return a new async client clone with additional or overridden default options."""
+        return AsyncDidit(
+            config=self._config,
+            http_client=self._http,
+            retry_policy=self._retry_policy,
+            default_options=options,
+        )
 
     def verify_webhook(
         self,

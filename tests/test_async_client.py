@@ -30,6 +30,7 @@ def async_client(base_url: str) -> AsyncDidit:
         base_url=base_url,
         webhook_secret="whsec_async_test",
         timeout=10.0,
+        max_retries=0,
     )
 
 
@@ -237,3 +238,43 @@ class TestAsyncDiditClient:
         with pytest.raises(DiditConfigurationError, match="No webhook_secret configured"):
             c.parse_webhook(b"{}", {})
         await c.aclose()
+
+    async def test_async_requestor_property_and_with_options(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        from didit.transport import RequestOptions, _AsyncRequestor
+
+        assert isinstance(async_client.requestor, _AsyncRequestor)
+
+        bound = async_client.with_options(RequestOptions(idempotency_key="async_bound_key"))
+        assert bound is not async_client
+        assert bound.requestor._default_options is not None
+        assert bound.requestor._default_options.idempotency_key == "async_bound_key"
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_sessions_resource_raw_client_compat(self, base_url: str) -> None:
+        import httpx
+
+        from didit.resources.sessions import AsyncSessionsResource
+
+        raw_http = httpx.AsyncClient(
+            base_url=base_url,
+            headers={"x-api-key": "raw_async_key", "Accept": "application/json"},
+        )
+        respx.get(f"{base_url}/session/sess_async_compat/").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "session_id": "sess_async_compat",
+                    "status": "In Progress",
+                    "workflow_id": "wf",
+                    "vendor_data": "vd",
+                },
+            )
+        )
+        res = AsyncSessionsResource(raw_http)
+        assert res._http is raw_http
+        session = await res.get("sess_async_compat")
+        assert session.session_id == "sess_async_compat"
+        await raw_http.aclose()

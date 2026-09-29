@@ -5,15 +5,18 @@ Notice:
     with or endorsed by Didit Protocol Inc. See the NOTICE file for details.
 """
 
+from didit._version import __version__
 from didit.client import AsyncDidit, Didit
 from didit.config import DiditConfig
 from didit.errors import (
     DiditAPIError,
     DiditAuthenticationError,
     DiditConfigurationError,
+    DiditConnectionError,
     DiditError,
     DiditNotFoundError,
     DiditPermissionError,
+    DiditPoolTimeoutError,
     DiditRateLimitError,
     DiditServerError,
     DiditSignatureError,
@@ -34,9 +37,8 @@ from didit.models.enums import Language, SessionStatus
 from didit.models.session import CreateSessionRequest, SessionResponse
 from didit.models.webhook import WebhookPayload
 from didit.simulation import SimulatedAsyncDidit, SimulatedDidit
+from didit.transport import RequestOptions, RetryPolicy
 from didit.webhooks import parse_webhook_payload, verify_webhook_signature
-
-__version__ = "0.1.2"
 
 __all__ = [
     "AMLData",
@@ -50,9 +52,11 @@ __all__ = [
     "DiditAuthenticationError",
     "DiditConfig",
     "DiditConfigurationError",
+    "DiditConnectionError",
     "DiditError",
     "DiditNotFoundError",
     "DiditPermissionError",
+    "DiditPoolTimeoutError",
     "DiditRateLimitError",
     "DiditServerError",
     "DiditSignatureError",
@@ -62,6 +66,8 @@ __all__ = [
     "IdVerificationResult",
     "Language",
     "LivenessResult",
+    "RequestOptions",
+    "RetryPolicy",
     "ReviewData",
     "SessionResponse",
     "SessionStatus",

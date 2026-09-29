@@ -2,9 +2,11 @@ from didit.errors import (
     DiditAPIError,
     DiditAuthenticationError,
     DiditConfigurationError,
+    DiditConnectionError,
     DiditError,
     DiditNotFoundError,
     DiditPermissionError,
+    DiditPoolTimeoutError,
     DiditRateLimitError,
     DiditServerError,
     DiditSignatureError,
@@ -18,12 +20,24 @@ class TestErrors:
         assert issubclass(DiditConfigurationError, DiditError)
         assert issubclass(DiditSignatureError, DiditError)
         assert issubclass(DiditTimeoutError, DiditError)
+        assert issubclass(DiditPoolTimeoutError, DiditTimeoutError)
+        assert issubclass(DiditConnectionError, DiditError)
         assert issubclass(DiditAPIError, DiditError)
         assert issubclass(DiditAuthenticationError, DiditAPIError)
         assert issubclass(DiditPermissionError, DiditAuthenticationError)
         assert issubclass(DiditNotFoundError, DiditAPIError)
         assert issubclass(DiditRateLimitError, DiditAPIError)
         assert issubclass(DiditServerError, DiditAPIError)
+
+    def test_didit_connection_and_pool_errors(self) -> None:
+        pool_err = DiditPoolTimeoutError("Pool exhausted")
+        assert isinstance(pool_err, DiditTimeoutError)
+        assert str(pool_err) == "Pool exhausted"
+
+        conn_err = DiditConnectionError("Connection refused", request_id="req_conn")
+        assert isinstance(conn_err, DiditError)
+        assert str(conn_err) == "Connection refused"
+        assert conn_err.request_id == "req_conn"
 
     def test_didit_api_error_attributes_and_repr(self) -> None:
         err = DiditAPIError(
