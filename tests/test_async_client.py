@@ -13,6 +13,7 @@ from didit.errors import (
     DiditNotFoundError,
     DiditRateLimitError,
     DiditServerError,
+    DiditTimeoutError,
 )
 from didit.models.enums import SessionStatus
 from didit.webhooks import compute_signature
@@ -148,6 +149,107 @@ class TestAsyncDiditClient:
         with pytest.raises(DiditTimeoutError, match="timed out after"):
             await async_client.sessions.poll_decision(
                 "sess_poll_to_async", timeout=0.01, interval=0.02
+            )
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_poll_decision_stop_on_review(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/sess_review_async/decision/").mock(
+            return_value=Response(
+                200, json={"session_id": "sess_review_async", "status": "In Review"}
+            )
+        )
+        decision = await async_client.sessions.poll_decision("sess_review_async", timeout=1.0)
+        assert decision.status == SessionStatus.IN_REVIEW
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_poll_decision_stop_when(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/sess_custom_async/decision/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "session_id": "sess_custom_async",
+                    "status": "In Progress",
+                    "id_verifications": [{"status": "Approved"}],
+                },
+            )
+        )
+        decision = await async_client.sessions.poll_decision(
+            "sess_custom_async",
+            stop_when=lambda d: len(d.id_verifications) > 0,
+            timeout=1.0,
+        )
+        assert decision.status == SessionStatus.IN_PROGRESS
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_poll_decision_transient_error_tolerance(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        route = respx.get(f"{base_url}/session/sess_flaky_async/decision/").mock(
+            side_effect=[
+                Response(502, json={"error": "bad gateway"}),
+                Response(200, json={"session_id": "sess_flaky_async", "status": "Approved"}),
+            ]
+        )
+        decision = await async_client.sessions.poll_decision(
+            "sess_flaky_async",
+            timeout=2.0,
+            interval=0.001,
+            tolerate_transient_errors=True,
+        )
+        assert decision.status == SessionStatus.APPROVED
+        assert route.call_count == 2
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_poll_decision_retry_after(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        route = respx.get(f"{base_url}/session/sess_rate_async/decision/").mock(
+            side_effect=[
+                Response(429, headers={"Retry-After": "0.001"}, json={"error": "rate limited"}),
+                Response(200, json={"session_id": "sess_rate_async", "status": "Approved"}),
+            ]
+        )
+        decision = await async_client.sessions.poll_decision(
+            "sess_rate_async",
+            timeout=2.0,
+            interval=0.001,
+            tolerate_transient_errors=True,
+        )
+        assert decision.status == SessionStatus.APPROVED
+        assert route.call_count == 2
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_poll_decision_transient_error_not_tolerated(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/sess_503_async/decision/").mock(
+            return_value=Response(503, json={"error": "service down"})
+        )
+        with pytest.raises(DiditServerError):
+            await async_client.sessions.poll_decision(
+                "sess_503_async", timeout=1.0, tolerate_transient_errors=False
+            )
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_poll_decision_transient_error_timeout_exhausted(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/sess_to_async/decision/").mock(
+            return_value=Response(503, json={"error": "service down"})
+        )
+        with pytest.raises(DiditTimeoutError):
+            await async_client.sessions.poll_decision(
+                "sess_to_async", timeout=0.0001, interval=0.01, tolerate_transient_errors=True
             )
         await async_client.aclose()
 

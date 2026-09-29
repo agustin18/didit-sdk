@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from didit.errors import DiditTimeoutError
+from didit.errors import (
+    DiditConnectionError,
+    DiditRateLimitError,
+    DiditServerError,
+    DiditTimeoutError,
+)
 from didit.models.decision import DecisionResponse
-from didit.models.enums import Language
+from didit.models.enums import Language, SessionStatus
 from didit.models.session import CreateSessionRequest, SessionResponse
 from didit.transport import RequestOptions, _AsyncRequestor, _SyncRequestor
 
@@ -91,19 +98,80 @@ class SessionsResource:
         *,
         timeout: float = 60.0,
         interval: float = 2.0,
+        max_interval: float = 10.0,
+        backoff_multiplier: float = 1.2,
+        stop_on_review: bool = True,
+        stop_when: Callable[[DecisionResponse], bool] | None = None,
+        tolerate_transient_errors: bool = True,
         options: RequestOptions | None = None,
     ) -> DecisionResponse:
         """Poll the decision endpoint until a terminal verification status is reached."""
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
+        current_interval = interval
+
         while True:
-            decision = self.get_decision(session_id, options=options)
-            if decision.status.is_poll_complete:
-                return decision
-            if time.time() + interval > deadline:
+            now = time.monotonic()
+            remaining_budget = max(0.0, deadline - now)
+            if remaining_budget <= 0:
                 raise DiditTimeoutError(
                     f"Polling decision for session '{session_id}' timed out after {timeout} seconds"
                 )
-            time.sleep(interval)
+
+            req_timeout = (
+                options.timeout if (options and options.timeout is not None) else remaining_budget
+            )
+            effective_timeout = (
+                min(float(req_timeout), remaining_budget)
+                if isinstance(req_timeout, (int, float))
+                else remaining_budget
+            )
+
+            poll_options = RequestOptions(
+                idempotency_key=options.idempotency_key if options else None,
+                timeout=effective_timeout,
+                max_retries=options.max_retries if options else None,
+                headers=options.headers if options else None,
+            )
+
+            try:
+                decision = self.get_decision(session_id, options=poll_options)
+            except (
+                DiditServerError,
+                DiditRateLimitError,
+                DiditTimeoutError,
+                DiditConnectionError,
+            ) as exc:
+                if not tolerate_transient_errors:
+                    raise
+                now = time.monotonic()
+                if now >= deadline:
+                    raise DiditTimeoutError(
+                        f"Polling decision for session '{session_id}' "
+                        f"timed out after {timeout} seconds"
+                    ) from exc
+                wait_time = current_interval
+                if isinstance(exc, DiditRateLimitError) and exc.retry_after is not None:
+                    wait_time = max(wait_time, exc.retry_after)
+
+                sleep_duration = min(deadline - now, wait_time)
+                time.sleep(sleep_duration)
+                current_interval = min(max_interval, current_interval * backoff_multiplier)
+                continue
+
+            if stop_when is not None and stop_when(decision):
+                return decision
+
+            if stop_on_review and decision.status == SessionStatus.IN_REVIEW:
+                return decision
+
+            if decision.status.is_poll_complete:
+                return decision
+
+            now = time.monotonic()
+            jitter_val = random.uniform(0.0, 0.1 * current_interval)
+            sleep_duration = min(max(0.0, deadline - now), current_interval + jitter_val)
+            time.sleep(sleep_duration)
+            current_interval = min(max_interval, current_interval * backoff_multiplier)
 
 
 class AsyncSessionsResource:
@@ -173,16 +241,77 @@ class AsyncSessionsResource:
         *,
         timeout: float = 60.0,
         interval: float = 2.0,
+        max_interval: float = 10.0,
+        backoff_multiplier: float = 1.2,
+        stop_on_review: bool = True,
+        stop_when: Callable[[DecisionResponse], bool] | None = None,
+        tolerate_transient_errors: bool = True,
         options: RequestOptions | None = None,
     ) -> DecisionResponse:
         """Poll the decision endpoint asynchronously until a terminal status is reached."""
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
+        current_interval = interval
+
         while True:
-            decision = await self.get_decision(session_id, options=options)
-            if decision.status.is_poll_complete:
-                return decision
-            if time.time() + interval > deadline:
+            now = time.monotonic()
+            remaining_budget = max(0.0, deadline - now)
+            if remaining_budget <= 0:
                 raise DiditTimeoutError(
                     f"Polling decision for session '{session_id}' timed out after {timeout} seconds"
                 )
-            await asyncio.sleep(interval)
+
+            req_timeout = (
+                options.timeout if (options and options.timeout is not None) else remaining_budget
+            )
+            effective_timeout = (
+                min(float(req_timeout), remaining_budget)
+                if isinstance(req_timeout, (int, float))
+                else remaining_budget
+            )
+
+            poll_options = RequestOptions(
+                idempotency_key=options.idempotency_key if options else None,
+                timeout=effective_timeout,
+                max_retries=options.max_retries if options else None,
+                headers=options.headers if options else None,
+            )
+
+            try:
+                decision = await self.get_decision(session_id, options=poll_options)
+            except (
+                DiditServerError,
+                DiditRateLimitError,
+                DiditTimeoutError,
+                DiditConnectionError,
+            ) as exc:
+                if not tolerate_transient_errors:
+                    raise
+                now = time.monotonic()
+                if now >= deadline:
+                    raise DiditTimeoutError(
+                        f"Polling decision for session '{session_id}' "
+                        f"timed out after {timeout} seconds"
+                    ) from exc
+                wait_time = current_interval
+                if isinstance(exc, DiditRateLimitError) and exc.retry_after is not None:
+                    wait_time = max(wait_time, exc.retry_after)
+
+                sleep_duration = min(deadline - now, wait_time)
+                await asyncio.sleep(sleep_duration)
+                current_interval = min(max_interval, current_interval * backoff_multiplier)
+                continue
+
+            if stop_when is not None and stop_when(decision):
+                return decision
+
+            if stop_on_review and decision.status == SessionStatus.IN_REVIEW:
+                return decision
+
+            if decision.status.is_poll_complete:
+                return decision
+
+            now = time.monotonic()
+            jitter_val = random.uniform(0.0, 0.1 * current_interval)
+            sleep_duration = min(max(0.0, deadline - now), current_interval + jitter_val)
+            await asyncio.sleep(sleep_duration)
+            current_interval = min(max_interval, current_interval * backoff_multiplier)

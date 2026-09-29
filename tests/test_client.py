@@ -13,6 +13,7 @@ from didit.errors import (
     DiditNotFoundError,
     DiditRateLimitError,
     DiditServerError,
+    DiditTimeoutError,
 )
 from didit.models.enums import SessionStatus
 from didit.webhooks import compute_signature
@@ -148,6 +149,84 @@ class TestDiditSyncClient:
         )
         with pytest.raises(DiditTimeoutError, match="timed out after"):
             client.sessions.poll_decision("sess_poll_to", timeout=0.01, interval=0.02)
+
+    @respx.mock
+    def test_poll_decision_stop_on_review(self, client: Didit, base_url: str) -> None:
+        respx.get(f"{base_url}/session/sess_review/decision/").mock(
+            return_value=Response(200, json={"session_id": "sess_review", "status": "In Review"})
+        )
+        # Default stop_on_review=True returns immediately on In Review
+        decision = client.sessions.poll_decision("sess_review", timeout=1.0)
+        assert decision.status == SessionStatus.IN_REVIEW
+
+    @respx.mock
+    def test_poll_decision_stop_when_custom_predicate(self, client: Didit, base_url: str) -> None:
+        respx.get(f"{base_url}/session/sess_custom/decision/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "session_id": "sess_custom",
+                    "status": "In Progress",
+                    "id_verifications": [{"status": "Approved"}],
+                },
+            )
+        )
+        # Custom predicate stops polling even when status is In Progress
+        decision = client.sessions.poll_decision(
+            "sess_custom",
+            stop_when=lambda d: len(d.id_verifications) > 0,
+            timeout=1.0,
+        )
+        assert decision.status == SessionStatus.IN_PROGRESS
+        assert len(decision.id_verifications) == 1
+
+    @respx.mock
+    def test_poll_decision_transient_error_tolerance(self, client: Didit, base_url: str) -> None:
+        route = respx.get(f"{base_url}/session/sess_flaky/decision/").mock(
+            side_effect=[
+                Response(503, json={"error": "transient unavailable"}),
+                Response(429, headers={"Retry-After": "0.001"}, json={"error": "rate limit"}),
+                Response(200, json={"session_id": "sess_flaky", "status": "Approved"}),
+            ]
+        )
+        decision = client.sessions.poll_decision(
+            "sess_flaky",
+            timeout=2.0,
+            interval=0.001,
+            tolerate_transient_errors=True,
+        )
+        assert decision.status == SessionStatus.APPROVED
+        assert route.call_count == 3
+
+    @respx.mock
+    def test_poll_decision_terminal_error_fails_fast(self, client: Didit, base_url: str) -> None:
+        respx.get(f"{base_url}/session/sess_404/decision/").mock(
+            return_value=Response(404, json={"error": "not found"})
+        )
+        with pytest.raises(DiditNotFoundError):
+            client.sessions.poll_decision("sess_404", timeout=5.0)
+
+    @respx.mock
+    def test_poll_decision_transient_error_not_tolerated(
+        self, client: Didit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/sess_503/decision/").mock(
+            return_value=Response(503, json={"error": "service down"})
+        )
+        with pytest.raises(DiditServerError):
+            client.sessions.poll_decision("sess_503", timeout=1.0, tolerate_transient_errors=False)
+
+    @respx.mock
+    def test_poll_decision_transient_error_timeout_exhausted(
+        self, client: Didit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/sess_to/decision/").mock(
+            return_value=Response(503, json={"error": "service down"})
+        )
+        with pytest.raises(DiditTimeoutError):
+            client.sessions.poll_decision(
+                "sess_to", timeout=0.0001, interval=0.01, tolerate_transient_errors=True
+            )
 
     @respx.mock
     @pytest.mark.parametrize(
