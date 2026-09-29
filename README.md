@@ -70,6 +70,7 @@ if decision.status == SessionStatus.APPROVED:
 import asyncio
 from didit import AsyncDidit, SessionStatus
 
+
 async def main():
     async with AsyncDidit(api_key="your_api_key") as client:
         session = await client.sessions.create(
@@ -81,6 +82,7 @@ async def main():
         decision = await client.sessions.get_decision(session.session_id)
         if decision.status.is_terminal:
             print(f"Final outcome: {decision.status}")
+
 
 asyncio.run(main())
 ```
@@ -101,12 +103,13 @@ app = FastAPI()
 # Guard reads secret from argument or DIDIT_WEBHOOK_SECRET env var
 webhook_guard = DiditWebhookGuard(secret="whsec_...")
 
+
 @app.post("/api/v1/webhooks/didit")
 async def handle_didit_event(
     payload: WebhookPayload = Depends(webhook_guard),
 ):
     print(f"Received event for session: {payload.session_id}")
-    
+
     if payload.status == SessionStatus.APPROVED:
         # Mark user verified in your database
         ...
