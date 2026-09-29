@@ -83,7 +83,7 @@ class DiditAuthenticationError(DiditAPIError):
     """Raised on 401 Unauthorized responses (invalid or missing API key)."""
 
 
-class DiditPermissionError(DiditAuthenticationError):
+class DiditPermissionError(DiditAPIError):
     """Raised on 403 Forbidden responses (insufficient permissions or inactive key)."""
 
 

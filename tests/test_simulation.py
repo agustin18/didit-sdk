@@ -207,10 +207,28 @@ class TestSimulatedAsyncDidit:
         [
             ("approve", SessionStatus.APPROVED, None),
             ("decline_document_expired", SessionStatus.DECLINED, "DOCUMENT_EXPIRED"),
-            ("decline_face_mismatch", SessionStatus.DECLINED, "FACE_MISMATCH"),
-            ("decline_aml_hit", SessionStatus.DECLINED, "AML_SANCTION_MATCH"),
-            ("review_suspicious", SessionStatus.IN_REVIEW, "SUSPICIOUS_DOCUMENT"),
-            ("resubmit", SessionStatus.RESUBMITTED, "IMAGE_BLURRY"),
+            (
+                "decline_could_not_recognize_document",
+                SessionStatus.DECLINED,
+                "UNRECOGNIZED_DOCUMENT",
+            ),
+            ("decline_mrz_validation", SessionStatus.DECLINED, "MRZ_CHECKSUM_FAILED"),
+            ("decline_minimum_age", SessionStatus.DECLINED, "MINIMUM_AGE_NOT_MET"),
+            (
+                "decline_face_match_low_similarity",
+                SessionStatus.DECLINED,
+                "LOW_FACE_MATCH_SIMILARITY",
+            ),
+            ("decline_liveness_attack", SessionStatus.DECLINED, "SPOOF_DETECTED"),
+            ("decline_aml_hit", SessionStatus.DECLINED, "AML_MATCH_CONFIRMED"),
+            ("decline_ip_blocklist", SessionStatus.DECLINED, "IP_RISK_HIGH"),
+            ("decline_poa_address_mismatch", SessionStatus.DECLINED, "POA_ADDRESS_MISMATCH"),
+            ("decline_nfc_chip_not_verified", SessionStatus.DECLINED, "NFC_CHIP_FAILED"),
+            ("decline_database_no_match", SessionStatus.DECLINED, "DATABASE_NO_MATCH"),
+            ("review_aml_possible_match", SessionStatus.IN_REVIEW, "POSSIBLE_MATCH_FOUND"),
+            ("review_face_match_borderline", SessionStatus.IN_REVIEW, "LOW_FACE_MATCH_SIMILARITY"),
+            ("review_poa_partial_match", SessionStatus.IN_REVIEW, "POA_PARTIAL_MATCH"),
+            ("decline_kyb_registry_mismatch", SessionStatus.DECLINED, "REGISTRY_MISMATCH"),
         ],
     )
     def test_sandbox_scenarios(
@@ -261,9 +279,9 @@ class TestSimulatedAsyncDidit:
         session = await client.sessions.create(
             vendor_data="user_async_sb",
             workflow_id="wf",
-            sandbox_scenario="review_suspicious",
+            sandbox_scenario="review_aml_possible_match",
         )
         assert session.status == SessionStatus.IN_REVIEW
         decision = await client.sessions.get_decision(session.session_id)
         assert decision.status == SessionStatus.IN_REVIEW
-        assert decision.has_warning("SUSPICIOUS_DOCUMENT") is True
+        assert decision.has_warning("POSSIBLE_MATCH_FOUND") is True

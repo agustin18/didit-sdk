@@ -18,6 +18,45 @@ def _legacy_bool(status: str | None) -> bool | None:
     return None
 
 
+class VerificationWarning(BaseModel):
+    """Diagnostic warning or non-fatal issue encountered during verification."""
+
+    model_config = ConfigDict(extra="allow")
+
+    code: str | None = Field(
+        default=None, description="Machine-readable warning code e.g. DOC_EXPIRING_SOON"
+    )
+    message: str | None = Field(default=None, description="Human-readable explanation of warning")
+    risk: str | None = Field(default=None, description="Risk assessment")
+    log_type: str | None = Field(default=None, description="Log type identifier")
+    short_description: str | None = Field(default=None, description="Short summary")
+    long_description: str | None = Field(default=None, description="Detailed explanation")
+    severity: str | None = Field(
+        default=None, description="Warning severity e.g. low, medium, high"
+    )
+    details: dict[str, Any] | None = Field(default=None, description="Detailed diagnostic context")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_warning(cls, data: Any) -> Any:
+        if isinstance(data, str):
+            return {"code": data, "message": data}
+        return data
+
+    @property
+    def warning_code(self) -> str | None:
+        """Normalized warning code identifier."""
+        return self.code or getattr(self, "log_type", None) or self.short_description
+
+    def __repr__(self) -> str:
+        return (
+            f"VerificationWarning(code={self.warning_code or self.code!r}, "
+            f"severity={self.severity!r})"
+        )
+
+    __str__ = __repr__
+
+
 class IdVerificationResult(BaseModel):
     """Identity document verification details."""
 
@@ -34,6 +73,9 @@ class IdVerificationResult(BaseModel):
     )
     date_of_birth: str | None = Field(default=None, description="YYYY-MM-DD format")
     expiration_date: str | None = Field(default=None, description="YYYY-MM-DD format")
+    warnings: list[VerificationWarning] = Field(
+        default_factory=list, description="Step-level warnings"
+    )
 
     def __repr__(self) -> str:
         return (
@@ -41,6 +83,8 @@ class IdVerificationResult(BaseModel):
             f"status={self.status!r}, "
             f"document_type={self.document_type!r})"
         )
+
+    __str__ = __repr__
 
 
 class LivenessResult(BaseModel):
@@ -51,11 +95,14 @@ class LivenessResult(BaseModel):
     node_id: str | None = Field(default=None, description="Workflow step identifier")
     status: str | None = Field(default=None, description="Check outcome e.g. Approved, Declined")
     score: float | None = Field(default=None, description="Liveness confidence score")
+    warnings: list[VerificationWarning] = Field(
+        default_factory=list, description="Step-level warnings"
+    )
 
     def __repr__(self) -> str:
-        return (
-            f"LivenessResult(node_id={self.node_id!r}, status={self.status!r}, score={self.score})"
-        )
+        return f"LivenessResult(node_id={self.node_id!r}, status={self.status!r})"
+
+    __str__ = __repr__
 
 
 class FaceMatchResult(BaseModel):
@@ -66,11 +113,14 @@ class FaceMatchResult(BaseModel):
     node_id: str | None = Field(default=None, description="Workflow step identifier")
     status: str | None = Field(default=None, description="Check outcome e.g. Approved, Declined")
     score: float | None = Field(default=None, description="Facial comparison score")
+    warnings: list[VerificationWarning] = Field(
+        default_factory=list, description="Step-level warnings"
+    )
 
     def __repr__(self) -> str:
-        return (
-            f"FaceMatchResult(node_id={self.node_id!r}, status={self.status!r}, score={self.score})"
-        )
+        return f"FaceMatchResult(node_id={self.node_id!r}, status={self.status!r})"
+
+    __str__ = __repr__
 
 
 class AMLScreeningResult(BaseModel):
@@ -87,9 +137,14 @@ class AMLScreeningResult(BaseModel):
         default=None, description="International sanctions list match"
     )
     adverse_media_detected: bool | None = Field(default=None, description="Adverse media match")
+    warnings: list[VerificationWarning] = Field(
+        default_factory=list, description="Step-level warnings"
+    )
 
     def __repr__(self) -> str:
         return f"AMLScreeningResult(node_id={self.node_id!r}, status={self.status!r})"
+
+    __str__ = __repr__
 
 
 class DocumentData(BaseModel):
@@ -111,10 +166,9 @@ class DocumentData(BaseModel):
     )
 
     def __repr__(self) -> str:
-        return (
-            f"DocumentData(document_type={self.document_type!r}, "
-            f"country={self.country!r}, is_valid={self.is_valid})"
-        )
+        return f"DocumentData(document_type={self.document_type!r}, is_valid={self.is_valid})"
+
+    __str__ = __repr__
 
 
 class BiometricsData(BaseModel):
@@ -131,10 +185,9 @@ class BiometricsData(BaseModel):
     )
 
     def __repr__(self) -> str:
-        return (
-            f"BiometricsData(face_match={self.face_match}, "
-            f"liveness_check={self.liveness_check}, score={self.score})"
-        )
+        return f"BiometricsData(face_match={self.face_match}, liveness_check={self.liveness_check})"
+
+    __str__ = __repr__
 
 
 class AMLData(BaseModel):
@@ -156,6 +209,8 @@ class AMLData(BaseModel):
             f"sanctions_detected={self.sanctions_detected})"
         )
 
+    __str__ = __repr__
+
 
 class ReviewData(BaseModel):
     """Manual or compliance agent review information."""
@@ -167,28 +222,10 @@ class ReviewData(BaseModel):
 
     def __repr__(self) -> str:
         return (
-            f"ReviewData(reviewed_by={self.reviewed_by!r}, "
-            f"decision_reason={self.decision_reason!r})"
+            f"ReviewData(reviewed_by={self.reviewed_by!r}, has_reason={bool(self.decision_reason)})"
         )
 
-
-class VerificationWarning(BaseModel):
-    """Diagnostic warning or non-fatal issue encountered during verification."""
-
-    model_config = ConfigDict(extra="allow")
-
-    code: str = Field(..., description="Machine-readable warning code e.g. DOC_EXPIRING_SOON")
-    message: str = Field(..., description="Human-readable explanation of warning")
-    severity: str | None = Field(
-        default=None, description="Warning severity e.g. low, medium, high"
-    )
-    details: dict[str, Any] | None = Field(default=None, description="Detailed diagnostic context")
-
-    def __repr__(self) -> str:
-        return (
-            f"VerificationWarning(code={self.code!r}, "
-            f"message={self.message!r}, severity={self.severity!r})"
-        )
+    __str__ = __repr__
 
 
 class DecisionResponse(BaseModel):
@@ -307,7 +344,9 @@ class DecisionResponse(BaseModel):
             f"reviews={len(self.reviews)})"
         )
 
-    def redacted_dump(self) -> dict[str, Any]:
+    __str__ = __repr__
+
+    def redacted_dump(self, *, include_scores: bool = False) -> dict[str, Any]:
         """Return a privacy-sanitized dictionary omitting PII for telemetry/logging."""
         return {
             "session_id": self.session_id,
@@ -318,51 +357,90 @@ class DecisionResponse(BaseModel):
                     "node_id": v.node_id,
                     "status": v.status,
                     "document_type": v.document_type,
-                    "country": v.country,
                 }
                 for v in self.id_verifications
             ],
             "liveness_checks": [
-                {"node_id": check.node_id, "status": check.status, "score": check.score}
+                {
+                    "node_id": check.node_id,
+                    "status": check.status,
+                    **(
+                        {"score": check.score} if include_scores and check.score is not None else {}
+                    ),
+                }
                 for check in self.liveness_checks
             ],
             "face_matches": [
-                {"node_id": f.node_id, "status": f.status, "score": f.score}
+                {
+                    "node_id": f.node_id,
+                    "status": f.status,
+                    **({"score": f.score} if include_scores and f.score is not None else {}),
+                }
                 for f in self.face_matches
             ],
             "aml_screenings": [
                 {
                     "node_id": a.node_id,
                     "status": a.status,
-                    "pep_detected": a.pep_detected,
-                    "sanctions_detected": a.sanctions_detected,
-                    "adverse_media_detected": a.adverse_media_detected,
                 }
                 for a in self.aml_screenings
             ],
             "reviews": [
-                {"reviewed_by": r.reviewed_by, "decision_reason": r.decision_reason}
+                {"reviewed_by": r.reviewed_by, "has_reason": bool(r.decision_reason)}
                 for r in self.reviews
             ],
             "warnings": [
                 {
-                    "code": w.code,
-                    "message": w.message,
+                    "code": w.warning_code or w.code,
                     "severity": w.severity,
-                    "details": w.details,
                 }
-                for w in self.warnings
+                for w in self.iter_warnings()
             ],
+            "warning_codes": self.warning_codes,
         }
 
+    def iter_warnings(self) -> list[VerificationWarning]:
+        """Collect all warnings from top-level and nested check nodes."""
+        all_warnings: list[VerificationWarning] = list(self.warnings)
+        for node_list in (
+            self.id_verifications,
+            self.liveness_checks,
+            self.face_matches,
+            self.aml_screenings,
+        ):
+            for item in node_list:
+                node_warns = getattr(item, "warnings", None)
+                if node_warns and isinstance(node_warns, list):
+                    for w in node_warns:
+                        if isinstance(w, VerificationWarning):
+                            all_warnings.append(w)
+                        elif isinstance(w, dict):
+                            all_warnings.append(VerificationWarning.model_validate(w))
+                        elif isinstance(w, str):
+                            all_warnings.append(VerificationWarning(code=w, message=w))
+        return all_warnings
+
     def has_warning(self, code: str) -> bool:
-        """Check whether a specific warning code is present in the decision."""
-        return any(w.code == code for w in self.warnings)
+        """Check whether a specific warning code is present across any decision or check node."""
+        return any(
+            (
+                w.code == code
+                or w.warning_code == code
+                or w.short_description == code
+                or getattr(w, "log_type", None) == code
+            )
+            for w in self.iter_warnings()
+        )
 
     @property
     def warning_codes(self) -> list[str]:
-        """List of all warning codes emitted for this verification decision."""
-        return [w.code for w in self.warnings]
+        """List of all warning codes emitted across the decision and all verification steps."""
+        codes: list[str] = []
+        for w in self.iter_warnings():
+            c = w.warning_code or w.code
+            if c and c not in codes:
+                codes.append(c)
+        return codes
 
     @property
     def document(self) -> DocumentData | None:

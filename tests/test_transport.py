@@ -9,6 +9,7 @@ import pytest
 import respx
 
 from didit.errors import (
+    DiditConfigurationError,
     DiditConnectionError,
     DiditPoolTimeoutError,
     DiditRateLimitError,
@@ -191,7 +192,7 @@ class TestSyncRequestor:
 
     @respx.mock
     def test_sync_request_options_and_absolute_url(self) -> None:
-        route = respx.post("https://custom.endpoint.com/webhook").mock(
+        route = respx.post("https://api.didit.me/v3/webhook").mock(
             return_value=httpx.Response(200, json={"received": True})
         )
         client = httpx.Client()
@@ -207,7 +208,7 @@ class TestSyncRequestor:
         )
         resp = requestor.request(
             "POST",
-            "https://custom.endpoint.com/webhook",
+            "https://api.didit.me/v3/webhook",
             json={"data": 1},
             options=opts,
         )
@@ -518,3 +519,454 @@ class TestAsyncRequestor:
         merged_no_hdr = _merge_options(base, override_no_hdr)
         assert merged_no_hdr is not None
         assert merged_no_hdr.headers == {"A": "1", "B": "2"}
+
+    def test_cross_origin_absolute_url_raises_configuration_error(self) -> None:
+        client = httpx.Client()
+        requestor = _SyncRequestor(
+            client,
+            base_url="https://api.didit.me/v3",
+            api_key="key_123",
+        )
+        with pytest.raises(DiditConfigurationError) as exc_info:
+            requestor.request("GET", "https://attacker.example.com/steal-api-key")
+        assert "Cross-origin absolute URLs are not allowed" in str(exc_info.value)
+
+    @pytest.mark.parametrize("header_name", ["x-api-key", "Host", "User-Agent", "idempotency-key"])
+    def test_reserved_header_override_forbidden(self, header_name: str) -> None:
+        client = httpx.Client()
+        requestor = _SyncRequestor(
+            client,
+            base_url="https://api.didit.me/v3",
+            api_key="key_123",
+        )
+        opts = RequestOptions(headers={header_name: "malicious-value"})
+        with pytest.raises(DiditConfigurationError) as exc_info:
+            requestor.request("GET", "/test", options=opts)
+        assert "Overriding reserved header" in str(exc_info.value)
+
+    def test_deadline_expired_before_execution(self) -> None:
+        import time
+
+        client = httpx.Client()
+        requestor = _SyncRequestor(
+            client,
+            base_url="https://api.didit.me/v3",
+            api_key="key_123",
+        )
+        opts = RequestOptions(deadline=time.monotonic() - 1.0)
+        with pytest.raises(DiditTimeoutError) as exc_info:
+            requestor.request("GET", "/test", options=opts)
+        assert "deadline exceeded" in str(exc_info.value).lower()
+
+    @respx.mock
+    def test_deadline_exceeded_before_retry_backoff(self) -> None:
+        import time
+
+        respx.get("https://api.didit.me/v3/retry-fail").mock(
+            return_value=httpx.Response(503, json={"error": "busy"})
+        )
+        client = httpx.Client()
+        policy = RetryPolicy(max_retries=3, base_delay=5.0, jitter=False)
+        requestor = _SyncRequestor(
+            client,
+            base_url="https://api.didit.me/v3",
+            api_key="key_123",
+            retry_policy=policy,
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 0.1)
+        with pytest.raises(DiditTimeoutError) as exc_info:
+            requestor.request("GET", "/retry-fail", options=opts)
+        assert "deadline exceeded" in str(exc_info.value).lower()
+
+    def test_network_transmission_errors_retry_and_mapping(self) -> None:
+        class FlakySocketTransport(httpx.BaseTransport):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                self.calls += 1
+                if self.calls == 1:
+                    raise httpx.ReadError("TCP connection reset by peer")
+                return httpx.Response(200, json={"ok": True})
+
+        trans = FlakySocketTransport()
+        client = httpx.Client(transport=trans)
+        policy = RetryPolicy(max_retries=2, base_delay=0.001, jitter=False)
+        requestor = _SyncRequestor(
+            client,
+            base_url="https://api.didit.me/v3",
+            api_key="key_123",
+            retry_policy=policy,
+        )
+        resp = requestor.request("GET", "/safe-endpoint")
+        assert resp.status_code == 200
+        assert trans.calls == 2
+
+    def test_network_transmission_error_exhausted_raises_connection_error(self) -> None:
+        class BrokenPipeTransport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                raise httpx.WriteError("Broken pipe during write")
+
+        client = httpx.Client(transport=BrokenPipeTransport())
+        policy = RetryPolicy(max_retries=1, base_delay=0.001, jitter=False)
+        requestor = _SyncRequestor(
+            client,
+            base_url="https://api.didit.me/v3",
+            api_key="key_123",
+            retry_policy=policy,
+        )
+        with pytest.raises(DiditConnectionError) as exc_info:
+            requestor.request("POST", "/unsafe-write")
+        assert "Network error" in str(exc_info.value)
+
+    @respx.mock
+    def test_sync_retry_with_deadline_within_budget(self) -> None:
+        import time
+
+        route = respx.get("https://api.didit.me/v3/deadline-ok").mock(
+            side_effect=[
+                httpx.Response(503, json={"error": "busy"}),
+                httpx.Response(200, json={"ok": True}),
+            ]
+        )
+        client = httpx.Client()
+        policy = RetryPolicy(max_retries=1, base_delay=0.001, jitter=False)
+        requestor = _SyncRequestor(
+            client,
+            base_url="https://api.didit.me/v3",
+            api_key="key_123",
+            retry_policy=policy,
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 10.0)
+        resp = requestor.request("GET", "/deadline-ok", options=opts)
+        assert resp.status_code == 200
+        assert route.call_count == 2
+
+    def test_sync_connect_error_deadline_exceeded_before_backoff(self) -> None:
+        import time
+
+        class FlakyConnectTransport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                raise httpx.ConnectError("Connection refused")
+
+        client = httpx.Client(transport=FlakyConnectTransport())
+        policy = RetryPolicy(max_retries=2, base_delay=10.0, jitter=False)
+        requestor = _SyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 0.05)
+        with pytest.raises(DiditTimeoutError, match="deadline exceeded"):
+            requestor.request("GET", "/test", options=opts)
+
+    def test_sync_read_timeout_deadline_exceeded_before_backoff(self) -> None:
+        import time
+
+        class FlakyTimeoutTransport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                raise httpx.ReadTimeout("Read timed out")
+
+        client = httpx.Client(transport=FlakyTimeoutTransport())
+        policy = RetryPolicy(max_retries=2, base_delay=10.0, jitter=False)
+        requestor = _SyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 0.05)
+        with pytest.raises(DiditTimeoutError, match="deadline exceeded"):
+            requestor.request("GET", "/test", options=opts)
+
+    def test_sync_read_error_deadline_exceeded_before_backoff(self) -> None:
+        import time
+
+        class FlakyReadErrorTransport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                raise httpx.ReadError("Reset by peer")
+
+        client = httpx.Client(transport=FlakyReadErrorTransport())
+        policy = RetryPolicy(max_retries=2, base_delay=10.0, jitter=False)
+        requestor = _SyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 0.05)
+        with pytest.raises(DiditTimeoutError, match="deadline exceeded"):
+            requestor.request("GET", "/test", options=opts)
+
+    @pytest.mark.asyncio
+    async def test_async_deadline_already_exceeded_before_execution(self) -> None:
+        import time
+
+        client = httpx.AsyncClient()
+        requestor = _AsyncRequestor(client, base_url="https://api.didit.me/v3", api_key="k")
+        opts = RequestOptions(deadline=time.monotonic() - 1.0)
+        with pytest.raises(DiditTimeoutError, match="deadline exceeded"):
+            await requestor.request("GET", "/test", options=opts)
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_deadline_exceeded_before_retry_backoff(self) -> None:
+        import time
+
+        respx.get("https://api.didit.me/v3/retry-fail").mock(
+            return_value=httpx.Response(503, json={"error": "busy"})
+        )
+        client = httpx.AsyncClient()
+        policy = RetryPolicy(max_retries=3, base_delay=5.0, jitter=False)
+        requestor = _AsyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 0.05)
+        with pytest.raises(DiditTimeoutError, match="deadline exceeded"):
+            await requestor.request("GET", "/retry-fail", options=opts)
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_connect_error_deadline_exceeded(self) -> None:
+        import time
+
+        class FlakyAsyncConnectTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                raise httpx.ConnectError("Connection refused")
+
+        client = httpx.AsyncClient(transport=FlakyAsyncConnectTransport())
+        policy = RetryPolicy(max_retries=2, base_delay=10.0, jitter=False)
+        requestor = _AsyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 0.05)
+        with pytest.raises(DiditTimeoutError, match="deadline exceeded"):
+            await requestor.request("GET", "/test", options=opts)
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_read_timeout_deadline_exceeded(self) -> None:
+        import time
+
+        class FlakyAsyncTimeoutTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                raise httpx.ReadTimeout("Read timed out")
+
+        client = httpx.AsyncClient(transport=FlakyAsyncTimeoutTransport())
+        policy = RetryPolicy(max_retries=2, base_delay=10.0, jitter=False)
+        requestor = _AsyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 0.05)
+        with pytest.raises(DiditTimeoutError, match="deadline exceeded"):
+            await requestor.request("GET", "/test", options=opts)
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_network_transmission_error_retry_and_mapping(self) -> None:
+        class FlakyAsyncSocketTransport(httpx.AsyncBaseTransport):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                self.calls += 1
+                if self.calls == 1:
+                    raise httpx.ReadError("TCP reset")
+                return httpx.Response(200, json={"ok": True})
+
+        trans = FlakyAsyncSocketTransport()
+        client = httpx.AsyncClient(transport=trans)
+        policy = RetryPolicy(max_retries=2, base_delay=0.001, jitter=False)
+        requestor = _AsyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        resp = await requestor.request("GET", "/safe")
+        assert resp.status_code == 200
+        assert trans.calls == 2
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_network_transmission_error_deadline_exceeded(self) -> None:
+        import time
+
+        class BrokenPipeAsyncTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                raise httpx.ReadError("Network reset")
+
+        client = httpx.AsyncClient(transport=BrokenPipeAsyncTransport())
+        policy = RetryPolicy(max_retries=2, base_delay=10.0, jitter=False)
+        requestor = _AsyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 0.05)
+        with pytest.raises(DiditTimeoutError, match="deadline exceeded"):
+            await requestor.request("GET", "/test", options=opts)
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_network_transmission_error_exhausted(self) -> None:
+        class BrokenPipeAsyncTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                raise httpx.WriteError("Broken pipe")
+
+        client = httpx.AsyncClient(transport=BrokenPipeAsyncTransport())
+        policy = RetryPolicy(max_retries=1, base_delay=0.001, jitter=False)
+        requestor = _AsyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        with pytest.raises(DiditConnectionError, match="Network error"):
+            await requestor.request("POST", "/unsafe-write")
+        await client.aclose()
+
+    def test_sync_connect_error_deadline_within_budget(self) -> None:
+        import time
+
+        class FlakyConnectTransport(httpx.BaseTransport):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                self.calls += 1
+                if self.calls == 1:
+                    raise httpx.ConnectError("Connection refused")
+                return httpx.Response(200, json={"ok": True})
+
+        client = httpx.Client(transport=FlakyConnectTransport())
+        policy = RetryPolicy(max_retries=2, base_delay=0.001, jitter=False)
+        requestor = _SyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 10.0)
+        resp = requestor.request("GET", "/test", options=opts)
+        assert resp.status_code == 200
+
+    def test_sync_read_timeout_deadline_within_budget(self) -> None:
+        import time
+
+        class FlakyTimeoutTransport(httpx.BaseTransport):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                self.calls += 1
+                if self.calls == 1:
+                    raise httpx.ReadTimeout("Read timed out")
+                return httpx.Response(200, json={"ok": True})
+
+        client = httpx.Client(transport=FlakyTimeoutTransport())
+        policy = RetryPolicy(max_retries=2, base_delay=0.001, jitter=False)
+        requestor = _SyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 10.0)
+        resp = requestor.request("GET", "/test", options=opts)
+        assert resp.status_code == 200
+
+    def test_sync_read_error_deadline_within_budget(self) -> None:
+        import time
+
+        class FlakyReadErrorTransport(httpx.BaseTransport):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                self.calls += 1
+                if self.calls == 1:
+                    raise httpx.ReadError("Reset by peer")
+                return httpx.Response(200, json={"ok": True})
+
+        client = httpx.Client(transport=FlakyReadErrorTransport())
+        policy = RetryPolicy(max_retries=2, base_delay=0.001, jitter=False)
+        requestor = _SyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 10.0)
+        resp = requestor.request("GET", "/test", options=opts)
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_retry_status_503_deadline_within_budget(self) -> None:
+        import time
+
+        route = respx.get("https://api.didit.me/v3/async-deadline-ok").mock(
+            side_effect=[
+                httpx.Response(503, json={"error": "busy"}),
+                httpx.Response(200, json={"ok": True}),
+            ]
+        )
+        client = httpx.AsyncClient()
+        policy = RetryPolicy(max_retries=1, base_delay=0.001, jitter=False)
+        requestor = _AsyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 10.0)
+        resp = await requestor.request("GET", "/async-deadline-ok", options=opts)
+        assert resp.status_code == 200
+        assert route.call_count == 2
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_connect_error_deadline_within_budget(self) -> None:
+        import time
+
+        class FlakyAsyncConnectTransport(httpx.AsyncBaseTransport):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                self.calls += 1
+                if self.calls == 1:
+                    raise httpx.ConnectError("Connection refused")
+                return httpx.Response(200, json={"ok": True})
+
+        client = httpx.AsyncClient(transport=FlakyAsyncConnectTransport())
+        policy = RetryPolicy(max_retries=2, base_delay=0.001, jitter=False)
+        requestor = _AsyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 10.0)
+        resp = await requestor.request("GET", "/test", options=opts)
+        assert resp.status_code == 200
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_read_timeout_deadline_within_budget(self) -> None:
+        import time
+
+        class FlakyAsyncTimeoutTransport(httpx.AsyncBaseTransport):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                self.calls += 1
+                if self.calls == 1:
+                    raise httpx.ReadTimeout("Read timed out")
+                return httpx.Response(200, json={"ok": True})
+
+        client = httpx.AsyncClient(transport=FlakyAsyncTimeoutTransport())
+        policy = RetryPolicy(max_retries=2, base_delay=0.001, jitter=False)
+        requestor = _AsyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 10.0)
+        resp = await requestor.request("GET", "/test", options=opts)
+        assert resp.status_code == 200
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_read_error_deadline_within_budget(self) -> None:
+        import time
+
+        class FlakyAsyncReadErrorTransport(httpx.AsyncBaseTransport):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                self.calls += 1
+                if self.calls == 1:
+                    raise httpx.ReadError("Reset by peer")
+                return httpx.Response(200, json={"ok": True})
+
+        client = httpx.AsyncClient(transport=FlakyAsyncReadErrorTransport())
+        policy = RetryPolicy(max_retries=2, base_delay=0.001, jitter=False)
+        requestor = _AsyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        opts = RequestOptions(deadline=time.monotonic() + 10.0)
+        resp = await requestor.request("GET", "/test", options=opts)
+        assert resp.status_code == 200
+        await client.aclose()

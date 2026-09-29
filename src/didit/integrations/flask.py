@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import inspect
 import os
@@ -21,6 +22,7 @@ from didit.config import DEFAULT_WEBHOOK_MAX_AGE_SECONDS
 from didit.dedup import (
     AsyncWebhookDedupStore,
     WebhookDedupStore,
+    aclaim_webhook_event,
     compute_dedup_key,
 )
 from didit.errors import DiditConfigurationError, DiditSignatureError
@@ -74,7 +76,18 @@ def parse_flask_webhook(
     if content_length is not None and content_length > max_body_bytes:
         raise ValueError(f"Webhook payload exceeds maximum size limit of {max_body_bytes} bytes")
 
-    raw_body = req.get_data(cache=False, as_text=False)
+    with contextlib.suppress(Exception):
+        req.max_content_length = max_body_bytes
+
+    try:
+        raw_body = req.get_data(cache=False, as_text=False)
+    except Exception as exc:
+        if exc.__class__.__name__ == "RequestEntityTooLarge" or getattr(exc, "code", None) == 413:
+            raise ValueError(
+                f"Webhook payload exceeds maximum size limit of {max_body_bytes} bytes"
+            ) from exc
+        raise
+
     if len(raw_body) > max_body_bytes:
         raise ValueError(f"Webhook payload exceeds maximum size limit of {max_body_bytes} bytes")
 
@@ -127,6 +140,17 @@ def didit_webhook(
     def decorator(view_func: Callable[..., Any]) -> Callable[..., Any]:
         is_async = inspect.iscoroutinefunction(view_func)
 
+        if (
+            not is_async
+            and dedup_store is not None
+            and hasattr(dedup_store, "aclaim")
+            and not hasattr(dedup_store, "claim")
+        ):
+            raise DiditConfigurationError(
+                "AsyncWebhookDedupStore cannot be used with synchronous Flask view functions. "
+                "Use WebhookDedupStore."
+            )
+
         if is_async:
 
             @functools.wraps(view_func)
@@ -170,14 +194,9 @@ def didit_webhook(
                         )
                         dedup_key = compute_dedup_key(payload, signature=sig)
 
-                    if hasattr(dedup_store, "aclaim") and callable(dedup_store.aclaim):
-                        is_new = await dedup_store.aclaim(dedup_key, ttl_seconds=dedup_ttl_seconds)
-                    else:
-                        claim_res = dedup_store.claim(dedup_key, ttl_seconds=dedup_ttl_seconds)
-                        if inspect.isawaitable(claim_res):
-                            is_new = bool(await claim_res)
-                        else:
-                            is_new = bool(claim_res)
+                    is_new = await aclaim_webhook_event(
+                        dedup_store, dedup_key, ttl_seconds=dedup_ttl_seconds
+                    )
 
                     if not is_new:
                         if duplicate_action == "respond_ok":
@@ -247,7 +266,21 @@ def didit_webhook(
                     )
                     dedup_key = compute_dedup_key(payload, signature=sig)
 
-                is_new = bool(dedup_store.claim(dedup_key, ttl_seconds=dedup_ttl_seconds))
+                claim_fn = getattr(dedup_store, "claim", None)
+                if claim_fn is None:
+                    raise DiditConfigurationError(
+                        "AsyncWebhookDedupStore cannot be used with "
+                        "synchronous Flask view functions. Use WebhookDedupStore."
+                    )
+                claim_res = claim_fn(dedup_key, ttl_seconds=dedup_ttl_seconds)
+                if inspect.isawaitable(claim_res):
+                    if inspect.iscoroutine(claim_res):
+                        claim_res.close()
+                    raise DiditConfigurationError(
+                        "dedup_store.claim returned a coroutine in a synchronous Flask view. "
+                        "Provide a synchronous WebhookDedupStore."
+                    )
+                is_new = bool(claim_res)
                 if not is_new:
                     if duplicate_action == "respond_ok":
                         return Response(

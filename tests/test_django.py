@@ -297,3 +297,29 @@ class TestParseDjangoWebhook:
         request.headers["content-length"] = "not-a-number"  # type: ignore[attr-defined]
         payload = parse_django_webhook(request, secret=SECRET)
         assert payload.session_id == "ses_django_123"
+
+    def test_unread_stream_request_within_limit(self) -> None:
+        from unittest.mock import MagicMock
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        # Mock request without _body, but with read()
+        mock_req = MagicMock(spec=HttpRequest)
+        del mock_req._body
+        raw_body = req.body
+        mock_req.read = MagicMock(return_value=raw_body)
+        mock_req.headers = dict(req.headers)
+        mock_req.META = dict(req.META)
+        payload = parse_django_webhook(mock_req, secret=SECRET)
+        assert payload.session_id == "ses_django_123"
+        assert mock_req._body == raw_body
+
+    def test_unread_stream_request_exceeds_limit(self) -> None:
+        from unittest.mock import MagicMock
+
+        mock_req = MagicMock(spec=HttpRequest)
+        del mock_req._body
+        mock_req.read = MagicMock(return_value=b"x" * 50)
+        mock_req.headers = {}
+        mock_req.META = {}
+        with pytest.raises(ValueError, match="exceeds maximum size limit"):
+            parse_django_webhook(mock_req, secret=SECRET, max_body_bytes=20)

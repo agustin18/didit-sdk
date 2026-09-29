@@ -40,6 +40,13 @@ class TestInMemoryDedupStore:
         with pytest.raises(ValueError, match="max_entries must be greater than or equal to 1"):
             InMemoryWebhookDedupStore(max_entries=0)
 
+    def test_invalid_ttl(self) -> None:
+        store = InMemoryWebhookDedupStore()
+        with pytest.raises(ValueError, match="ttl_seconds must be greater than zero"):
+            store.claim("evt", ttl_seconds=0)
+        with pytest.raises(ValueError, match="ttl_seconds must be greater than zero"):
+            store.claim("evt", ttl_seconds=-1)
+
     def test_claim_and_duplicate(self) -> None:
         store = InMemoryWebhookDedupStore(max_entries=100)
         assert store.claim("evt_1", ttl_seconds=60) is True
@@ -49,7 +56,7 @@ class TestInMemoryDedupStore:
     def test_expiration_allows_reclaim(self, monkeypatch: pytest.MonkeyPatch) -> None:
         store = InMemoryWebhookDedupStore(max_entries=100)
         current_time = 1_000_000.0
-        monkeypatch.setattr(time, "time", lambda: current_time)
+        monkeypatch.setattr(time, "monotonic", lambda: current_time)
 
         assert store.claim("evt_exp", ttl_seconds=10) is True
         assert store.claim("evt_exp", ttl_seconds=10) is False
@@ -61,7 +68,7 @@ class TestInMemoryDedupStore:
     def test_saturation_purges_expired_then_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         store = InMemoryWebhookDedupStore(max_entries=2)
         current_time = 1_000_000.0
-        monkeypatch.setattr(time, "time", lambda: current_time)
+        monkeypatch.setattr(time, "monotonic", lambda: current_time)
 
         # Fill with 2 items: evt_1 expires in 5s, evt_2 in 20s
         assert store.claim("evt_1", ttl_seconds=5) is True
@@ -186,18 +193,18 @@ class TestComputeDedupKey:
                     "timestamp": 1727640000,
                 },
                 None,
-                "sess_2:Declined:1727640000",
+                "didit:event:sess_2:session.updated:Declined",
             ),
             (
                 {
                     "event_id": None,
                     "session_id": "sess_3",
                     "status": SessionStatus.IN_REVIEW,
+                    "webhook_type": "custom.status",
                     "timestamp": None,
                 },
                 "sig_hex_abc",
-                # sha256("sig_hex_abc")[:16] = 2239e780888dbd96
-                "sess_3:In Review:2239e780888dbd96",
+                "didit:event:sess_3:custom.status:In Review",
             ),
             (
                 {
@@ -207,7 +214,7 @@ class TestComputeDedupKey:
                     "timestamp": None,
                 },
                 None,
-                "sess_4:Expired",
+                "didit:event:sess_4:session.updated:Expired",
             ),
         ],
     )
@@ -216,3 +223,23 @@ class TestComputeDedupKey:
     ) -> None:
         payload = WebhookPayload(**kwargs)
         assert compute_dedup_key(payload, signature=signature) == expected
+
+
+class TestAclaimWebhookEvent:
+    @pytest.mark.asyncio
+    async def test_invalid_store_raises_configuration_error(self) -> None:
+        from didit.dedup import aclaim_webhook_event
+        from didit.errors import DiditConfigurationError
+
+        with pytest.raises(DiditConfigurationError, match="does not implement"):
+            await aclaim_webhook_event(object(), "key")  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_async_claim_coroutine(self) -> None:
+        from didit.dedup import aclaim_webhook_event
+
+        class CoroutineClaimStore:
+            async def claim(self, key: str, ttl_seconds: int = 86400) -> bool:
+                return True
+
+        assert await aclaim_webhook_event(CoroutineClaimStore(), "key") is True  # type: ignore[arg-type]

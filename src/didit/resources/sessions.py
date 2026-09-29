@@ -133,8 +133,9 @@ class SessionsResource:
             poll_options = RequestOptions(
                 idempotency_key=options.idempotency_key if options else None,
                 timeout=effective_timeout,
-                max_retries=options.max_retries if options else None,
+                max_retries=0,
                 headers=options.headers if options else None,
+                deadline=deadline,
             )
 
             try:
@@ -146,6 +147,13 @@ class SessionsResource:
                 DiditConnectionError,
             ) as exc:
                 if not tolerate_transient_errors:
+                    raise
+                if isinstance(exc, DiditServerError) and exc.status_code not in (
+                    500,
+                    502,
+                    503,
+                    504,
+                ):
                     raise
                 now = time.monotonic()
                 if now >= deadline:
@@ -278,8 +286,9 @@ class AsyncSessionsResource:
             poll_options = RequestOptions(
                 idempotency_key=options.idempotency_key if options else None,
                 timeout=effective_timeout,
-                max_retries=options.max_retries if options else None,
+                max_retries=0,
                 headers=options.headers if options else None,
+                deadline=deadline,
             )
 
             try:
@@ -291,6 +300,13 @@ class AsyncSessionsResource:
                 DiditConnectionError,
             ) as exc:
                 if not tolerate_transient_errors:
+                    raise
+                if isinstance(exc, DiditServerError) and exc.status_code not in (
+                    500,
+                    502,
+                    503,
+                    504,
+                ):
                     raise
                 now = time.monotonic()
                 if now >= deadline:

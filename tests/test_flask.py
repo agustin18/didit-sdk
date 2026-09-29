@@ -10,7 +10,7 @@ import pytest
 from flask import Flask, Response, g, jsonify
 
 from didit.dedup import InMemoryWebhookDedupStore
-from didit.errors import DiditConfigurationError
+from didit.errors import DiditConfigurationError, DiditSignatureError
 from didit.integrations.flask import didit_webhook, parse_flask_webhook
 from didit.models.enums import SessionStatus
 from didit.models.webhook import WebhookPayload
@@ -342,3 +342,41 @@ class TestParseFlaskWebhook:
 
         payload = parse_flask_webhook(request_obj=mock_req, secret=SECRET)
         assert payload.session_id == "ses_flask_123"
+
+    def test_flask_max_content_length_setter_exception(self) -> None:
+        class ReqWithFailingSetter:
+            headers = {}
+
+            def __setattr__(self, name: str, val: Any) -> None:
+                if name == "max_content_length":
+                    raise AttributeError("Cannot set")
+                super().__setattr__(name, val)
+
+            def get_data(self, **kwargs: Any) -> bytes:
+                return b'{"ok": true}'
+
+        req = ReqWithFailingSetter()
+        with pytest.raises(DiditSignatureError):
+            parse_flask_webhook(request_obj=req, secret="sec", max_body_bytes=100)
+
+    def test_flask_get_data_entity_too_large_exception(self) -> None:
+        from unittest.mock import MagicMock
+
+        from werkzeug.exceptions import RequestEntityTooLarge
+
+        mock_req = MagicMock()
+        mock_req.content_length = None
+        mock_req.headers = {}
+        mock_req.get_data.side_effect = RequestEntityTooLarge("Too large")
+        with pytest.raises(ValueError, match="exceeds maximum size limit"):
+            parse_flask_webhook(request_obj=mock_req, secret="sec", max_body_bytes=100)
+
+    def test_flask_get_data_unexpected_exception_reraises(self) -> None:
+        from unittest.mock import MagicMock
+
+        mock_req = MagicMock()
+        mock_req.content_length = None
+        mock_req.headers = {}
+        mock_req.get_data.side_effect = RuntimeError("Disk IO failure")
+        with pytest.raises(RuntimeError, match="Disk IO failure"):
+            parse_flask_webhook(request_obj=mock_req, secret="sec", max_body_bytes=100)

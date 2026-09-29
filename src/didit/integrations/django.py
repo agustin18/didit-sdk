@@ -25,6 +25,7 @@ from didit.config import DEFAULT_WEBHOOK_MAX_AGE_SECONDS
 from didit.dedup import (
     AsyncWebhookDedupStore,
     WebhookDedupStore,
+    aclaim_webhook_event,
     compute_dedup_key,
 )
 from didit.errors import DiditConfigurationError, DiditSignatureError
@@ -77,9 +78,20 @@ def parse_django_webhook(
                 f"Webhook payload exceeds maximum size limit of {max_body_bytes} bytes"
             )
 
-    raw_body = request.body
-    if len(raw_body) > max_body_bytes:
-        raise ValueError(f"Webhook payload exceeds maximum size limit of {max_body_bytes} bytes")
+    if not hasattr(request, "_body") and hasattr(request, "read"):
+        chunk = request.read(max_body_bytes + 1)
+        if len(chunk) > max_body_bytes:
+            raise ValueError(
+                f"Webhook payload exceeds maximum size limit of {max_body_bytes} bytes"
+            )
+        request._body = chunk
+        raw_body = chunk
+    else:
+        raw_body = request.body
+        if len(raw_body) > max_body_bytes:
+            raise ValueError(
+                f"Webhook payload exceeds maximum size limit of {max_body_bytes} bytes"
+            )
 
     headers_mapping: dict[str, str] = {}
     if hasattr(request, "headers"):
@@ -139,6 +151,17 @@ def didit_webhook_view(
     def decorator(view_func: Callable[..., Any]) -> Callable[..., Any]:
         is_async = inspect.iscoroutinefunction(view_func)
 
+        if (
+            not is_async
+            and dedup_store is not None
+            and hasattr(dedup_store, "aclaim")
+            and not hasattr(dedup_store, "claim")
+        ):
+            raise DiditConfigurationError(
+                "AsyncWebhookDedupStore cannot be used with synchronous Django view functions. "
+                "Use WebhookDedupStore."
+            )
+
         if is_async:
 
             @functools.wraps(view_func)
@@ -180,14 +203,9 @@ def didit_webhook_view(
                         ).get("x-signature-v2")
                         dedup_key = compute_dedup_key(payload, signature=sig)
 
-                    if hasattr(dedup_store, "aclaim") and callable(dedup_store.aclaim):
-                        is_new = await dedup_store.aclaim(dedup_key, ttl_seconds=dedup_ttl_seconds)
-                    else:
-                        claim_res = dedup_store.claim(dedup_key, ttl_seconds=dedup_ttl_seconds)
-                        if inspect.isawaitable(claim_res):
-                            is_new = bool(await claim_res)
-                        else:
-                            is_new = bool(claim_res)
+                    is_new = await aclaim_webhook_event(
+                        dedup_store, dedup_key, ttl_seconds=dedup_ttl_seconds
+                    )
 
                     if not is_new:
                         if duplicate_action == "respond_ok":
@@ -255,7 +273,21 @@ def didit_webhook_view(
                     ).get("x-signature-v2")
                     dedup_key = compute_dedup_key(payload, signature=sig)
 
-                is_new = bool(dedup_store.claim(dedup_key, ttl_seconds=dedup_ttl_seconds))
+                claim_fn = getattr(dedup_store, "claim", None)
+                if claim_fn is None:
+                    raise DiditConfigurationError(
+                        "AsyncWebhookDedupStore cannot be used with "
+                        "synchronous Django view functions. Use WebhookDedupStore."
+                    )
+                claim_res = claim_fn(dedup_key, ttl_seconds=dedup_ttl_seconds)
+                if inspect.isawaitable(claim_res):
+                    if inspect.iscoroutine(claim_res):
+                        claim_res.close()
+                    raise DiditConfigurationError(
+                        "dedup_store.claim returned a coroutine in a synchronous Django view. "
+                        "Provide a synchronous WebhookDedupStore."
+                    )
+                is_new = bool(claim_res)
                 if not is_new:
                     if duplicate_action == "respond_ok":
                         return HttpResponse(

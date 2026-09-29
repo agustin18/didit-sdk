@@ -51,6 +51,11 @@ class Didit:
         self._http = http_client or httpx.Client(
             timeout=self._config.timeout,
         )
+        if default_options and default_options.idempotency_key is not None:
+            raise DiditConfigurationError(
+                "idempotency_key cannot be set as a client-level default option. "
+                "It must be provided per-request."
+            )
         self._default_options = default_options
         self._retry_policy = retry_policy or RetryPolicy(
             max_retries=self._config.max_retries,
@@ -83,6 +88,11 @@ class Didit:
 
     def with_options(self, options: RequestOptions) -> Didit:
         """Return a new client clone with additional or overridden default options."""
+        if options.idempotency_key is not None:
+            raise DiditConfigurationError(
+                "idempotency_key cannot be set as a client-level default option. "
+                "It must be provided per-request."
+            )
         return Didit(
             config=self._config,
             http_client=self._http,
@@ -169,6 +179,11 @@ class AsyncDidit:
         self._http = http_client or httpx.AsyncClient(
             timeout=self._config.timeout,
         )
+        if default_options and default_options.idempotency_key is not None:
+            raise DiditConfigurationError(
+                "idempotency_key cannot be set as a client-level default option. "
+                "It must be provided per-request."
+            )
         self._default_options = default_options
         self._retry_policy = retry_policy or RetryPolicy(
             max_retries=self._config.max_retries,
@@ -201,6 +216,11 @@ class AsyncDidit:
 
     def with_options(self, options: RequestOptions) -> AsyncDidit:
         """Return a new async client clone with additional or overridden default options."""
+        if options.idempotency_key is not None:
+            raise DiditConfigurationError(
+                "idempotency_key cannot be set as a client-level default option. "
+                "It must be provided per-request."
+            )
         return AsyncDidit(
             config=self._config,
             http_client=self._http,
