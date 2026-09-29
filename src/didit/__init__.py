@@ -43,6 +43,7 @@ from didit.models.decision import (
     IdVerificationResult,
     LivenessResult,
     ReviewData,
+    VerificationWarning,
 )
 from didit.models.enums import Language, SessionStatus
 from didit.models.session import CreateSessionRequest, SessionResponse
@@ -91,6 +92,7 @@ __all__ = [
     "SessionStatus",
     "SimulatedAsyncDidit",
     "SimulatedDidit",
+    "VerificationWarning",
     "WebhookDedupStore",
     "WebhookPayload",
     "__version__",

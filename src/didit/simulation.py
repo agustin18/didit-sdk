@@ -22,10 +22,20 @@ from didit.models.decision import (
     IdVerificationResult,
     LivenessResult,
     ReviewData,
+    VerificationWarning,
 )
 from didit.models.enums import Language, SessionStatus
 from didit.models.session import SessionResponse
 from didit.webhooks import compute_signature
+
+SUPPORTED_SANDBOX_SCENARIOS: set[str] = {
+    "approve",
+    "decline_document_expired",
+    "decline_face_mismatch",
+    "decline_aml_hit",
+    "review_suspicious",
+    "resubmit",
+}
 
 
 class _SimulatedStorage:
@@ -39,7 +49,18 @@ class _SimulatedStorage:
         workflow_id: str,
         callback: str | None = None,
         language: Language | str | None = None,
+        sandbox_scenario: str | None = None,
     ) -> SessionResponse:
+        if sandbox_scenario is not None and sandbox_scenario not in SUPPORTED_SANDBOX_SCENARIOS:
+            raise DiditConfigurationError(
+                f"Unsupported sandbox scenario '{sandbox_scenario}'. "
+                f"Supported: {sorted(SUPPORTED_SANDBOX_SCENARIOS)}"
+            )
+
+        scenario = sandbox_scenario or (
+            vendor_data if vendor_data in SUPPORTED_SANDBOX_SCENARIOS else None
+        )
+
         session_id = f"sim_{uuid.uuid4().hex}"
         session = SessionResponse(
             session_id=session_id,
@@ -58,6 +79,89 @@ class _SimulatedStorage:
         )
         self.sessions[session_id] = session
         self.decisions[session_id] = decision
+
+        if scenario == "approve":
+            self.approve(session_id)
+        elif scenario == "decline_document_expired":
+            session.status = SessionStatus.DECLINED
+            decision.status = SessionStatus.DECLINED
+            decision.id_verifications = [
+                IdVerificationResult(
+                    document_type="passport",
+                    status="Declined",
+                    country="ESP",
+                    expiration_date="2020-01-01",
+                )
+            ]
+            decision.warnings = [
+                VerificationWarning(
+                    code="DOCUMENT_EXPIRED",
+                    message="Document has expired",
+                    severity="high",
+                )
+            ]
+            decision.reviews = [
+                ReviewData(reviewed_by="system", decision_reason="Document expired")
+            ]
+        elif scenario == "decline_face_mismatch":
+            session.status = SessionStatus.DECLINED
+            decision.status = SessionStatus.DECLINED
+            decision.face_matches = [FaceMatchResult(status="Declined", score=15.0)]
+            decision.warnings = [
+                VerificationWarning(
+                    code="FACE_MISMATCH",
+                    message="Facial biometric similarity below threshold",
+                    severity="high",
+                )
+            ]
+            decision.reviews = [ReviewData(reviewed_by="system", decision_reason="Face mismatch")]
+        elif scenario == "decline_aml_hit":
+            session.status = SessionStatus.DECLINED
+            decision.status = SessionStatus.DECLINED
+            decision.aml_screenings = [
+                AMLScreeningResult(
+                    status="Declined",
+                    pep_detected=True,
+                    sanctions_detected=True,
+                )
+            ]
+            decision.warnings = [
+                VerificationWarning(
+                    code="AML_SANCTION_MATCH",
+                    message="Matches identified on international sanctions list",
+                    severity="critical",
+                )
+            ]
+            decision.reviews = [
+                ReviewData(reviewed_by="system", decision_reason="AML screening match")
+            ]
+        elif scenario == "review_suspicious":
+            session.status = SessionStatus.IN_REVIEW
+            decision.status = SessionStatus.IN_REVIEW
+            decision.warnings = [
+                VerificationWarning(
+                    code="SUSPICIOUS_DOCUMENT",
+                    message="Document exhibits visual irregularities",
+                    severity="medium",
+                )
+            ]
+            decision.reviews = [
+                ReviewData(
+                    reviewed_by="fraud_engine",
+                    decision_reason="Flagged for manual review",
+                )
+            ]
+        elif scenario == "resubmit":
+            session.status = SessionStatus.RESUBMITTED
+            decision.status = SessionStatus.RESUBMITTED
+            decision.warnings = [
+                VerificationWarning(
+                    code="IMAGE_BLURRY",
+                    message="Front of identity document was out of focus",
+                    severity="medium",
+                )
+            ]
+
         return session.model_copy(deep=True)
 
     def get(self, session_id: str) -> SessionResponse:
@@ -93,7 +197,7 @@ class _SimulatedStorage:
             country="ESP",
             is_valid=True,
         )
-        bio = biometrics or BiometricsData(face_match=True, liveness_check=True, score=0.99)
+        bio = biometrics or BiometricsData(face_match=True, liveness_check=True, score=99.0)
         aml_data = aml or AMLData(
             pep_detected=False, sanctions_detected=False, adverse_media_detected=False
         )
@@ -112,13 +216,13 @@ class _SimulatedStorage:
 
         liveness = LivenessResult(
             status="Approved" if bio.liveness_check is not False else "Declined",
-            score=bio.score if bio.score is not None else (0.99 if bio.liveness_check else 0.0),
+            score=bio.score if bio.score is not None else (99.0 if bio.liveness_check else 0.0),
         )
         decision.liveness_checks = [liveness]
 
         face_match = FaceMatchResult(
             status="Approved" if bio.face_match is not False else "Declined",
-            score=bio.score if bio.score is not None else (0.99 if bio.face_match else 0.0),
+            score=bio.score if bio.score is not None else (99.0 if bio.face_match else 0.0),
         )
         decision.face_matches = [face_match]
 
@@ -165,12 +269,14 @@ class SimulatedSessionsResource:
         workflow_id: str,
         callback: str | None = None,
         language: Language | str | None = None,
+        sandbox_scenario: str | None = None,
     ) -> SessionResponse:
         return self._storage.create(
             vendor_data=vendor_data,
             workflow_id=workflow_id,
             callback=callback,
             language=language,
+            sandbox_scenario=sandbox_scenario,
         )
 
     def get(self, session_id: str) -> SessionResponse:
@@ -207,12 +313,14 @@ class SimulatedAsyncSessionsResource:
         workflow_id: str,
         callback: str | None = None,
         language: Language | str | None = None,
+        sandbox_scenario: str | None = None,
     ) -> SessionResponse:
         return self._storage.create(
             vendor_data=vendor_data,
             workflow_id=workflow_id,
             callback=callback,
             language=language,
+            sandbox_scenario=sandbox_scenario,
         )
 
     async def get(self, session_id: str) -> SessionResponse:

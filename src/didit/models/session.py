@@ -26,6 +26,10 @@ class CreateSessionRequest(BaseModel):
         default=None,
         description="Two-letter ISO 639-1 language code (e.g., 'es', 'en')",
     )
+    sandbox_scenario: str | None = Field(
+        default=None,
+        description="Optional Didit sandbox outcome slug e.g. approve, decline_document_expired",
+    )
 
 
 class SessionResponse(BaseModel):

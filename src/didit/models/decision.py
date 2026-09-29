@@ -172,6 +172,25 @@ class ReviewData(BaseModel):
         )
 
 
+class VerificationWarning(BaseModel):
+    """Diagnostic warning or non-fatal issue encountered during verification."""
+
+    model_config = ConfigDict(extra="allow")
+
+    code: str = Field(..., description="Machine-readable warning code e.g. DOC_EXPIRING_SOON")
+    message: str = Field(..., description="Human-readable explanation of warning")
+    severity: str | None = Field(
+        default=None, description="Warning severity e.g. low, medium, high"
+    )
+    details: dict[str, Any] | None = Field(default=None, description="Detailed diagnostic context")
+
+    def __repr__(self) -> str:
+        return (
+            f"VerificationWarning(code={self.code!r}, "
+            f"message={self.message!r}, severity={self.severity!r})"
+        )
+
+
 class DecisionResponse(BaseModel):
     """Complete verification decision returned by Didit V3 API.
 
@@ -218,6 +237,9 @@ class DecisionResponse(BaseModel):
     )
     reviews: list[ReviewData] = Field(
         default_factory=list, description="Human or agent review records"
+    )
+    warnings: list[VerificationWarning] = Field(
+        default_factory=list, description="Non-fatal verification warnings and diagnostics"
     )
     raw_data: dict[str, Any] | None = Field(
         default=None, description="Raw JSON payload received from Didit"
@@ -322,7 +344,25 @@ class DecisionResponse(BaseModel):
                 {"reviewed_by": r.reviewed_by, "decision_reason": r.decision_reason}
                 for r in self.reviews
             ],
+            "warnings": [
+                {
+                    "code": w.code,
+                    "message": w.message,
+                    "severity": w.severity,
+                    "details": w.details,
+                }
+                for w in self.warnings
+            ],
         }
+
+    def has_warning(self, code: str) -> bool:
+        """Check whether a specific warning code is present in the decision."""
+        return any(w.code == code for w in self.warnings)
+
+    @property
+    def warning_codes(self) -> list[str]:
+        """List of all warning codes emitted for this verification decision."""
+        return [w.code for w in self.warnings]
 
     @property
     def document(self) -> DocumentData | None:
