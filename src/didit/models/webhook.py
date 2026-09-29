@@ -46,3 +46,11 @@ class WebhookPayload(BaseModel):
     raw_data: dict[str, Any] | None = Field(
         default=None, description="Complete unparsed JSON payload"
     )
+
+    def __repr__(self) -> str:
+        return (
+            f"WebhookPayload(event_id={self.event_id!r}, "
+            f"session_id={self.session_id!r}, "
+            f"status={self.status.value!r}, "
+            f"webhook_type={self.webhook_type!r})"
+        )

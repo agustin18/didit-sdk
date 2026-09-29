@@ -96,3 +96,68 @@ class TestFastAPIWebhookGuard:
         monkeypatch.delenv("DIDIT_WEBHOOK_SECRET", raising=False)
         with pytest.raises(DiditConfigurationError, match="Missing webhook secret"):
             DiditWebhookGuard()
+
+    def test_payload_too_large_content_length_returns_413(self, client: TestClient) -> None:
+        resp = client.post(
+            "/webhooks/didit",
+            content=b"{}",
+            headers={
+                "X-Signature-V2": "sig",
+                "Content-Type": "application/json",
+                "Content-Length": "2000000",
+            },
+        )
+        assert resp.status_code == 413
+        assert "exceeds maximum size limit" in resp.json()["detail"]
+
+    def test_payload_too_large_streaming_returns_413(self) -> None:
+        small_guard = DiditWebhookGuard(secret=WEBHOOK_SECRET, max_body_bytes=50)
+        custom_app = FastAPI()
+
+        @custom_app.post("/test-limit")
+        async def endpoint(payload: WebhookPayload = Depends(small_guard)) -> dict[str, str]:
+            return {"ok": "true"}
+
+        test_client = TestClient(custom_app)
+
+        def stream_gen():
+            yield b"a" * 30
+            yield b"b" * 30
+
+        resp = test_client.post(
+            "/test-limit",
+            content=stream_gen(),
+            headers={"X-Signature-V2": "sig", "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 413
+        assert "exceeds maximum size limit" in resp.json()["detail"]
+
+    def test_invalid_content_length_falls_through_to_stream(self) -> None:
+        small_guard = DiditWebhookGuard(secret=WEBHOOK_SECRET, max_body_bytes=50)
+        custom_app = FastAPI()
+
+        @custom_app.post("/test-invalid-cl")
+        async def endpoint(payload: WebhookPayload = Depends(small_guard)) -> dict[str, str]:
+            return {"ok": "true"}
+
+        test_client = TestClient(custom_app)
+        resp = test_client.post(
+            "/test-invalid-cl",
+            content=b"not json",
+            headers={
+                "X-Signature-V2": "sig",
+                "Content-Type": "application/json",
+                "Content-Length": "invalid_number",
+            },
+        )
+        assert resp.status_code == 400
+
+    def test_deeply_nested_json_returns_400(self, client: TestClient) -> None:
+        nested = b'{"a":' * 10000 + b"1" + b"}" * 10000
+        resp = client.post(
+            "/webhooks/didit",
+            content=nested,
+            headers={"X-Signature-V2": "sig", "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 400
+        assert "Malformed JSON" in resp.json()["detail"]

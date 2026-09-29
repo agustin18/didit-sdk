@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
-import copy
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from didit.models.enums import SessionStatus
+
+
+def _legacy_bool(status: str | None) -> bool | None:
+    """Map Didit status to legacy boolean, returning None for non-decided states."""
+    if status == "Approved":
+        return True
+    if status == "Declined":
+        return False
+    return None
 
 
 class IdVerificationResult(BaseModel):
@@ -27,6 +35,13 @@ class IdVerificationResult(BaseModel):
     date_of_birth: str | None = Field(default=None, description="YYYY-MM-DD format")
     expiration_date: str | None = Field(default=None, description="YYYY-MM-DD format")
 
+    def __repr__(self) -> str:
+        return (
+            f"IdVerificationResult(node_id={self.node_id!r}, "
+            f"status={self.status!r}, "
+            f"document_type={self.document_type!r})"
+        )
+
 
 class LivenessResult(BaseModel):
     """Facial liveness verification assessment."""
@@ -37,6 +52,11 @@ class LivenessResult(BaseModel):
     status: str | None = Field(default=None, description="Check outcome e.g. Approved, Declined")
     score: float | None = Field(default=None, description="Liveness confidence score")
 
+    def __repr__(self) -> str:
+        return (
+            f"LivenessResult(node_id={self.node_id!r}, status={self.status!r}, score={self.score})"
+        )
+
 
 class FaceMatchResult(BaseModel):
     """Facial match assessment comparing document photo against selfie."""
@@ -46,6 +66,11 @@ class FaceMatchResult(BaseModel):
     node_id: str | None = Field(default=None, description="Workflow step identifier")
     status: str | None = Field(default=None, description="Check outcome e.g. Approved, Declined")
     score: float | None = Field(default=None, description="Facial comparison score")
+
+    def __repr__(self) -> str:
+        return (
+            f"FaceMatchResult(node_id={self.node_id!r}, status={self.status!r}, score={self.score})"
+        )
 
 
 class AMLScreeningResult(BaseModel):
@@ -62,6 +87,9 @@ class AMLScreeningResult(BaseModel):
         default=None, description="International sanctions list match"
     )
     adverse_media_detected: bool | None = Field(default=None, description="Adverse media match")
+
+    def __repr__(self) -> str:
+        return f"AMLScreeningResult(node_id={self.node_id!r}, status={self.status!r})"
 
 
 class DocumentData(BaseModel):
@@ -82,6 +110,12 @@ class DocumentData(BaseModel):
         default=None, description="Whether document authenticity checks passed"
     )
 
+    def __repr__(self) -> str:
+        return (
+            f"DocumentData(document_type={self.document_type!r}, "
+            f"country={self.country!r}, is_valid={self.is_valid})"
+        )
+
 
 class BiometricsData(BaseModel):
     """Backward-compatible biometrics assessment view."""
@@ -93,8 +127,14 @@ class BiometricsData(BaseModel):
         default=None, description="Active or passive liveness check"
     )
     score: float | None = Field(
-        default=None, description="Biometric confidence score between 0.0 and 1.0"
+        default=None, description="Biometric confidence score between 0.0 and 100.0"
     )
+
+    def __repr__(self) -> str:
+        return (
+            f"BiometricsData(face_match={self.face_match}, "
+            f"liveness_check={self.liveness_check}, score={self.score})"
+        )
 
 
 class AMLData(BaseModel):
@@ -110,6 +150,12 @@ class AMLData(BaseModel):
     )
     adverse_media_detected: bool | None = Field(default=None, description="Adverse media match")
 
+    def __repr__(self) -> str:
+        return (
+            f"AMLData(pep_detected={self.pep_detected}, "
+            f"sanctions_detected={self.sanctions_detected})"
+        )
+
 
 class ReviewData(BaseModel):
     """Manual or compliance agent review information."""
@@ -118,6 +164,12 @@ class ReviewData(BaseModel):
 
     reviewed_by: str | None = Field(default=None, description="Identifier of the reviewer")
     decision_reason: str | None = Field(default=None, description="Reviewer explanation or notes")
+
+    def __repr__(self) -> str:
+        return (
+            f"ReviewData(reviewed_by={self.reviewed_by!r}, "
+            f"decision_reason={self.decision_reason!r})"
+        )
 
 
 class DecisionResponse(BaseModel):
@@ -177,16 +229,17 @@ class DecisionResponse(BaseModel):
         if not isinstance(data, dict):
             return data
 
-        # Deep copy to ensure caller input dictionary is never mutated in-place
-        migrated = copy.deepcopy(data)
+        # Shallow copy to avoid mutating caller dict while avoiding full deepcopy overhead
+        migrated = dict(data)
 
         # Normalize legacy document field
         if "document" in migrated and "id_verifications" not in migrated:
             doc = migrated.pop("document")
             if doc and isinstance(doc, dict):
-                if "status" not in doc and "is_valid" in doc:
-                    doc["status"] = "Approved" if doc["is_valid"] else "Declined"
-                migrated["id_verifications"] = [doc]
+                doc_copy = dict(doc)
+                if "status" not in doc_copy and "is_valid" in doc_copy:
+                    doc_copy["status"] = "Approved" if doc_copy["is_valid"] else "Declined"
+                migrated["id_verifications"] = [doc_copy]
 
         # Normalize legacy biometrics field
         if "biometrics" in migrated:
@@ -211,15 +264,65 @@ class DecisionResponse(BaseModel):
         if "aml" in migrated and "aml_screenings" not in migrated:
             aml = migrated.pop("aml")
             if aml and isinstance(aml, dict):
-                migrated["aml_screenings"] = [aml]
+                migrated["aml_screenings"] = [dict(aml)]
 
         # Normalize legacy review field
         if "review" in migrated and "reviews" not in migrated:
             rev = migrated.pop("review")
             if rev and isinstance(rev, dict):
-                migrated["reviews"] = [rev]
+                migrated["reviews"] = [dict(rev)]
 
         return migrated
+
+    def __repr__(self) -> str:
+        return (
+            f"DecisionResponse(session_id={self.session_id!r}, "
+            f"status={self.status.value!r}, "
+            f"id_verifications={len(self.id_verifications)}, "
+            f"liveness_checks={len(self.liveness_checks)}, "
+            f"face_matches={len(self.face_matches)}, "
+            f"aml_screenings={len(self.aml_screenings)}, "
+            f"reviews={len(self.reviews)})"
+        )
+
+    def redacted_dump(self) -> dict[str, Any]:
+        """Return a privacy-sanitized dictionary omitting PII for telemetry/logging."""
+        return {
+            "session_id": self.session_id,
+            "status": self.status.value,
+            "workflow_id": self.workflow_id,
+            "id_verifications": [
+                {
+                    "node_id": v.node_id,
+                    "status": v.status,
+                    "document_type": v.document_type,
+                    "country": v.country,
+                }
+                for v in self.id_verifications
+            ],
+            "liveness_checks": [
+                {"node_id": check.node_id, "status": check.status, "score": check.score}
+                for check in self.liveness_checks
+            ],
+            "face_matches": [
+                {"node_id": f.node_id, "status": f.status, "score": f.score}
+                for f in self.face_matches
+            ],
+            "aml_screenings": [
+                {
+                    "node_id": a.node_id,
+                    "status": a.status,
+                    "pep_detected": a.pep_detected,
+                    "sanctions_detected": a.sanctions_detected,
+                    "adverse_media_detected": a.adverse_media_detected,
+                }
+                for a in self.aml_screenings
+            ],
+            "reviews": [
+                {"reviewed_by": r.reviewed_by, "decision_reason": r.decision_reason}
+                for r in self.reviews
+            ],
+        }
 
     @property
     def document(self) -> DocumentData | None:
@@ -227,9 +330,7 @@ class DecisionResponse(BaseModel):
         if not self.id_verifications:
             return None
         v = self.id_verifications[0]
-        is_valid = (
-            (v.status == "Approved") if v.status is not None else getattr(v, "is_valid", None)
-        )
+        is_valid = _legacy_bool(v.status) if v.status is not None else getattr(v, "is_valid", None)
         return DocumentData(
             first_name=v.first_name,
             last_name=v.last_name,
@@ -250,8 +351,8 @@ class DecisionResponse(BaseModel):
         face = self.face_matches[0] if self.face_matches else None
         score = live.score if (live and live.score is not None) else (face.score if face else None)
         return BiometricsData(
-            face_match=(face.status == "Approved") if (face and face.status) else None,
-            liveness_check=(live.status == "Approved") if (live and live.status) else None,
+            face_match=_legacy_bool(face.status) if (face and face.status) else None,
+            liveness_check=_legacy_bool(live.status) if (live and live.status) else None,
             score=score,
         )
 

@@ -373,3 +373,19 @@ class TestParseWebhookPayload:
         raw_body = json.dumps(payload).encode("utf-8")
         headers = {"x-signature-v2": "bad_sig_v2", "x-signature": "bad_sig_v1"}
         assert verify_webhook_signature(raw_body, headers, secret) is False
+
+    def test_deeply_nested_json_handling(self, secret: str) -> None:
+        from didit.webhooks import decode_webhook_json
+
+        nested = b'{"a":' * 10000 + b"1" + b"}" * 10000
+        # decode_webhook_json raises ValueError on excessive nesting depth
+        with pytest.raises(ValueError, match="nesting depth"):
+            decode_webhook_json(nested)
+
+        # verify_webhook_signature gracefully catches and returns False
+        headers = {"X-Signature-V2": "a" * 64, "X-Timestamp": "123456"}
+        assert verify_webhook_signature(nested, headers, secret) is False
+
+        # parse_webhook_payload raises DiditSignatureError
+        with pytest.raises(DiditSignatureError, match="Invalid JSON or unsupported webhook format"):
+            parse_webhook_payload(nested, headers, secret)

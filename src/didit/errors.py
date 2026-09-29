@@ -33,6 +33,7 @@ class DiditAPIError(DiditError):
         response_body: str | None = None,
         headers: Mapping[str, str] | None = None,
         error_code: str | None = None,
+        request_id: str | None = None,
         details: Any = None,
     ) -> None:
         super().__init__(message)
@@ -40,17 +41,25 @@ class DiditAPIError(DiditError):
         self.response_body = response_body
         self.headers = dict(headers) if headers else {}
         self.error_code = error_code
+        self.request_id = request_id
         self.details = details
 
     def __repr__(self) -> str:
-        return (
-            f"{self.__class__.__name__}(status_code={self.status_code}, "
-            f"error_code={self.error_code!r}, message={str(self)!r})"
-        )
+        parts = [f"status_code={self.status_code}"]
+        if self.error_code:
+            parts.append(f"error_code={self.error_code!r}")
+        if self.request_id:
+            parts.append(f"request_id={self.request_id!r}")
+        parts.append(f"message={str(self)!r}")
+        return f"{self.__class__.__name__}({', '.join(parts)})"
 
 
 class DiditAuthenticationError(DiditAPIError):
-    """Raised on 401 Unauthorized or 403 Forbidden responses (invalid API key)."""
+    """Raised on 401 Unauthorized responses (invalid or missing API key)."""
+
+
+class DiditPermissionError(DiditAuthenticationError):
+    """Raised on 403 Forbidden responses (insufficient permissions or inactive key)."""
 
 
 class DiditNotFoundError(DiditAPIError):
@@ -67,6 +76,7 @@ class DiditRateLimitError(DiditAPIError):
         status_code: int = 429,
         response_body: str | None = None,
         headers: Mapping[str, str] | None = None,
+        request_id: str | None = None,
         retry_after: float | None = None,
     ) -> None:
         super().__init__(
@@ -75,6 +85,7 @@ class DiditRateLimitError(DiditAPIError):
             response_body=response_body,
             headers=headers,
             error_code="RATE_LIMIT_EXCEEDED",
+            request_id=request_id,
         )
         self.retry_after = retry_after
 

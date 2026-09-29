@@ -8,6 +8,7 @@ from didit.errors import (
     DiditAPIError,
     DiditAuthenticationError,
     DiditNotFoundError,
+    DiditPermissionError,
     DiditRateLimitError,
     DiditServerError,
 )
@@ -32,15 +33,32 @@ def handle_http_error(response: httpx.Response) -> None:
     except Exception:
         pass
 
-    message = f"Didit API error ({status}): {body}"
+    request_id = headers.get("x-request-id") or headers.get("X-Request-Id")
+    msg_parts = [f"Didit API request failed (status={status})"]
+    if error_code:
+        msg_parts.append(f"code={error_code}")
+    if request_id:
+        msg_parts.append(f"request_id={request_id}")
+    message = " ".join(msg_parts)
 
-    if status in (401, 403):
+    if status == 401:
         raise DiditAuthenticationError(
             message,
             status_code=status,
             response_body=body,
             headers=headers,
             error_code=error_code,
+            request_id=request_id,
+            details=details,
+        )
+    if status == 403:
+        raise DiditPermissionError(
+            message,
+            status_code=status,
+            response_body=body,
+            headers=headers,
+            error_code=error_code,
+            request_id=request_id,
             details=details,
         )
     if status == 404:
@@ -50,6 +68,7 @@ def handle_http_error(response: httpx.Response) -> None:
             response_body=body,
             headers=headers,
             error_code=error_code,
+            request_id=request_id,
             details=details,
         )
     if status == 429:
@@ -63,6 +82,7 @@ def handle_http_error(response: httpx.Response) -> None:
             status_code=status,
             response_body=body,
             headers=headers,
+            request_id=request_id,
             retry_after=retry_after,
         )
     if status >= 500:
@@ -72,6 +92,7 @@ def handle_http_error(response: httpx.Response) -> None:
             response_body=body,
             headers=headers,
             error_code=error_code,
+            request_id=request_id,
             details=details,
         )
 
@@ -81,5 +102,6 @@ def handle_http_error(response: httpx.Response) -> None:
         response_body=body,
         headers=headers,
         error_code=error_code,
+        request_id=request_id,
         details=details,
     )

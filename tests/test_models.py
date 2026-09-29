@@ -417,3 +417,141 @@ class TestWebhookPayload:
         }
         wh = WebhookPayload.model_validate(raw)
         assert wh.workflow_version == wv
+
+    def test_pii_safe_repr_and_redacted_dump(self) -> None:
+        from didit.models.decision import (
+            AMLData,
+            AMLScreeningResult,
+            BiometricsData,
+            DocumentData,
+            FaceMatchResult,
+            IdVerificationResult,
+            LivenessResult,
+            ReviewData,
+        )
+
+        id_v = IdVerificationResult(
+            first_name="VerySecretFirst",
+            last_name="VerySecretLast",
+            document_number="PASSPORT123456",
+            status="Approved",
+            document_type="passport",
+        )
+        # Verify IdVerificationResult repr does not leak names or document numbers
+        id_repr = repr(id_v)
+        assert "VerySecretFirst" not in id_repr
+        assert "PASSPORT123456" not in id_repr
+        assert "IdVerificationResult" in id_repr
+
+        live = LivenessResult(node_id="live_1", status="Approved", score=99.0)
+        assert repr(live) == "LivenessResult(node_id='live_1', status='Approved', score=99.0)"
+
+        face = FaceMatchResult(node_id="face_1", status="Approved", score=98.5)
+        assert repr(face) == "FaceMatchResult(node_id='face_1', status='Approved', score=98.5)"
+
+        aml = AMLScreeningResult(node_id="aml_1", status="Approved", pep_detected=False)
+        assert repr(aml) == "AMLScreeningResult(node_id='aml_1', status='Approved')"
+
+        doc = DocumentData(document_type="id_card", country="ESP", is_valid=True)
+        assert repr(doc) == "DocumentData(document_type='id_card', country='ESP', is_valid=True)"
+
+        bio = BiometricsData(face_match=True, liveness_check=True, score=98.0)
+        assert repr(bio) == "BiometricsData(face_match=True, liveness_check=True, score=98.0)"
+
+        aml_data = AMLData(pep_detected=False, sanctions_detected=False)
+        assert repr(aml_data) == "AMLData(pep_detected=False, sanctions_detected=False)"
+
+        rev = ReviewData(reviewed_by="auditor_42", decision_reason="Verified clean")
+        assert repr(rev) == "ReviewData(reviewed_by='auditor_42', decision_reason='Verified clean')"
+
+        dec = DecisionResponse(
+            session_id="sess_pii_check",
+            status=SessionStatus.APPROVED,
+            id_verifications=[id_v],
+            liveness_checks=[live],
+            face_matches=[face],
+            aml_screenings=[aml],
+            reviews=[rev],
+        )
+
+        # Repr of DecisionResponse must be concise and free of PII
+        dec_repr = repr(dec)
+        assert "VerySecretFirst" not in dec_repr
+        assert "PASSPORT123456" not in dec_repr
+        assert "sess_pii_check" in dec_repr
+        assert "id_verifications=1" in dec_repr
+
+        # Redacted dump output structure
+        redacted = dec.redacted_dump()
+        assert redacted["session_id"] == "sess_pii_check"
+        assert redacted["status"] == "Approved"
+        assert len(redacted["id_verifications"]) == 1
+        assert "first_name" not in redacted["id_verifications"][0]
+        assert "document_number" not in redacted["id_verifications"][0]
+        assert redacted["id_verifications"][0]["document_type"] == "passport"
+
+        # WebhookPayload safe repr
+        wh = WebhookPayload(
+            session_id="sess_pii_check",
+            status=SessionStatus.APPROVED,
+            event_id="evt_test_123",
+            webhook_type="status.updated",
+        )
+        wh_repr = repr(wh)
+        assert "evt_test_123" in wh_repr
+        assert "WebhookPayload" in wh_repr
+
+    def test_legacy_bool_semantics_in_review_is_none(self) -> None:
+        from didit.models.decision import (
+            FaceMatchResult,
+            IdVerificationResult,
+            LivenessResult,
+        )
+
+        # In Review status must NOT map to is_valid=False or face_match=False
+        node_review = IdVerificationResult(status="In Review")
+        d = DecisionResponse(
+            session_id="s_rev",
+            status=SessionStatus.IN_REVIEW,
+            id_verifications=[node_review],
+            face_matches=[FaceMatchResult(status="In Review")],
+            liveness_checks=[LivenessResult(status="In Review")],
+        )
+        assert d.document is not None
+        assert d.document.is_valid is None  # Neither True nor False
+        assert d.biometrics is not None
+        assert d.biometrics.face_match is None  # Neither True nor False
+        assert d.biometrics.liveness_check is None  # Neither True nor False
+
+        # Declined status maps to False
+        node_declined = IdVerificationResult(status="Declined")
+        d_declined = DecisionResponse(
+            session_id="s_dec",
+            status=SessionStatus.DECLINED,
+            id_verifications=[node_declined],
+            face_matches=[FaceMatchResult(status="Declined")],
+            liveness_checks=[LivenessResult(status="Declined")],
+        )
+        assert d_declined.document is not None
+        assert d_declined.document.is_valid is False
+        assert d_declined.biometrics is not None
+        assert d_declined.biometrics.face_match is False
+        assert d_declined.biometrics.liveness_check is False
+
+    def test_shallow_copy_migration_preserves_input_dict(self) -> None:
+        raw = {
+            "session_id": "sess_preserve",
+            "status": "Approved",
+            "document": {"document_type": "passport", "first_name": "Test"},
+            "biometrics": {"face_match": True, "score": 95.0},
+            "aml": {"pep_detected": False},
+            "review": {"reviewed_by": "agent_1"},
+        }
+        raw_copy = dict(raw)
+        DecisionResponse.model_validate(raw)
+        # Caller dict keys and values must remain unmutated
+        assert "document" in raw
+        assert "biometrics" in raw
+        assert "aml" in raw
+        assert "review" in raw
+        assert raw["session_id"] == raw_copy["session_id"]
