@@ -29,7 +29,11 @@ def decode_webhook_json(raw_body: bytes) -> dict[str, Any]:
     except UnicodeDecodeError as err:
         raise ValueError("Webhook body is not valid UTF-8") from err
 
-    value = json.loads(decoded, parse_constant=_reject_non_finite)
+    try:
+        value = json.loads(decoded, parse_constant=_reject_non_finite)
+    except RecursionError as err:
+        raise ValueError("Webhook body exceeds maximum JSON nesting depth") from err
+
     if not isinstance(value, dict):
         raise ValueError("Webhook payload must be a JSON object")
     return value
@@ -153,7 +157,7 @@ def verify_webhook_signature(
 
     try:
         body = decode_webhook_json(raw_body)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return False
 
     signed_timestamp = body.get("timestamp")
@@ -201,7 +205,7 @@ def parse_webhook_payload(
     """
     try:
         body_dict = decode_webhook_json(raw_body)
-    except (ValueError, UnicodeDecodeError) as err:
+    except (ValueError, UnicodeDecodeError, RecursionError) as err:
         raise DiditSignatureError("Invalid JSON or unsupported webhook format") from err
 
     if not verify_webhook_signature(raw_body, headers, secret, max_age_seconds=max_age_seconds):
