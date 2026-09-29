@@ -22,6 +22,23 @@ class DiditTimeoutError(DiditError):
     """Raised when an operation such as polling exceeds the configured timeout limit."""
 
 
+class DiditPoolTimeoutError(DiditTimeoutError):
+    """Raised when connection pool acquisition times out under high concurrency."""
+
+
+class DiditConnectionError(DiditError):
+    """Raised on network connectivity, DNS, or socket connection errors."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.request_id = request_id
+
+
 class DiditAPIError(DiditError):
     """Raised when the Didit API returns an HTTP error status code."""
 
