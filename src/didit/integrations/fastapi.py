@@ -1,12 +1,16 @@
-"""FastAPI integration utilities and webhook security guard."""
-
-from __future__ import annotations
-
+import inspect
 import os
+from collections.abc import Callable
+from typing import Literal
 
 from starlette.requests import Request
 
 from didit.config import DEFAULT_WEBHOOK_MAX_AGE_SECONDS
+from didit.dedup import (
+    AsyncWebhookDedupStore,
+    WebhookDedupStore,
+    compute_dedup_key,
+)
 from didit.errors import DiditConfigurationError, DiditSignatureError
 from didit.models.webhook import WebhookPayload
 from didit.webhooks import parse_webhook_payload
@@ -15,14 +19,19 @@ DEFAULT_MAX_WEBHOOK_BYTES: int = 1_048_576  # 1 MiB
 
 
 class DiditWebhookGuard:
-    """FastAPI dependency for verifying and parsing Didit webhook requests.
+    """FastAPI dependency for verifying, parsing, and deduplicating Didit webhook requests.
 
     Enforces streaming body bounds (HTTP 413) to prevent memory DoS attacks,
-    and executes single-pass cryptographic verification and JSON parsing.
+    executes single-pass cryptographic verification, and optionally deduplicates
+    events against a WebhookDedupStore.
 
     Example:
         ```python
-        guard = DiditWebhookGuard(secret="whsec_...")
+        guard = DiditWebhookGuard(
+            secret="whsec_...",
+            dedup_store=InMemoryWebhookDedupStore(),
+            duplicate_action="respond_ok",
+        )
 
 
         @app.post("/webhooks/didit")
@@ -39,6 +48,10 @@ class DiditWebhookGuard:
         *,
         max_age_seconds: int = DEFAULT_WEBHOOK_MAX_AGE_SECONDS,
         max_body_bytes: int = DEFAULT_MAX_WEBHOOK_BYTES,
+        dedup_store: WebhookDedupStore | AsyncWebhookDedupStore | None = None,
+        dedup_ttl_seconds: int = 86400,
+        duplicate_action: Literal["respond_ok", "pass", "raise"] = "respond_ok",
+        dedup_key_builder: Callable[[WebhookPayload, Request], str] | None = None,
     ) -> None:
         resolved_secret = secret or os.environ.get("DIDIT_WEBHOOK_SECRET")
         if not resolved_secret:
@@ -46,9 +59,19 @@ class DiditWebhookGuard:
                 "Missing webhook secret. "
                 "Provide secret parameter or set DIDIT_WEBHOOK_SECRET environment variable."
             )
+        if duplicate_action not in ("respond_ok", "pass", "raise"):
+            raise ValueError(
+                f"Invalid duplicate_action '{duplicate_action}'. "
+                "Must be 'respond_ok', 'pass', or 'raise'."
+            )
+
         self.secret: str = resolved_secret
         self.max_age_seconds = max_age_seconds
         self.max_body_bytes = max_body_bytes
+        self.dedup_store = dedup_store
+        self.dedup_ttl_seconds = dedup_ttl_seconds
+        self.duplicate_action = duplicate_action
+        self.dedup_key_builder = dedup_key_builder
 
     async def __call__(self, request: Request) -> WebhookPayload:
         from fastapi import HTTPException
@@ -84,7 +107,7 @@ class DiditWebhookGuard:
         raw_body = b"".join(chunks)
 
         try:
-            return parse_webhook_payload(
+            payload = parse_webhook_payload(
                 raw_body,
                 request.headers,
                 self.secret,
@@ -100,3 +123,40 @@ class DiditWebhookGuard:
                 status_code=401,
                 detail="Invalid webhook signature or expired timestamp",
             ) from None
+
+        if self.dedup_store is not None:
+            if self.dedup_key_builder is not None:
+                dedup_key = self.dedup_key_builder(payload, request)
+            else:
+                sig = request.headers.get("x-signature-sha256") or request.headers.get(
+                    "x-signature-v2"
+                )
+                dedup_key = compute_dedup_key(payload, signature=sig)
+
+            if hasattr(self.dedup_store, "aclaim") and callable(self.dedup_store.aclaim):
+                is_new = await self.dedup_store.aclaim(
+                    dedup_key, ttl_seconds=self.dedup_ttl_seconds
+                )
+            else:
+                claim_res = self.dedup_store.claim(dedup_key, ttl_seconds=self.dedup_ttl_seconds)
+                if inspect.isawaitable(claim_res):
+                    is_new = bool(await claim_res)
+                else:
+                    is_new = bool(claim_res)
+
+            if not is_new:
+                if self.duplicate_action == "respond_ok":
+                    raise HTTPException(
+                        status_code=200,
+                        detail="Duplicate webhook event acknowledged",
+                    )
+                if self.duplicate_action == "raise":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Duplicate webhook event",
+                    )
+                # "pass" mode
+                payload.is_duplicate = True
+                request.state.is_duplicate = True
+
+        return payload

@@ -46,6 +46,10 @@ class WebhookPayload(BaseModel):
     raw_data: dict[str, Any] | None = Field(
         default=None, description="Complete unparsed JSON payload"
     )
+    is_duplicate: bool = Field(
+        default=False,
+        description="Whether event was identified as a duplicate by dedup store",
+    )
 
     def __repr__(self) -> str:
         return (
