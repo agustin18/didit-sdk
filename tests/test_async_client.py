@@ -242,15 +242,20 @@ class TestAsyncDiditClient:
 
     @respx.mock
     async def test_async_poll_decision_transient_error_timeout_exhausted(
-        self, async_client: AsyncDidit, base_url: str
+        self, async_client: AsyncDidit, base_url: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         respx.get(f"{base_url}/session/sess_to_async/decision/").mock(
             return_value=Response(503, json={"error": "service down"})
         )
-        with pytest.raises(DiditTimeoutError):
+        ticks = [100.0, 100.0, 105.0]
+        monkeypatch.setattr(
+            "didit.resources.sessions.time.monotonic", lambda: ticks.pop(0) if ticks else 105.0
+        )
+        with pytest.raises(DiditTimeoutError) as exc_info:
             await async_client.sessions.poll_decision(
-                "sess_to_async", timeout=0.0001, interval=0.01, tolerate_transient_errors=True
+                "sess_to_async", timeout=2.0, interval=0.01, tolerate_transient_errors=True
             )
+        assert isinstance(exc_info.value.__cause__, DiditServerError)
         await async_client.aclose()
 
     @respx.mock
