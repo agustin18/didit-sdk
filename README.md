@@ -127,20 +127,24 @@ guard = DiditWebhookGuard(
 
 @app.post("/webhooks/didit")
 async def handle_webhook(payload: WebhookPayload = Depends(guard)):
-    if payload.is_duplicate:
-        # Event already claimed; handle idempotently or return fast 200
-        return {"status": "already_processed"}
+    # Note: payload.is_duplicate is a hint that this event key was seen before.
+    # It does NOT prove that a previous attempt completed successfully.
+    # Enforce idempotency at the database/transaction boundary:
+    async with db.transaction():
+        if not await is_event_unprocessed(payload.event_id):
+            return {"status": "already_processed"}
 
-    if payload.status == SessionStatus.APPROVED:
-        # Idempotently process approved KYC verification
-        ...
+        if payload.status == SessionStatus.APPROVED:
+            # Idempotently process approved KYC verification
+            await mark_user_verified(payload.session_id)
+
     return {"status": "ok"}
 ```
 
 > [!TIP]
 > **Deduplication Semantics (`duplicate_action`)**:
-> - `"pass"` (**default, recommended**): When a duplicate event is detected, it is passed to your handler with `payload.is_duplicate = True`. This guarantees that if a process crashed during previous handling, Didit's delivery retries will still reach your handler, and you can enforce idempotency safely at the database boundary.
-> - `"respond_ok"`: Short-circuits with an immediate HTTP 200 OK without invoking your handler. Opt-in only when claiming the event itself constitutes durable acceptance (e.g., immediate transactional inbox insertion or durable broker enqueueing).
+> - `"pass"` (**default, recommended**): When an event key has been seen before, it is passed to your handler with `payload.is_duplicate = True`. This guarantees that if a process crashed (OOM, `SIGKILL`, server reboot) during a previous attempt before committing to the database, Didit's delivery retries will still reach your handler, and you can enforce idempotency safely at the database transaction boundary.
+> - `"respond_ok"`: Short-circuits with an immediate HTTP 200 OK without invoking your handler. **Warning**: `"respond_ok"` should NOT be used with the built-in claim-before-handler stores as proof of successful processing. Use it only when your custom ingestion architecture has already durably persisted/enqueued the event (e.g., immediate transactional inbox insertion or durable message broker enqueueing).
 > - `"raise"`: Raises an HTTP 409 Conflict.
 
 ### Django
