@@ -534,6 +534,19 @@ class SimulatedSessionsResource:
             )
         return decision
 
+    def generate_pdf_report(self, session_id: str) -> bytes:
+        """Simulate generating a compliance PDF report for a session."""
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty")
+        cleaned_id = session_id.strip()
+        self._storage.get(cleaned_id)
+        return (
+            b"%PDF-1.4\n%Simulated Didit Compliance Report\n"
+            b"Session: " + cleaned_id.encode("utf-8") + b"\n%%EOF"
+        )
+
+    get_pdf_report = generate_pdf_report
+
     def list(
         self,
         *,
@@ -785,6 +798,19 @@ class SimulatedAsyncSessionsResource:
                 f"Polling simulated session '{session_id}' timed out without terminal outcome"
             )
         return decision
+
+    async def generate_pdf_report(self, session_id: str) -> bytes:
+        """Simulate generating a compliance PDF report for a session asynchronously."""
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty")
+        cleaned_id = session_id.strip()
+        self._storage.get(cleaned_id)
+        return (
+            b"%PDF-1.4\n%Simulated Didit Compliance Report\n"
+            b"Session: " + cleaned_id.encode("utf-8") + b"\n%%EOF"
+        )
+
+    get_pdf_report = generate_pdf_report
 
     async def list(
         self,

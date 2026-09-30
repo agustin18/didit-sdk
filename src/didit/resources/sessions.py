@@ -460,6 +460,37 @@ class SessionsResource:
         decision.raw_data = data
         return decision
 
+    def generate_pdf_report(
+        self,
+        session_id: str,
+        *,
+        options: RequestOptions | None = None,
+    ) -> bytes:
+        """Download compliance PDF report for a verification session.
+
+        Invokes GET /v3/session/{session_id}/generate-pdf/ returning raw binary PDF content.
+
+        Args:
+            session_id: The unique identifier of the verification session.
+            options: Optional per-request HTTP options.
+
+        Returns:
+            bytes: The binary PDF file content.
+
+        Raises:
+            ValueError: If session_id is empty or whitespace.
+            DiditNotFoundError: If the session does not exist.
+            DiditAPIError: If the remote endpoint returns an error.
+        """
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty")
+        resp = self._requestor.request(
+            "GET", f"/session/{session_id.strip()}/generate-pdf/", options=options
+        )
+        return resp.content
+
+    get_pdf_report = generate_pdf_report
+
     def poll_decision(
         self,
         session_id: str,
@@ -869,6 +900,37 @@ class AsyncSessionsResource:
         decision = DecisionResponse.model_validate(data)
         decision.raw_data = data
         return decision
+
+    async def generate_pdf_report(
+        self,
+        session_id: str,
+        *,
+        options: RequestOptions | None = None,
+    ) -> bytes:
+        """Download compliance PDF report for a verification session asynchronously.
+
+        Invokes GET /v3/session/{session_id}/generate-pdf/ returning raw binary PDF content.
+
+        Args:
+            session_id: The unique identifier of the verification session.
+            options: Optional per-request HTTP options.
+
+        Returns:
+            bytes: The binary PDF file content.
+
+        Raises:
+            ValueError: If session_id is empty or whitespace.
+            DiditNotFoundError: If the session does not exist.
+            DiditAPIError: If the remote endpoint returns an error.
+        """
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty")
+        resp = await self._requestor.request(
+            "GET", f"/session/{session_id.strip()}/generate-pdf/", options=options
+        )
+        return resp.content
+
+    get_pdf_report = generate_pdf_report
 
     async def poll_decision(
         self,

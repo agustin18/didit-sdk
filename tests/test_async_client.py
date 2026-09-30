@@ -1298,4 +1298,39 @@ class TestAsyncDiditClient:
         assert report_remote.warning_codes_added == []
         assert report_remote.warning_codes_removed == []
         assert report_remote.is_in_sync is False
+
+    @pytest.mark.parametrize("method_name", ["generate_pdf_report", "get_pdf_report"])
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_generate_pdf_report_success(
+        self, async_client: AsyncDidit, base_url: str, method_name: str
+    ) -> None:
+        pdf_bytes = b"%PDF-1.4 async simulated pdf content \x00\x01\x02"
+        respx.get(f"{base_url}/session/sess_async_pdf_123/generate-pdf/").mock(
+            return_value=Response(
+                200, content=pdf_bytes, headers={"Content-Type": "application/pdf"}
+            )
+        )
+        fn = getattr(async_client.sessions, method_name)
+        result = await fn("sess_async_pdf_123")
+        assert result == pdf_bytes
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_generate_pdf_report_not_found(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/sess_async_pdf_404/generate-pdf/").mock(
+            return_value=Response(404, json={"detail": "Session not found"})
+        )
+        with pytest.raises(DiditNotFoundError):
+            await async_client.sessions.generate_pdf_report("sess_async_pdf_404")
+
+    @pytest.mark.parametrize("invalid_id", ["", "   "])
+    @pytest.mark.asyncio
+    async def test_async_generate_pdf_report_invalid_session_id(
+        self, async_client: AsyncDidit, invalid_id: str
+    ) -> None:
+        with pytest.raises(ValueError, match="session_id must not be empty"):
+            await async_client.sessions.generate_pdf_report(invalid_id)
         await async_client.aclose()

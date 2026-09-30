@@ -75,6 +75,14 @@ class SessionStatus(str, Enum):
         )
 
     @property
+    def requires_resubmission(self) -> bool:
+        """Return True if session requires user resubmission of documents/biometrics."""
+        return self in (
+            SessionStatus.RESUBMITTED,
+            SessionStatus.AWAITING_USER,
+        )
+
+    @property
     def is_terminal(self) -> bool:
         """Backward-compatible alias for ``is_closed``."""
         return self.is_closed

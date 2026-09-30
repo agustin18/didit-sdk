@@ -1181,3 +1181,31 @@ class TestDiditSyncClient:
         assert report_remote.warning_codes_added == []
         assert report_remote.warning_codes_removed == []
         assert report_remote.is_in_sync is False
+
+    @pytest.mark.parametrize("method_name", ["generate_pdf_report", "get_pdf_report"])
+    @respx.mock
+    def test_generate_pdf_report_success(
+        self, client: Didit, base_url: str, method_name: str
+    ) -> None:
+        pdf_bytes = b"%PDF-1.4 simulated pdf document content \x00\x01\x02"
+        respx.get(f"{base_url}/session/sess_pdf_123/generate-pdf/").mock(
+            return_value=Response(
+                200, content=pdf_bytes, headers={"Content-Type": "application/pdf"}
+            )
+        )
+        fn = getattr(client.sessions, method_name)
+        result = fn("sess_pdf_123")
+        assert result == pdf_bytes
+
+    @respx.mock
+    def test_generate_pdf_report_not_found(self, client: Didit, base_url: str) -> None:
+        respx.get(f"{base_url}/session/sess_pdf_404/generate-pdf/").mock(
+            return_value=Response(404, json={"detail": "Session not found"})
+        )
+        with pytest.raises(DiditNotFoundError):
+            client.sessions.generate_pdf_report("sess_pdf_404")
+
+    @pytest.mark.parametrize("invalid_id", ["", "   "])
+    def test_generate_pdf_report_invalid_session_id(self, client: Didit, invalid_id: str) -> None:
+        with pytest.raises(ValueError, match="session_id must not be empty"):
+            client.sessions.generate_pdf_report(invalid_id)

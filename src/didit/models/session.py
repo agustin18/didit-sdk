@@ -37,7 +37,7 @@ class CreateSessionRequest(BaseModel):
 class SessionResponse(BaseModel):
     """Data returned by Didit when a session is created or fetched."""
 
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     session_id: str = Field(..., description="Unique Didit session identifier")
     session_token: str | None = Field(
@@ -51,6 +51,15 @@ class SessionResponse(BaseModel):
     workflow_id: str | None = Field(default=None, description="Associated workflow identifier")
     vendor_data: str | None = Field(default=None, description="Echoed vendor reference")
     callback: str | None = Field(default=None, description="Echoed callback URL")
+    resubmit_info: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional metadata when resubmission of documents is requested",
+    )
+
+    @property
+    def requires_resubmission(self) -> bool:
+        """Return True if session requires user resubmission of documents/biometrics."""
+        return self.status.requires_resubmission or bool(self.resubmit_info)
 
 
 class SessionListItem(BaseModel):

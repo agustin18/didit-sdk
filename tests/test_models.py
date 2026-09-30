@@ -849,3 +849,55 @@ class TestSessionListAndReconciliationModels:
         )
         assert report_custom.truncated is True
         assert report_custom.remote_count == 120
+
+    @pytest.mark.parametrize(
+        ("status", "expected_resubmission"),
+        [
+            (SessionStatus.NOT_STARTED, False),
+            (SessionStatus.IN_PROGRESS, False),
+            (SessionStatus.IN_REVIEW, False),
+            (SessionStatus.APPROVED, False),
+            (SessionStatus.DECLINED, False),
+            (SessionStatus.EXPIRED, False),
+            (SessionStatus.ABANDONED, False),
+            (SessionStatus.KYC_EXPIRED, False),
+            (SessionStatus.RESUBMITTED, True),
+            (SessionStatus.AWAITING_USER, True),
+        ],
+    )
+    def test_session_status_requires_resubmission(
+        self, status: SessionStatus, expected_resubmission: bool
+    ) -> None:
+        assert status.requires_resubmission is expected_resubmission
+
+    def test_session_response_resubmission_properties(self) -> None:
+        from didit.models.session import SessionResponse
+
+        # 1. Standard session without resubmit info
+        s1 = SessionResponse(session_id="s1", status=SessionStatus.IN_PROGRESS)
+        assert s1.requires_resubmission is False
+        assert s1.resubmit_info is None
+
+        # 2. Session with RESUBMITTED status
+        s2 = SessionResponse(session_id="s2", status=SessionStatus.RESUBMITTED)
+        assert s2.requires_resubmission is True
+
+        # 3. Session with AWAITING_USER status and resubmit_info
+        info = {"steps": ["document"], "reason": "blur"}
+        s3 = SessionResponse(
+            session_id="s3",
+            status=SessionStatus.AWAITING_USER,
+            resubmit_info=info,
+            extra_field="preserved_upstream_metadata",
+        )
+        assert s3.requires_resubmission is True
+        assert s3.resubmit_info == info
+        assert (s3.__pydantic_extra__ or {})["extra_field"] == "preserved_upstream_metadata"
+
+        # 4. Session with resubmit_info even if status is not explicitly RESUBMITTED
+        s4 = SessionResponse(
+            session_id="s4",
+            status=SessionStatus.IN_REVIEW,
+            resubmit_info={"steps": ["face"]},
+        )
+        assert s4.requires_resubmission is True

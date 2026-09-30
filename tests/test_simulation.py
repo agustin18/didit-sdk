@@ -144,6 +144,20 @@ class TestSimulatedDidit:
         assert parsed["webhook_type"] == "status.updated"
         assert headers["X-Timestamp"] == str(parsed["timestamp"])
 
+    def test_simulation_generate_pdf_report(self) -> None:
+        client = SimulatedDidit()
+        s = client.sessions.create(vendor_data="pdf_sim_sync", workflow_id="wf")
+        pdf = client.sessions.generate_pdf_report(s.session_id)
+        assert isinstance(pdf, bytes)
+        assert pdf.startswith(b"%PDF-")
+        assert client.sessions.get_pdf_report(s.session_id) == pdf
+
+        with pytest.raises(DiditNotFoundError):
+            client.sessions.generate_pdf_report("nonexistent_session")
+
+        with pytest.raises(ValueError, match="session_id must not be empty"):
+            client.sessions.generate_pdf_report("")
+
 
 class TestSimulatedAsyncDidit:
     async def test_async_simulation_lifecycle(self) -> None:
@@ -703,3 +717,18 @@ class TestSimulatedAsyncDidit:
         ) as exc_info:
             await client.sessions.reconcile_range(source=DummyAsyncSource())
         assert exc_info.value.status_code == 502
+
+    @pytest.mark.asyncio
+    async def test_async_simulation_generate_pdf_report(self) -> None:
+        client = SimulatedAsyncDidit()
+        s = await client.sessions.create(vendor_data="pdf_sim_async", workflow_id="wf")
+        pdf = await client.sessions.generate_pdf_report(s.session_id)
+        assert isinstance(pdf, bytes)
+        assert pdf.startswith(b"%PDF-")
+        assert await client.sessions.get_pdf_report(s.session_id) == pdf
+
+        with pytest.raises(DiditNotFoundError):
+            await client.sessions.generate_pdf_report("nonexistent_session")
+
+        with pytest.raises(ValueError, match="session_id must not be empty"):
+            await client.sessions.generate_pdf_report("")
