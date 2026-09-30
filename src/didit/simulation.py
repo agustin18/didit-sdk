@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from didit.errors import (
@@ -61,6 +64,7 @@ class _SimulatedStorage:
     def __init__(self) -> None:
         self.sessions: dict[str, SessionResponse] = {}
         self.decisions: dict[str, DecisionResponse] = {}
+        self.created_at: dict[str, float] = {}
 
     def create(
         self,
@@ -98,6 +102,7 @@ class _SimulatedStorage:
         )
         self.sessions[session_id] = session
         self.decisions[session_id] = decision
+        self.created_at[session_id] = time.time()
 
         if scenario == "approve":
             self.approve(session_id)
@@ -402,7 +407,26 @@ class _SimulatedStorage:
         limit: int = 50,
         offset: int = 0,
     ) -> SessionListPage:
+        if session_kind is not None and session_kind != "user":
+            return SessionListPage(count=0, next=None, previous=None, results=[])
+
         status_filter = status.value if isinstance(status, SessionStatus) else status
+        norm_country = country.strip().upper() if country is not None else None
+
+        from_ts: float | None = None
+        if date_from is not None:
+            if isinstance(date_from, datetime):
+                from_ts = date_from.timestamp()
+            else:
+                from_ts = datetime.fromisoformat(str(date_from).replace("Z", "+00:00")).timestamp()
+
+        to_ts: float | None = None
+        if date_to is not None:
+            if isinstance(date_to, datetime):
+                to_ts = date_to.timestamp()
+            else:
+                to_ts = datetime.fromisoformat(str(date_to).replace("Z", "+00:00")).timestamp()
+
         items: list[SessionListItem] = []
         for s in self.sessions.values():
             if status_filter is not None and s.status.value != status_filter:
@@ -411,6 +435,27 @@ class _SimulatedStorage:
                 continue
             if workflow_id is not None and s.workflow_id != workflow_id:
                 continue
+
+            dec = self.decisions.get(s.session_id)
+            s_country: str | None = None
+            if dec and dec.id_verifications and dec.id_verifications[0].country:
+                s_country = dec.id_verifications[0].country.upper()
+
+            if norm_country is not None and s_country != norm_country:
+                continue
+
+            if search is not None:
+                q = search.lower()
+                v_text = s.vendor_data.lower() if s.vendor_data else ""
+                if q not in s.session_id.lower() and q not in v_text:
+                    continue
+
+            s_created = self.created_at.get(s.session_id, 0.0)
+            if from_ts is not None and s_created < from_ts:
+                continue
+            if to_ts is not None and s_created > to_ts:
+                continue
+
             item = SessionListItem(
                 session_id=s.session_id,
                 session_token=s.session_token,
@@ -419,16 +464,28 @@ class _SimulatedStorage:
                 workflow_id=s.workflow_id,
                 vendor_data=s.vendor_data,
                 callback=s.callback,
+                country=s_country,
                 session_kind=session_kind or "user",
+                created_at=s_created,
             )
             items.append(item)
 
         total = len(items)
         sliced = items[offset : offset + limit]
+        next_url = (
+            f"https://api.didit.me/v1/sessions/?offset={offset + limit}&limit={limit}"
+            if offset + limit < total
+            else None
+        )
+        prev_url = (
+            f"https://api.didit.me/v1/sessions/?offset={max(0, offset - limit)}&limit={limit}"
+            if offset > 0
+            else None
+        )
         return SessionListPage(
             count=total,
-            next=None,
-            previous=None,
+            next=next_url,
+            previous=prev_url,
             results=sliced,
         )
 
@@ -511,6 +568,12 @@ class SimulatedSessionsResource:
         *,
         options: Any = None,
     ) -> SessionReconciliationReport:
+        if observed is not None and observed.session_id != session_id:
+            raise ValueError(
+                f"ObservedSessionState session_id mismatch: expected '{session_id}', "
+                f"got '{observed.session_id}'"
+            )
+
         try:
             decision = self.get_decision(session_id)
             remote_status: SessionStatus | str | None = decision.status
@@ -527,10 +590,22 @@ class SimulatedSessionsResource:
                 local_status=None,
                 remote_status=remote_status,
                 status_drift=False,
-                warning_codes_added=sorted(remote_warnings),
+                warning_codes_added=[],
                 warning_codes_removed=[],
                 local_missing=True,
                 remote_missing=remote_missing,
+            )
+
+        if remote_missing:
+            return SessionReconciliationReport(
+                session_id=session_id,
+                local_status=observed.status,
+                remote_status=None,
+                status_drift=False,
+                warning_codes_added=[],
+                warning_codes_removed=[],
+                local_missing=False,
+                remote_missing=True,
             )
 
         local_status_val = (
@@ -539,7 +614,7 @@ class SimulatedSessionsResource:
         remote_status_val = (
             remote_status.value if isinstance(remote_status, SessionStatus) else remote_status
         )
-        status_drift = (remote_status_val is not None) and (local_status_val != remote_status_val)
+        status_drift = local_status_val != remote_status_val
 
         local_warnings = set(observed.warning_codes)
         warning_added = sorted(remote_warnings - local_warnings)
@@ -553,7 +628,7 @@ class SimulatedSessionsResource:
             warning_codes_added=warning_added,
             warning_codes_removed=warning_removed,
             local_missing=False,
-            remote_missing=remote_missing,
+            remote_missing=False,
         )
 
     def reconcile_range(
@@ -565,34 +640,69 @@ class SimulatedSessionsResource:
         date_from: Any = None,
         date_to: Any = None,
         status: SessionStatus | str | None = None,
-        limit: int = 50,
+        page_size: int = 50,
+        max_sessions: int | None = None,
+        limit: int | None = None,
         options: Any = None,
     ) -> BatchReconciliationReport:
+        if since is not None and date_from is not None:
+            raise ValueError("Specify either 'since' or 'date_from', not both")
+        if until is not None and date_to is not None:
+            raise ValueError("Specify either 'until' or 'date_to', not both")
+
         start = since if since is not None else date_from
         end = until if until is not None else date_to
 
-        page = self.list(
-            date_from=start,
-            date_to=end,
-            status=status,
-            limit=limit,
-        )
+        effective_page_size = limit if limit is not None else page_size
+        if effective_page_size <= 0 or effective_page_size > 100:
+            raise ValueError(f"page_size must be between 1 and 100, got {effective_page_size}")
+        if max_sessions is not None and max_sessions <= 0:
+            raise ValueError(f"max_sessions must be greater than 0, got {max_sessions}")
+
+        effective_until = end if end is not None else datetime.now(timezone.utc)
 
         reports: list[SessionReconciliationReport] = []
         drift_count = 0
         missing_local_count = 0
         missing_remote_count = 0
+        offset = 0
 
-        for item in page.results:
-            observed = source.get(item.session_id)
-            report = self.reconcile(item.session_id, observed=observed)
-            reports.append(report)
-            if report.status_drift or report.warning_drift:
-                drift_count += 1
-            if report.local_missing:
-                missing_local_count += 1
-            if report.remote_missing:
-                missing_remote_count += 1
+        while True:
+            current_limit = effective_page_size
+            if max_sessions is not None:
+                current_limit = min(current_limit, max_sessions - len(reports))
+
+            page = self.list(
+                date_from=start,
+                date_to=effective_until,
+                status=status,
+                limit=current_limit,
+                offset=offset,
+            )
+
+            if not page.results:
+                break
+
+            for item in page.results:
+                observed = source.get(item.session_id)
+                report = self.reconcile(item.session_id, observed=observed)
+                reports.append(report)
+                if report.status_drift or report.warning_drift:
+                    drift_count += 1
+                if report.local_missing:
+                    missing_local_count += 1
+                if report.remote_missing:
+                    missing_remote_count += 1
+                if max_sessions is not None and len(reports) >= max_sessions:
+                    break
+
+            offset += len(page.results)
+            if (
+                page.next is None
+                or len(page.results) < current_limit
+                or (max_sessions is not None and len(reports) >= max_sessions)
+            ):
+                break
 
         return BatchReconciliationReport(
             total_evaluated=len(reports),
@@ -681,6 +791,12 @@ class SimulatedAsyncSessionsResource:
         *,
         options: Any = None,
     ) -> SessionReconciliationReport:
+        if observed is not None and observed.session_id != session_id:
+            raise ValueError(
+                f"ObservedSessionState session_id mismatch: expected '{session_id}', "
+                f"got '{observed.session_id}'"
+            )
+
         try:
             decision = await self.get_decision(session_id)
             remote_status: SessionStatus | str | None = decision.status
@@ -697,10 +813,22 @@ class SimulatedAsyncSessionsResource:
                 local_status=None,
                 remote_status=remote_status,
                 status_drift=False,
-                warning_codes_added=sorted(remote_warnings),
+                warning_codes_added=[],
                 warning_codes_removed=[],
                 local_missing=True,
                 remote_missing=remote_missing,
+            )
+
+        if remote_missing:
+            return SessionReconciliationReport(
+                session_id=session_id,
+                local_status=observed.status,
+                remote_status=None,
+                status_drift=False,
+                warning_codes_added=[],
+                warning_codes_removed=[],
+                local_missing=False,
+                remote_missing=True,
             )
 
         local_status_val = (
@@ -709,7 +837,7 @@ class SimulatedAsyncSessionsResource:
         remote_status_val = (
             remote_status.value if isinstance(remote_status, SessionStatus) else remote_status
         )
-        status_drift = (remote_status_val is not None) and (local_status_val != remote_status_val)
+        status_drift = local_status_val != remote_status_val
 
         local_warnings = set(observed.warning_codes)
         warning_added = sorted(remote_warnings - local_warnings)
@@ -723,7 +851,7 @@ class SimulatedAsyncSessionsResource:
             warning_codes_added=warning_added,
             warning_codes_removed=warning_removed,
             local_missing=False,
-            remote_missing=remote_missing,
+            remote_missing=False,
         )
 
     async def reconcile_range(
@@ -735,38 +863,77 @@ class SimulatedAsyncSessionsResource:
         date_from: Any = None,
         date_to: Any = None,
         status: SessionStatus | str | None = None,
-        limit: int = 50,
+        page_size: int = 50,
+        max_sessions: int | None = None,
+        limit: int | None = None,
         options: Any = None,
     ) -> BatchReconciliationReport:
+        if since is not None and date_from is not None:
+            raise ValueError("Specify either 'since' or 'date_from', not both")
+        if until is not None and date_to is not None:
+            raise ValueError("Specify either 'until' or 'date_to', not both")
+
         start = since if since is not None else date_from
         end = until if until is not None else date_to
 
-        page = await self.list(
-            date_from=start,
-            date_to=end,
-            status=status,
-            limit=limit,
-        )
+        effective_page_size = limit if limit is not None else page_size
+        if effective_page_size <= 0 or effective_page_size > 100:
+            raise ValueError(f"page_size must be between 1 and 100, got {effective_page_size}")
+        if max_sessions is not None and max_sessions <= 0:
+            raise ValueError(f"max_sessions must be greater than 0, got {max_sessions}")
+
+        effective_until = end if end is not None else datetime.now(timezone.utc)
 
         reports: list[SessionReconciliationReport] = []
         drift_count = 0
         missing_local_count = 0
         missing_remote_count = 0
+        offset = 0
 
-        for item in page.results:
-            if hasattr(source, "aget"):
-                observed = await source.aget(item.session_id)
-            else:
-                observed = source.get(item.session_id)
+        while True:
+            current_limit = effective_page_size
+            if max_sessions is not None:
+                current_limit = min(current_limit, max_sessions - len(reports))
 
-            report = await self.reconcile(item.session_id, observed=observed)
-            reports.append(report)
-            if report.status_drift or report.warning_drift:
-                drift_count += 1
-            if report.local_missing:
-                missing_local_count += 1
-            if report.remote_missing:
-                missing_remote_count += 1
+            page = await self.list(
+                date_from=start,
+                date_to=effective_until,
+                status=status,
+                limit=current_limit,
+                offset=offset,
+            )
+
+            if not page.results:
+                break
+
+            for item in page.results:
+                if isinstance(source, AsyncSessionStateSource):
+                    observed = await source.aget(item.session_id)
+                else:
+                    get_fn: Any = getattr(source, "get", None)
+                    if inspect.iscoroutinefunction(get_fn):
+                        observed = await get_fn(item.session_id)
+                    else:
+                        observed = await asyncio.to_thread(source.get, item.session_id)
+
+                report = await self.reconcile(item.session_id, observed=observed)
+                reports.append(report)
+                if report.status_drift or report.warning_drift:
+                    drift_count += 1
+                if report.local_missing:
+                    missing_local_count += 1
+                if report.remote_missing:
+                    missing_remote_count += 1
+                if max_sessions is not None and len(reports) >= max_sessions:
+                    break
+
+            offset += len(page.results)
+            if (
+                page.next is None
+                or len(page.results) < current_limit
+                or (max_sessions is not None and len(reports) >= max_sessions)
+            ):
+                break
 
         return BatchReconciliationReport(
             total_evaluated=len(reports),

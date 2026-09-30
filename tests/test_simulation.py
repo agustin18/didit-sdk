@@ -1,6 +1,7 @@
 """Tests for in-memory simulated client."""
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -391,7 +392,7 @@ class TestSimulatedAsyncDidit:
 
         class AsyncSource:
             async def aget(self, session_id: str) -> ObservedSessionState | None:
-                return ObservedSessionState(session_id=s1.session_id, status=SessionStatus.APPROVED)
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
 
         batch = await client.sessions.reconcile_range(source=AsyncSource())
         assert batch.total_evaluated == 3
@@ -413,3 +414,156 @@ class TestSimulatedAsyncDidit:
         assert batch_sync.drift_count >= 1
         assert batch_sync.missing_local_count >= 1
         assert batch_sync.missing_remote_count >= 1
+
+        # Test async source with coroutine get()
+        class AsyncSimCoroSource:
+            async def get(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        batch_coro = await client.sessions.reconcile_range(source=AsyncSimCoroSource())
+        assert batch_coro.total_evaluated == 3
+
+    def test_simulation_list_filters_and_validations(self) -> None:
+        client = SimulatedDidit()
+        # session_kind != "user"
+        assert client.sessions.list(session_kind="business").count == 0
+
+        # Create session with decision containing country
+        s = client.sessions.create(
+            vendor_data="user_es", workflow_id="wf", sandbox_scenario="approve"
+        )
+
+        # Test datetime vs str date_from / date_to
+        now = datetime.now(timezone.utc)
+        assert client.sessions.list(date_from=now).count <= 1
+        assert client.sessions.list(date_from=now.isoformat()).count <= 1
+        assert client.sessions.list(date_to=now).count >= 0
+        assert client.sessions.list(date_to=now.isoformat()).count >= 0
+
+        # Test future date_from and past date_to
+        future_dt = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        past_dt = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        assert client.sessions.list(date_from=future_dt).count == 0
+        assert client.sessions.list(date_to=past_dt).count == 0
+
+        # Search matching vendor_data and session_id
+        assert client.sessions.list(search="user_es").count == 1
+        assert client.sessions.list(search=s.session_id[:8]).count == 1
+        assert client.sessions.list(search="nonexistent_query").count == 0
+
+        # Country filter
+        assert client.sessions.list(country="ESP").count == 1
+        assert client.sessions.list(country="FRA").count == 0
+
+    def test_simulation_reconcile_and_range_edge_cases(self) -> None:
+        from didit.models.session import ObservedSessionState
+
+        client = SimulatedDidit()
+        s = client.sessions.create(vendor_data="u1", workflow_id="wf", sandbox_scenario="approve")
+
+        # Session mismatch error
+        with pytest.raises(ValueError, match="session_id mismatch"):
+            client.sessions.reconcile(
+                s.session_id,
+                observed=ObservedSessionState(session_id="wrong_id", status=SessionStatus.APPROVED),
+            )
+
+        class DummySource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                if session_id == s.session_id:
+                    return ObservedSessionState(
+                        session_id=session_id, status=SessionStatus.DECLINED
+                    )
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        # Range conflict parameter errors
+        with pytest.raises(ValueError, match="Specify either 'since' or 'date_from'"):
+            client.sessions.reconcile_range(
+                source=DummySource(), since="2026-01-01T00:00:00Z", date_from="2026-01-01T00:00:00Z"
+            )
+        with pytest.raises(ValueError, match="Specify either 'until' or 'date_to'"):
+            client.sessions.reconcile_range(
+                source=DummySource(), until="2026-01-02T00:00:00Z", date_to="2026-01-02T00:00:00Z"
+            )
+        with pytest.raises(ValueError, match="page_size must be between 1 and 100"):
+            client.sessions.reconcile_range(source=DummySource(), page_size=0)
+        with pytest.raises(ValueError, match="max_sessions must be greater than 0"):
+            client.sessions.reconcile_range(source=DummySource(), max_sessions=0)
+
+        # Range max_sessions cap
+        for i in range(5):
+            client.sessions.create(
+                vendor_data=f"multi_{i}", workflow_id="wf", sandbox_scenario="approve"
+            )
+
+        cap_report = client.sessions.reconcile_range(source=DummySource(), max_sessions=2)
+        assert cap_report.total_evaluated == 2
+
+        # Multi-page pagination in reconcile_range (page_size=2)
+        paginated_report = client.sessions.reconcile_range(source=DummySource(), page_size=2)
+        assert paginated_report.total_evaluated == 6
+
+        # Empty client reconcile_range
+        empty_client = SimulatedDidit()
+        empty_report = empty_client.sessions.reconcile_range(source=DummySource())
+        assert empty_report.total_evaluated == 0
+
+    @pytest.mark.asyncio
+    async def test_async_simulation_reconcile_and_range_edge_cases(self) -> None:
+        from didit.models.session import ObservedSessionState
+
+        client = SimulatedAsyncDidit()
+        s = await client.sessions.create(
+            vendor_data="u_async_edges", workflow_id="wf", sandbox_scenario="approve"
+        )
+
+        # Session mismatch error
+        with pytest.raises(ValueError, match="session_id mismatch"):
+            await client.sessions.reconcile(
+                s.session_id,
+                observed=ObservedSessionState(session_id="wrong_id", status=SessionStatus.APPROVED),
+            )
+
+        class DummyAsyncSource:
+            async def aget(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        # Range conflict parameter errors
+        with pytest.raises(ValueError, match="Specify either 'since' or 'date_from'"):
+            await client.sessions.reconcile_range(
+                source=DummyAsyncSource(),
+                since="2026-01-01T00:00:00Z",
+                date_from="2026-01-01T00:00:00Z",
+            )
+        with pytest.raises(ValueError, match="Specify either 'until' or 'date_to'"):
+            await client.sessions.reconcile_range(
+                source=DummyAsyncSource(),
+                until="2026-01-02T00:00:00Z",
+                date_to="2026-01-02T00:00:00Z",
+            )
+        with pytest.raises(ValueError, match="page_size must be between 1 and 100"):
+            await client.sessions.reconcile_range(source=DummyAsyncSource(), page_size=0)
+        with pytest.raises(ValueError, match="max_sessions must be greater than 0"):
+            await client.sessions.reconcile_range(source=DummyAsyncSource(), max_sessions=0)
+
+        # Range max_sessions cap
+        for i in range(5):
+            await client.sessions.create(
+                vendor_data=f"multi_async_{i}", workflow_id="wf", sandbox_scenario="approve"
+            )
+
+        cap_report = await client.sessions.reconcile_range(
+            source=DummyAsyncSource(), max_sessions=2
+        )
+        assert cap_report.total_evaluated == 2
+
+        # Multi-page pagination in reconcile_range (page_size=2)
+        paginated_report = await client.sessions.reconcile_range(
+            source=DummyAsyncSource(), page_size=2
+        )
+        assert paginated_report.total_evaluated == 6
+
+        # Empty client reconcile_range
+        empty_client = SimulatedAsyncDidit()
+        empty_report = await empty_client.sessions.reconcile_range(source=DummyAsyncSource())
+        assert empty_report.total_evaluated == 0

@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 try:
     import flask  # noqa: F401
-    from flask import Request, Response, g, request
+    from flask import Request, Response, current_app, g, has_app_context, request
 except ImportError as err:  # pragma: no cover
     raise ImportError(
         "Flask is required to use didit.integrations.flask. "
@@ -36,6 +36,13 @@ from didit.errors import (
     DiditConfigurationError,
     DiditDuplicateWebhookError,
     DiditSignatureError,
+)
+from didit.events import (
+    DiditEventSink,
+    WebhookDuplicateObserved,
+    WebhookLeaseDegraded,
+    WebhookLeaseLost,
+    safe_emit,
 )
 from didit.models.webhook import WebhookPayload
 from didit.webhooks import parse_webhook_payload
@@ -135,6 +142,7 @@ def didit_webhook(
     duplicate_action: Literal["respond_ok", "pass", "raise"] = "pass",
     processing_action: Literal["retry", "pass", "raise", "conflict"] = "retry",
     dedup_key_builder: Callable[[WebhookPayload, Request], str] | None = None,
+    event_sink: DiditEventSink | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Flask view decorator for verifying, parsing, and deduplicating Didit webhooks.
 
@@ -223,6 +231,14 @@ def didit_webhook(
                     )
 
                 g.didit_payload = payload
+                sink = (
+                    event_sink
+                    or getattr(g, "didit_event_sink", None)
+                    or (current_app.config.get("DIDIT_EVENT_SINK") if has_app_context() else None)
+                )
+                g.didit_event_sink = sink
+                g.didit_event_id = payload.event_id
+                g.didit_session_id = payload.session_id
 
                 is_new = False
                 dedup_key = ""
@@ -247,7 +263,25 @@ def didit_webhook(
                         res_token = attempt.reservation.token
                         g.didit_reservation = attempt.reservation
 
+                    if attempt.degraded:
+                        safe_emit(
+                            sink,
+                            WebhookLeaseDegraded(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                reason="dedup_store_fail_open",
+                            ),
+                        )
+
                     if attempt.state == ReservationState.COMPLETED:
+                        safe_emit(
+                            sink,
+                            WebhookDuplicateObserved(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                action_taken=duplicate_action,
+                            ),
+                        )
                         if duplicate_action == "respond_ok":
                             return Response(
                                 "Duplicate webhook event acknowledged",
@@ -263,6 +297,14 @@ def didit_webhook(
                         payload.is_duplicate = True
 
                     elif attempt.state == ReservationState.PROCESSING:
+                        safe_emit(
+                            sink,
+                            WebhookDuplicateObserved(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                action_taken=processing_action,
+                            ),
+                        )
                         if processing_action == "retry":
                             resp = Response(
                                 "Webhook event currently being processed by another worker",
@@ -293,26 +335,43 @@ def didit_webhook(
                         result = await view_func(*args, **kwargs)
                 except Exception:
                     if dedup_store is not None and is_new:
-                        await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                        try:
+                            await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                        except Exception as release_exc:
+                            safe_emit(
+                                sink,
+                                WebhookLeaseLost(
+                                    event_id=payload.event_id,
+                                    session_id=payload.session_id,
+                                    reason=f"Release failed during exception unwind: {release_exc}",
+                                ),
+                            )
                     raise
 
                 if result is None:
                     response = Response(status=200)
                 else:
-                    from flask import current_app
-
                     response = current_app.make_response(result)
 
                 if dedup_store is not None and is_new:
                     status_code = response.status_code
                     if 200 <= status_code < 300:
                         if res_token is not None:
-                            await acomplete_webhook_event(
+                            success = await acomplete_webhook_event(
                                 dedup_store,
                                 dedup_key,
                                 token=res_token,
                                 completed_ttl=effective_completed_ttl,
                             )
+                            if not success:
+                                safe_emit(
+                                    sink,
+                                    WebhookLeaseLost(
+                                        event_id=payload.event_id,
+                                        session_id=payload.session_id,
+                                        reason="lease_cas_failed",
+                                    ),
+                                )
                     else:
                         await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
 
@@ -351,6 +410,14 @@ def didit_webhook(
                 )
 
             g.didit_payload = payload
+            sink = (
+                event_sink
+                or getattr(g, "didit_event_sink", None)
+                or (current_app.config.get("DIDIT_EVENT_SINK") if has_app_context() else None)
+            )
+            g.didit_event_sink = sink
+            g.didit_event_id = payload.event_id
+            g.didit_session_id = payload.session_id
 
             is_new = False
             dedup_key = ""
@@ -394,6 +461,14 @@ def didit_webhook(
                         )
                     is_new = bool(claim_res)
                     if not is_new:
+                        safe_emit(
+                            sink,
+                            WebhookDuplicateObserved(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                action_taken=duplicate_action,
+                            ),
+                        )
                         if duplicate_action == "respond_ok":
                             return Response(
                                 "Duplicate webhook event acknowledged",
@@ -419,7 +494,25 @@ def didit_webhook(
                         res_token = attempt.reservation.token
                         g.didit_reservation = attempt.reservation
 
+                    if attempt.degraded:
+                        safe_emit(
+                            sink,
+                            WebhookLeaseDegraded(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                reason="dedup_store_fail_open",
+                            ),
+                        )
+
                     if attempt.state == ReservationState.COMPLETED:
+                        safe_emit(
+                            sink,
+                            WebhookDuplicateObserved(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                action_taken=duplicate_action,
+                            ),
+                        )
                         if duplicate_action == "respond_ok":
                             return Response(
                                 "Duplicate webhook event acknowledged",
@@ -435,6 +528,14 @@ def didit_webhook(
                         payload.is_duplicate = True
 
                     elif attempt.state == ReservationState.PROCESSING:
+                        safe_emit(
+                            sink,
+                            WebhookDuplicateObserved(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                action_taken=processing_action,
+                            ),
+                        )
                         if processing_action == "retry":
                             resp = Response(
                                 "Webhook event currently being processed by another worker",
@@ -465,26 +566,40 @@ def didit_webhook(
                     result = view_func(*args, **kwargs)
             except Exception:
                 if dedup_store is not None and is_new:
-                    release_webhook_event(dedup_store, dedup_key, token=res_token)
+                    try:
+                        release_webhook_event(dedup_store, dedup_key, token=res_token)
+                    except Exception as release_exc:
+                        safe_emit(
+                            sink,
+                            WebhookLeaseLost(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                reason=f"Release failed during exception unwind: {release_exc}",
+                            ),
+                        )
                 raise
 
-            if result is None:
-                response = Response(status=200)
-            else:
-                from flask import current_app
-
-                response = current_app.make_response(result)
+            response = Response(status=200) if result is None else current_app.make_response(result)
 
             if dedup_store is not None and is_new:
                 status_code = response.status_code
                 if 200 <= status_code < 300:
                     if res_token is not None:
-                        complete_webhook_event(
+                        success = complete_webhook_event(
                             dedup_store,
                             dedup_key,
                             token=res_token,
                             completed_ttl=effective_completed_ttl,
                         )
+                        if not success:
+                            safe_emit(
+                                sink,
+                                WebhookLeaseLost(
+                                    event_id=payload.event_id,
+                                    session_id=payload.session_id,
+                                    reason="lease_cas_failed",
+                                ),
+                            )
                 else:
                     release_webhook_event(dedup_store, dedup_key, token=res_token)
 

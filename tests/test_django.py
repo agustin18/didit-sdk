@@ -28,6 +28,13 @@ from didit.dedup import (
     ReservationState,
 )
 from didit.errors import DiditConfigurationError
+from didit.events import (
+    DiditEventSink,
+    DiditSDKEvent,
+    WebhookDuplicateObserved,
+    WebhookLeaseDegraded,
+    WebhookLeaseLost,
+)
 from didit.integrations.django import didit_webhook_view, parse_django_webhook
 from didit.models.enums import SessionStatus
 from didit.models.webhook import WebhookPayload
@@ -672,3 +679,277 @@ class TestDjangoWebhookReservation:
         resp = view(req)
         assert resp.status_code == 409
         assert b"currently being processed" in resp.content
+
+
+class RecordingSink(DiditEventSink):
+    def __init__(self) -> None:
+        self.events: list[DiditSDKEvent] = []
+
+    def emit(self, event: DiditSDKEvent) -> None:
+        self.events.append(event)
+
+
+class TestDjangoTelemetry:
+    def test_django_telemetry_normal_flow_sets_request_attributes(self) -> None:
+        sink = RecordingSink()
+
+        @didit_webhook_view(secret=SECRET, event_sink=sink)
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            assert request.didit_event_sink is sink
+            assert request.didit_event_id == payload.event_id
+            assert request.didit_session_id == payload.session_id
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        resp = view(req)
+        assert resp.status_code == 200
+        assert len(sink.events) == 0
+
+    @pytest.mark.asyncio
+    async def test_django_async_telemetry_normal_flow_sets_request_attributes(self) -> None:
+        sink = RecordingSink()
+
+        @didit_webhook_view(secret=SECRET, event_sink=sink)
+        async def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            assert request.didit_event_sink is sink
+            assert request.didit_event_id == payload.event_id
+            assert request.didit_session_id == payload.session_id
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        resp = await view(req)
+        assert resp.status_code == 200
+        assert len(sink.events) == 0
+
+    def test_django_telemetry_degraded_lease(self) -> None:
+        sink = RecordingSink()
+        store = MagicMock()
+        store.reserve.return_value = ReservationAttempt(
+            state=ReservationState.ACQUIRED,
+            reservation=None,
+            degraded=True,
+        )
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store, event_sink=sink)
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        resp = view(req)
+        assert resp.status_code == 200
+        assert any(isinstance(e, WebhookLeaseDegraded) for e in sink.events)
+
+    @pytest.mark.asyncio
+    async def test_django_async_telemetry_degraded_lease(self) -> None:
+        sink = RecordingSink()
+        store = MagicMock()
+        store.areserve = AsyncMock(
+            return_value=ReservationAttempt(
+                state=ReservationState.ACQUIRED,
+                reservation=None,
+                degraded=True,
+            )
+        )
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store, event_sink=sink)
+        async def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        resp = await view(req)
+        assert resp.status_code == 200
+        assert any(isinstance(e, WebhookLeaseDegraded) for e in sink.events)
+
+    def test_django_telemetry_duplicate_completed(self) -> None:
+        sink = RecordingSink()
+        store = InMemoryWebhookReservationStore()
+        payload_data = {**SAMPLE_PAYLOAD, "event_id": "evt_dup"}
+        attempt = store.reserve("evt_dup", token="tok1")
+        store.complete("evt_dup", token=attempt.reservation.token)  # type: ignore[union-attr]
+
+        @didit_webhook_view(
+            secret=SECRET, dedup_store=store, duplicate_action="respond_ok", event_sink=sink
+        )
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(payload_data)
+        resp = view(req)
+        assert resp.status_code == 200
+        assert b"acknowledged" in resp.content
+        assert any(
+            isinstance(e, WebhookDuplicateObserved) and e.action_taken == "respond_ok"
+            for e in sink.events
+        )
+
+    @pytest.mark.asyncio
+    async def test_django_async_telemetry_duplicate_completed(self) -> None:
+        sink = RecordingSink()
+        store = InMemoryWebhookReservationStore()
+        payload_data = {**SAMPLE_PAYLOAD, "event_id": "evt_async_dup"}
+        attempt = store.reserve("evt_async_dup", token="tok1")
+        store.complete("evt_async_dup", token=attempt.reservation.token)  # type: ignore[union-attr]
+
+        @didit_webhook_view(
+            secret=SECRET, dedup_store=store, duplicate_action="respond_ok", event_sink=sink
+        )
+        async def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(payload_data)
+        resp = await view(req)
+        assert resp.status_code == 200
+        assert b"acknowledged" in resp.content
+        assert any(
+            isinstance(e, WebhookDuplicateObserved) and e.action_taken == "respond_ok"
+            for e in sink.events
+        )
+
+    def test_django_telemetry_duplicate_processing(self) -> None:
+        sink = RecordingSink()
+        store = InMemoryWebhookReservationStore()
+        payload_data = {**SAMPLE_PAYLOAD, "event_id": "evt_proc"}
+        store.reserve("evt_proc", token="tok_in_flight", ttl_seconds=60)
+
+        @didit_webhook_view(
+            secret=SECRET, dedup_store=store, processing_action="retry", event_sink=sink
+        )
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(payload_data)
+        resp = view(req)
+        assert resp.status_code == 503
+        assert any(
+            isinstance(e, WebhookDuplicateObserved) and e.action_taken == "retry"
+            for e in sink.events
+        )
+
+    @pytest.mark.asyncio
+    async def test_django_async_telemetry_duplicate_processing(self) -> None:
+        sink = RecordingSink()
+        store = InMemoryWebhookReservationStore()
+        payload_data = {**SAMPLE_PAYLOAD, "event_id": "evt_async_proc"}
+        store.reserve("evt_async_proc", token="tok_in_flight", ttl_seconds=60)
+
+        @didit_webhook_view(
+            secret=SECRET, dedup_store=store, processing_action="retry", event_sink=sink
+        )
+        async def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(payload_data)
+        resp = await view(req)
+        assert resp.status_code == 503
+        assert any(
+            isinstance(e, WebhookDuplicateObserved) and e.action_taken == "retry"
+            for e in sink.events
+        )
+
+    def test_django_telemetry_legacy_store_duplicate(self) -> None:
+        sink = RecordingSink()
+        mock_legacy = MagicMock(spec=["claim", "release"])
+        mock_legacy.claim.return_value = False
+
+        @didit_webhook_view(
+            secret=SECRET, dedup_store=mock_legacy, duplicate_action="respond_ok", event_sink=sink
+        )
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        resp = view(req)
+        assert resp.status_code == 200
+        assert b"acknowledged" in resp.content
+        assert any(
+            isinstance(e, WebhookDuplicateObserved) and e.action_taken == "respond_ok"
+            for e in sink.events
+        )
+
+    def test_django_telemetry_release_failure_during_unwind(self) -> None:
+        sink = RecordingSink()
+        store = MagicMock()
+        store.reserve.return_value = ReservationAttempt(
+            state=ReservationState.ACQUIRED,
+            reservation=MagicMock(token="tok1"),
+        )
+        store.release.side_effect = RuntimeError("network partition on release")
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store, event_sink=sink)
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            raise ValueError("Endpoint exploded")
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        with pytest.raises(ValueError, match="Endpoint exploded"):
+            view(req)
+
+        lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
+        assert len(lost_events) == 1
+        assert "Release failed during exception unwind" in lost_events[0].reason
+
+    @pytest.mark.asyncio
+    async def test_django_async_telemetry_release_failure_during_unwind(self) -> None:
+        sink = RecordingSink()
+        store = MagicMock()
+        store.areserve = AsyncMock(
+            return_value=ReservationAttempt(
+                state=ReservationState.ACQUIRED,
+                reservation=MagicMock(token="tok1"),
+            )
+        )
+        store.arelease = AsyncMock(side_effect=RuntimeError("network partition on release"))
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store, event_sink=sink)
+        async def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            raise ValueError("Endpoint exploded")
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        with pytest.raises(ValueError, match="Endpoint exploded"):
+            await view(req)
+
+        lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
+        assert len(lost_events) == 1
+        assert "Release failed during exception unwind" in lost_events[0].reason
+
+    def test_django_telemetry_cas_failure_emits_lease_lost(self) -> None:
+        sink = RecordingSink()
+        store = MagicMock()
+        store.reserve.return_value = ReservationAttempt(
+            state=ReservationState.ACQUIRED,
+            reservation=MagicMock(token="tok1"),
+        )
+        store.complete.return_value = False
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store, event_sink=sink)
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        resp = view(req)
+        assert resp.status_code == 200
+        lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
+        assert len(lost_events) == 1
+        assert lost_events[0].reason == "lease_cas_failed"
+
+    @pytest.mark.asyncio
+    async def test_django_async_telemetry_cas_failure_emits_lease_lost(self) -> None:
+        sink = RecordingSink()
+        store = MagicMock()
+        store.areserve = AsyncMock(
+            return_value=ReservationAttempt(
+                state=ReservationState.ACQUIRED,
+                reservation=MagicMock(token="tok1"),
+            )
+        )
+        store.acomplete = AsyncMock(return_value=False)
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store, event_sink=sink)
+        async def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        resp = await view(req)
+        assert resp.status_code == 200
+        lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
+        assert len(lost_events) == 1
+        assert lost_events[0].reason == "lease_cas_failed"

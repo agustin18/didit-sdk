@@ -1,4 +1,4 @@
-"""PII-safe telemetry event sink definitions and event data models."""
+"""PII-minimized telemetry event sink definitions and event data models."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from didit.models.enums import SessionStatus
 
 @dataclass(frozen=True)
 class DiditSDKEvent:
-    """Base class for all Didit SDK telemetry events. Strictly zero-PII."""
+    """Base class for all Didit SDK telemetry events. Strictly PII-minimized."""
 
     event_type: str
     timestamp: float = field(default_factory=lambda: datetime.now(timezone.utc).timestamp())
@@ -44,7 +44,7 @@ class WebhookDuplicateObserved(DiditSDKEvent):
     """Telemetry emitted when a duplicate webhook delivery is detected."""
 
     event_type: str = "webhook_duplicate_observed"
-    event_id: str = ""
+    event_id: str | None = None
     session_id: str | None = None
     action_taken: str = ""
 
@@ -54,9 +54,9 @@ class WebhookLeaseDegraded(DiditSDKEvent):
     """Telemetry emitted when dedup store fails open and degrades distributed lease."""
 
     event_type: str = "webhook_lease_degraded"
-    event_id: str = ""
+    event_id: str | None = None
     session_id: str | None = None
-    reason: str = ""
+    reason: str = "dedup_store_fail_open"
 
 
 @dataclass(frozen=True)
@@ -64,9 +64,9 @@ class WebhookLeaseLost(DiditSDKEvent):
     """Telemetry emitted when lease ownership token expired or release/CAS failed."""
 
     event_type: str = "webhook_lease_lost"
-    event_id: str = ""
+    event_id: str | None = None
     session_id: str | None = None
-    reason: str = ""
+    reason: str = "lease_expired_or_lost"
 
 
 @dataclass(frozen=True)
@@ -83,10 +83,14 @@ class ReconciliationDriftObserved(DiditSDKEvent):
 
 @runtime_checkable
 class DiditEventSink(Protocol):
-    """Protocol for telemetry event sinks. Sinks must never raise or block core operations."""
+    """Protocol for telemetry event sinks. Sinks must never raise and MUST be non-blocking.
+
+    safe_emit() isolates consumer exceptions, not latency. Sinks performing I/O
+    must enqueue events asynchronously to a background worker or non-blocking buffer.
+    """
 
     def emit(self, event: DiditSDKEvent) -> None:
-        """Emit a telemetry event."""
+        """Emit a telemetry event. Must return promptly without blocking."""
         ...
 
 

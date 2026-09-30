@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 import json
+from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 import respx
@@ -161,12 +165,12 @@ class TestAsyncDiditClient:
             )
         )
 
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         page = await async_client.sessions.list(
             status=SessionStatus.APPROVED,
             vendor_data="user_1",
-            country="ES",
+            country="ESP",
             workflow_id="wf_1",
             search="query",
             date_from=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
@@ -181,7 +185,7 @@ class TestAsyncDiditClient:
         assert req.url.params["status"] == "Approved"
         assert req.url.params["session_kind"] == "user"
         assert req.url.params["vendor_data"] == "user_1"
-        assert req.url.params["country"] == "ES"
+        assert req.url.params["country"] == "ESP"
         assert req.url.params["workflow_id"] == "wf_1"
         assert req.url.params["search"] == "query"
         assert req.url.params["date_from"] == "2026-01-01T00:00:00+00:00"
@@ -808,3 +812,332 @@ class TestAsyncDiditClient:
         assert isinstance(events[0], RateLimitObserved)
         assert isinstance(events[1], RequestRetryScheduled)
         await client.aclose()
+
+    @respx.mock
+    async def test_async_reconcile_range_multi_page_pagination(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        from didit.models.session import ObservedSessionState
+
+        page1_items = [{"session_id": f"sess_ap1_{i}", "status": "Approved"} for i in range(50)]
+        page2_items = [{"session_id": f"sess_ap2_{i}", "status": "Approved"} for i in range(2)]
+        respx.get(f"{base_url}/sessions/").mock(
+            side_effect=[
+                Response(
+                    200,
+                    json={
+                        "count": 52,
+                        "next": f"{base_url}/sessions/?offset=50&limit=50",
+                        "previous": None,
+                        "results": page1_items,
+                    },
+                ),
+                Response(
+                    200,
+                    json={
+                        "count": 52,
+                        "next": None,
+                        "previous": f"{base_url}/sessions/?offset=0&limit=50",
+                        "results": page2_items,
+                    },
+                ),
+            ]
+        )
+        for i in range(50):
+            respx.get(f"{base_url}/session/sess_ap1_{i}/decision/").mock(
+                return_value=Response(
+                    200,
+                    json={"session_id": f"sess_ap1_{i}", "status": "Approved", "warnings": []},
+                )
+            )
+        for i in range(2):
+            respx.get(f"{base_url}/session/sess_ap2_{i}/decision/").mock(
+                return_value=Response(
+                    200,
+                    json={"session_id": f"sess_ap2_{i}", "status": "Approved", "warnings": []},
+                )
+            )
+
+        class AsyncAllApprovedSource:
+            async def aget(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        batch_report = await async_client.sessions.reconcile_range(
+            since="2026-01-01T00:00:00Z",
+            until="2026-01-02T00:00:00Z",
+            source=AsyncAllApprovedSource(),
+        )
+        assert batch_report.total_evaluated == 52
+        assert len(batch_report.reports) == 52
+        assert batch_report.drift_count == 0
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_reconcile_range_max_sessions_cap(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        from didit.models.session import ObservedSessionState
+
+        page1_items = [{"session_id": f"sess_acap_{i}", "status": "Approved"} for i in range(50)]
+        respx.get(f"{base_url}/sessions/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "count": 100,
+                    "next": f"{base_url}/sessions/?offset=50&limit=50",
+                    "previous": None,
+                    "results": page1_items,
+                },
+            )
+        )
+        for i in range(30):
+            respx.get(f"{base_url}/session/sess_acap_{i}/decision/").mock(
+                return_value=Response(
+                    200,
+                    json={"session_id": f"sess_acap_{i}", "status": "Approved", "warnings": []},
+                )
+            )
+
+        class AllSyncSource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        batch_report = await async_client.sessions.reconcile_range(
+            since="2026-01-01T00:00:00Z",
+            until="2026-01-02T00:00:00Z",
+            source=AllSyncSource(),
+            max_sessions=30,
+        )
+        assert batch_report.total_evaluated == 30
+        assert len(batch_report.reports) == 30
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_reconcile_range_coroutine_get_source(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        """Verifies asynchronous source providing coroutine 'get' method is supported."""
+        from didit.models.session import ObservedSessionState
+
+        respx.get(f"{base_url}/sessions/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "count": 1,
+                    "next": None,
+                    "previous": None,
+                    "results": [{"session_id": "sess_coro_src", "status": "Approved"}],
+                },
+            )
+        )
+        respx.get(f"{base_url}/session/sess_coro_src/decision/").mock(
+            return_value=Response(
+                200,
+                json={"session_id": "sess_coro_src", "status": "Approved", "warnings": []},
+            )
+        )
+
+        class AsyncCoroutineGetSource:
+            async def get(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        report = await async_client.sessions.reconcile_range(
+            since="2026-01-01T00:00:00Z",
+            until="2026-01-02T00:00:00Z",
+            source=AsyncCoroutineGetSource(),
+        )
+        assert report.total_evaluated == 1
+        assert report.reports[0].is_in_sync is True
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_reconcile_range_sync_source_threadpool(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        """Verifies synchronous SessionStateSource is dispatched via asyncio.to_thread
+        in async client.
+        """
+        from didit.models.session import ObservedSessionState
+
+        respx.get(f"{base_url}/sessions/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "count": 1,
+                    "next": None,
+                    "previous": None,
+                    "results": [{"session_id": "sess_sync_src", "status": "Approved"}],
+                },
+            )
+        )
+        respx.get(f"{base_url}/session/sess_sync_src/decision/").mock(
+            return_value=Response(
+                200,
+                json={"session_id": "sess_sync_src", "status": "Approved", "warnings": []},
+            )
+        )
+
+        class PurelySyncSource:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                self.calls += 1
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        sync_source = PurelySyncSource()
+        report = await async_client.sessions.reconcile_range(
+            since="2026-01-01T00:00:00Z",
+            until="2026-01-02T00:00:00Z",
+            source=sync_source,
+        )
+        assert report.total_evaluated == 1
+        assert sync_source.calls == 1
+        assert report.reports[0].is_in_sync is True
+        await async_client.aclose()
+
+    @pytest.mark.parametrize(
+        ("filter_kwargs", "err_match"),
+        [
+            ({"session_kind": "business"}, "Unsupported session_kind 'business'"),
+            ({"country": "ES"}, "Expected 3-letter ISO 3166-1 alpha-3 code"),
+            ({"country": "españa"}, "Expected 3-letter ISO 3166-1 alpha-3 code"),
+            ({"limit": 0}, "limit must be between 1 and 100"),
+            ({"limit": 101}, "limit must be between 1 and 100"),
+            ({"offset": -1}, "offset must be non-negative"),
+            ({"date_from": "2026-01-01T00:00:00"}, "must include timezone information"),
+            ({"date_from": datetime(2026, 1, 1)}, "must be timezone-aware"),
+            ({"date_from": 12345}, "must be a datetime or ISO-8601 string"),
+            ({"date_from": "invalid-iso-string"}, "Invalid ISO-8601 timestamp string"),
+            (
+                {"date_from": "2026-01-02T00:00:00Z", "date_to": "2026-01-01T00:00:00Z"},
+                "cannot be later than date_to",
+            ),
+        ],
+    )
+    async def test_async_session_list_filter_validations(
+        self, async_client: AsyncDidit, filter_kwargs: dict[str, Any], err_match: str
+    ) -> None:
+        with pytest.raises(ValueError, match=err_match):
+            await async_client.sessions.list(**filter_kwargs)
+        await async_client.aclose()
+
+    @pytest.mark.parametrize(
+        ("conflict_kwargs", "err_match"),
+        [
+            (
+                {"since": "2026-01-01T00:00:00Z", "date_from": "2026-01-01T00:00:00Z"},
+                "Specify either 'since' or 'date_from', not both",
+            ),
+            (
+                {"until": "2026-01-02T00:00:00Z", "date_to": "2026-01-02T00:00:00Z"},
+                "Specify either 'until' or 'date_to', not both",
+            ),
+            (
+                {"page_size": 0},
+                "page_size must be between 1 and 100",
+            ),
+            (
+                {"limit": 101},
+                "page_size must be between 1 and 100",
+            ),
+            (
+                {"max_sessions": 0},
+                "max_sessions must be greater than 0",
+            ),
+        ],
+    )
+    async def test_async_reconcile_range_conflicting_parameters(
+        self, async_client: AsyncDidit, conflict_kwargs: dict[str, Any], err_match: str
+    ) -> None:
+        class DummyAsyncSource:
+            async def get(self, session_id: str) -> None:
+                return None
+
+        with pytest.raises(ValueError, match=err_match):
+            await async_client.sessions.reconcile_range(
+                source=DummyAsyncSource(), **conflict_kwargs
+            )
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_reconcile_range_empty_results(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/sessions/").mock(
+            return_value=Response(
+                200,
+                json={"count": 0, "next": None, "previous": None, "results": []},
+            )
+        )
+
+        class DummyAsyncSource:
+            async def aget(self, session_id: str) -> None:
+                return None
+
+        report = await async_client.sessions.reconcile_range(source=DummyAsyncSource())
+        assert report.total_evaluated == 0
+        assert report.reports == []
+        await async_client.aclose()
+
+    async def test_async_reconcile_session_id_mismatch(self, async_client: AsyncDidit) -> None:
+        from didit.models.session import ObservedSessionState
+
+        with pytest.raises(
+            ValueError,
+            match="ObservedSessionState session_id mismatch: expected 'sess_target'",
+        ):
+            await async_client.sessions.reconcile(
+                "sess_target",
+                observed=ObservedSessionState(
+                    session_id="sess_other", status=SessionStatus.APPROVED
+                ),
+            )
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_reconcile_clean_missing_local_and_remote(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        # 1. Local missing: observed is None
+        respx.get(f"{base_url}/session/sess_clean_local_async/decision/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "session_id": "sess_clean_local_async",
+                    "status": "Approved",
+                    "warnings": ["w1"],
+                },
+            )
+        )
+        report_local = await async_client.sessions.reconcile(
+            "sess_clean_local_async", observed=None
+        )
+        assert report_local.local_missing is True
+        assert report_local.remote_missing is False
+        assert report_local.status_drift is False
+        assert report_local.warning_codes_added == []
+        assert report_local.warning_codes_removed == []
+        assert report_local.is_in_sync is False
+
+        # 2. Remote missing: 404 from upstream
+        respx.get(f"{base_url}/session/sess_clean_remote_async/decision/").mock(
+            return_value=Response(404, json={"detail": "Not found"})
+        )
+        from didit.models.session import ObservedSessionState
+
+        report_remote = await async_client.sessions.reconcile(
+            "sess_clean_remote_async",
+            observed=ObservedSessionState(
+                session_id="sess_clean_remote_async",
+                status=SessionStatus.APPROVED,
+                warnings=["w1"],
+            ),
+        )
+        assert report_remote.local_missing is False
+        assert report_remote.remote_missing is True
+        assert report_remote.status_drift is False
+        assert report_remote.warning_codes_added == []
+        assert report_remote.warning_codes_removed == []
+        assert report_remote.is_in_sync is False
+        await async_client.aclose()

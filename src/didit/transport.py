@@ -294,7 +294,7 @@ class _SyncRequestor:
                             url=url,
                             attempt=attempt + 1,
                             delay=delay,
-                            reason=f"Status {response.status_code}",
+                            reason=f"http_{response.status_code}",
                         ),
                     )
                     if effective_opts and effective_opts.deadline is not None:
@@ -335,7 +335,7 @@ class _SyncRequestor:
                             url=url,
                             attempt=attempt + 1,
                             delay=delay,
-                            reason=str(exc),
+                            reason="connect_error",
                         ),
                     )
                     if effective_opts and effective_opts.deadline is not None:
@@ -368,7 +368,7 @@ class _SyncRequestor:
                             url=url,
                             attempt=attempt + 1,
                             delay=delay,
-                            reason=str(exc),
+                            reason="timeout",
                         ),
                     )
                     if effective_opts and effective_opts.deadline is not None:
@@ -399,6 +399,16 @@ class _SyncRequestor:
                     idempotency_key=headers.get("Idempotency-Key"),
                 ):
                     delay = self._retry_policy.calculate_delay(attempt)
+                    safe_emit(
+                        self._event_sink,
+                        RequestRetryScheduled(
+                            method=method,
+                            url=url,
+                            attempt=attempt + 1,
+                            delay=delay,
+                            reason="network_error",
+                        ),
+                    )
                     if effective_opts and effective_opts.deadline is not None:
                         remaining = effective_opts.deadline - time.monotonic()
                         if delay >= remaining or remaining <= 0:
@@ -543,7 +553,7 @@ class _AsyncRequestor:
                             url=url,
                             attempt=attempt + 1,
                             delay=delay,
-                            reason=f"Status {response.status_code}",
+                            reason=f"http_{response.status_code}",
                         ),
                     )
                     if effective_opts and effective_opts.deadline is not None:
@@ -584,7 +594,7 @@ class _AsyncRequestor:
                             url=url,
                             attempt=attempt + 1,
                             delay=delay,
-                            reason=str(exc),
+                            reason="connect_error",
                         ),
                     )
                     if effective_opts and effective_opts.deadline is not None:
@@ -622,7 +632,7 @@ class _AsyncRequestor:
                             url=url,
                             attempt=attempt + 1,
                             delay=delay,
-                            reason=str(exc),
+                            reason="timeout",
                         ),
                     )
                     if effective_opts and effective_opts.deadline is not None:
@@ -653,6 +663,16 @@ class _AsyncRequestor:
                     idempotency_key=headers.get("Idempotency-Key"),
                 ):
                     delay = self._retry_policy.calculate_delay(attempt)
+                    safe_emit(
+                        self._event_sink,
+                        RequestRetryScheduled(
+                            method=method,
+                            url=url,
+                            attempt=attempt + 1,
+                            delay=delay,
+                            reason="network_error",
+                        ),
+                    )
                     if effective_opts and effective_opts.deadline is not None:
                         remaining = effective_opts.deadline - time.monotonic()
                         if delay >= remaining or remaining <= 0:

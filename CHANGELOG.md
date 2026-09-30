@@ -8,17 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Session Listing & Pagination (`sessions.list()` / `asessions.list()`):**
+- **Session Listing & Pagination (`client.sessions.list()` / `async_client.sessions.list()`):**
   - Query upstream `GET /v3/sessions/` with comprehensive filtering (`status`, `vendor_data`, `country`, `workflow_id`, `search`, `date_from`, `date_to`) and pagination (`limit`, `offset`).
   - Typed `SessionListPage` and `SessionListItem` models for ergonomic consumption.
 - **Snapshot Reconciliation Engine (`sessions.reconcile()` / `sessions.reconcile_range()`):**
-  - Cryptographic and state verification against remote Didit ground truth, detecting status drift and warning code additions/removals (`ObservedSessionState`, `SessionReconciliationReport`, `BatchReconciliationReport`).
+  - State verification against remote Didit API snapshots, detecting status drift and warning code additions/removals (`ObservedSessionState`, `SessionReconciliationReport`, `BatchReconciliationReport`).
+  - Multi-page auto-pagination across full time windows with configurable `page_size` and safety `max_sessions` caps.
   - Pluggable state protocols (`SessionStateSource` and `AsyncSessionStateSource`) supporting synchronous and asynchronous database adapters.
-  - Strict Zero-PII design: reconciliation reports carry only identifiers, statuses, and warning codes (no discrete or speculative `missed_events`).
-- **Zero-PII Telemetry Event Sink Protocol (`DiditEventSink`):**
+  - Strict PII-minimized design: reconciliation reports carry only identifiers, statuses, and warning codes (no discrete or speculative `missed_events`).
+- **PII-Minimized Telemetry Event Sink Protocol (`DiditEventSink`):**
   - Protocol for passive observability without breaking SDK operations: `safe_emit()` isolates consumer exceptions.
-  - PII-safe typed events: `RequestRetryScheduled`, `RateLimitObserved`, `WebhookDuplicateObserved`, `WebhookLeaseDegraded`, `WebhookLeaseLost`, and `ReconciliationDriftObserved`.
-  - Native integration with HTTP transport backoff retries, rate limits, session reconciliation drift, and webhook lease failures.
+  - PII-minimized typed events: `RequestRetryScheduled`, `RateLimitObserved`, `WebhookDuplicateObserved`, `WebhookLeaseDegraded`, `WebhookLeaseLost`, and `ReconciliationDriftObserved`.
+  - Native integration with HTTP transport backoff retries, rate limits, session reconciliation drift, and webhook lease failures across FastAPI, Django, and Flask.
 - **Tokenized Webhook Reservation Protocol (Distributed Redis Lease & In-Memory Parity):**
   - Distributed tokenized reservation store with atomic Lua CAS primitives (`reserve`, `complete`, `release`, `renew`) preventing concurrent processing races and duplicate execution across distributed workers.
   - Decoupled `lease_ttl_seconds` (default: 30s) from `completed_ttl_seconds` (default: 86400s), ensuring crash recovery from OOM/SIGKILL before Didit retry delivery windows.

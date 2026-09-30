@@ -763,3 +763,34 @@ class TestSessionListAndReconciliationModels:
 
         assert isinstance(CustomSyncSource(), SessionStateSource)
         assert isinstance(CustomAsyncSource(), AsyncSessionStateSource)
+
+    def test_session_models_redacted_dump(self) -> None:
+        from didit.models.session import SessionListItem, SessionListPage
+
+        item_with_token = SessionListItem(
+            session_id="sess_1",
+            status=SessionStatus.APPROVED,
+            session_token="secret_token_123",
+        )
+        dump1 = item_with_token.redacted_dump()
+        assert dump1["session_token"] == "[REDACTED]"
+
+        item_without_token = SessionListItem(
+            session_id="sess_2",
+            status=SessionStatus.IN_REVIEW,
+            session_token=None,
+        )
+        dump2 = item_without_token.redacted_dump()
+        assert dump2["session_token"] is None
+
+        page = SessionListPage(
+            count=2,
+            next="https://api.didit.me/v1/sessions/?offset=2",
+            previous=None,
+            results=[item_with_token, item_without_token],
+        )
+        page_dump = page.redacted_dump()
+        assert page_dump["count"] == 2
+        assert page_dump["next"] == "https://api.didit.me/v1/sessions/?offset=2"
+        assert page_dump["results"][0]["session_token"] == "[REDACTED]"
+        assert page_dump["results"][1]["session_token"] is None

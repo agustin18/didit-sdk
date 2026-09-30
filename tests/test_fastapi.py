@@ -6,6 +6,12 @@ import pytest
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 
+from didit.events import (
+    DiditEventSink,
+    DiditSDKEvent,
+    WebhookLeaseDegraded,
+    WebhookLeaseLost,
+)
 from didit.integrations.fastapi import (
     DiditWebhookGuard,
     DiditWebhookRoute,
@@ -612,6 +618,95 @@ class TestFastAPIWebhookReservation:
         assert await guard_with_store.complete_reservation(req) is False
 
         assert await complete_didit_reservation(req) is False
+
+    def test_guard_degraded_lease_emits_telemetry(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from didit.dedup import ReservationAttempt, ReservationState
+
+        class FastAPIRecordingSink(DiditEventSink):
+            def __init__(self) -> None:
+                self.events: list[DiditSDKEvent] = []
+
+            def emit(self, event: DiditSDKEvent) -> None:
+                self.events.append(event)
+
+        sink = FastAPIRecordingSink()
+        mock_store = AsyncMock()
+        mock_store.areserve.return_value = ReservationAttempt(
+            state=ReservationState.ACQUIRED,
+            reservation=None,
+            degraded=True,
+        )
+
+        guard_deg = DiditWebhookGuard(
+            secret=WEBHOOK_SECRET,
+            dedup_store=mock_store,
+            event_sink=sink,
+        )
+        deg_app = FastAPI()
+
+        @deg_app.post("/test-degraded")
+        async def endpoint(payload: WebhookPayload = Depends(guard_deg)) -> dict[str, str]:
+            return {"status": "ok"}
+
+        deg_client = TestClient(deg_app)
+        data = {
+            "event_id": "evt_deg_test",
+            "session_id": "sess_deg",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        resp = deg_client.post(
+            "/test-degraded",
+            content=raw_body,
+            headers={"X-Signature-V2": sig, "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+        deg_events = [e for e in sink.events if isinstance(e, WebhookLeaseDegraded)]
+        assert len(deg_events) == 1
+        assert deg_events[0].reason == "dedup_store_fail_open"
+
+    @pytest.mark.asyncio
+    async def test_complete_didit_reservation_cas_failure_emits_telemetry(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from starlette.requests import Request
+
+        from didit.dedup import WebhookReservation
+        from didit.integrations.fastapi import complete_didit_reservation
+
+        class FastAPIRecordingSink(DiditEventSink):
+            def __init__(self) -> None:
+                self.events: list[DiditSDKEvent] = []
+
+            def emit(self, event: DiditSDKEvent) -> None:
+                self.events.append(event)
+
+        sink = FastAPIRecordingSink()
+        mock_store = AsyncMock()
+        mock_store.acomplete.return_value = False
+
+        req = Request({"type": "http"})
+        req.state.didit_dedup_store = mock_store
+        req.state.didit_dedup_key = "evt_key"
+        req.state.didit_claimed = True
+        req.state.didit_reservation = WebhookReservation(
+            event_id="evt_cas_fail",
+            token="tok_fail",
+            expires_at=time.monotonic() + 30,
+        )
+        req.state.didit_event_sink = sink
+        req.state.didit_event_id = "evt_cas_fail"
+        req.state.didit_session_id = "sess_cas_fail"
+
+        res = await complete_didit_reservation(req)
+        assert res is False
+        lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
+        assert len(lost_events) == 1
+        assert lost_events[0].reason == "lease_cas_failed"
 
 
 class TestFastAPIRouteDecoratorLifecycle:

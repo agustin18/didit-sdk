@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from flask import Flask, Response, g, jsonify
@@ -17,6 +17,13 @@ from didit.dedup import (
     ReservationState,
 )
 from didit.errors import DiditConfigurationError, DiditSignatureError
+from didit.events import (
+    DiditEventSink,
+    DiditSDKEvent,
+    WebhookDuplicateObserved,
+    WebhookLeaseDegraded,
+    WebhookLeaseLost,
+)
 from didit.integrations.flask import didit_webhook, parse_flask_webhook
 from didit.models.enums import SessionStatus
 from didit.models.webhook import WebhookPayload
@@ -839,3 +846,221 @@ class TestFlaskWebhookReservation:
         res = create_signed_flask_client(app, "/res-conflict", payload_data)
         assert res.status_code == 409
         assert b"currently being processed" in res.data
+
+
+class FlaskRecordingSink(DiditEventSink):
+    def __init__(self) -> None:
+        self.events: list[DiditSDKEvent] = []
+
+    def emit(self, event: DiditSDKEvent) -> None:
+        self.events.append(event)
+
+
+class TestFlaskTelemetry:
+    def test_flask_telemetry_normal_flow_sets_g_attributes(self) -> None:
+        app = Flask(__name__)
+        sink = FlaskRecordingSink()
+
+        @app.route("/telemetry-normal", methods=["POST"])
+        @didit_webhook(secret=SECRET, event_sink=sink)
+        def handle(payload: WebhookPayload) -> tuple[str, int]:
+            assert g.didit_event_sink is sink
+            assert g.didit_event_id == payload.event_id
+            assert g.didit_session_id == payload.session_id
+            return "ok", 200
+
+        res = create_signed_flask_client(app, "/telemetry-normal", SAMPLE_PAYLOAD)
+        assert res.status_code == 200
+        assert len(sink.events) == 0
+
+    def test_flask_telemetry_app_config_sink_fallback(self) -> None:
+        app = Flask(__name__)
+        sink = FlaskRecordingSink()
+        app.config["DIDIT_EVENT_SINK"] = sink
+
+        @app.route("/telemetry-fallback", methods=["POST"])
+        @didit_webhook(secret=SECRET)
+        def handle(payload: WebhookPayload) -> tuple[str, int]:
+            assert g.didit_event_sink is sink
+            return "ok", 200
+
+        res = create_signed_flask_client(app, "/telemetry-fallback", SAMPLE_PAYLOAD)
+        assert res.status_code == 200
+
+    def test_flask_telemetry_degraded_lease(self) -> None:
+        app = Flask(__name__)
+        sink = FlaskRecordingSink()
+        store = MagicMock()
+        store.reserve.return_value = ReservationAttempt(
+            state=ReservationState.ACQUIRED,
+            reservation=None,
+            degraded=True,
+        )
+
+        @app.route("/telemetry-deg", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=store, event_sink=sink)
+        def handle(payload: WebhookPayload) -> tuple[str, int]:
+            return "ok", 200
+
+        res = create_signed_flask_client(app, "/telemetry-deg", SAMPLE_PAYLOAD)
+        assert res.status_code == 200
+        deg_events = [e for e in sink.events if isinstance(e, WebhookLeaseDegraded)]
+        assert len(deg_events) == 1
+        assert deg_events[0].reason == "dedup_store_fail_open"
+
+    def test_flask_telemetry_duplicate_completed(self) -> None:
+        app = Flask(__name__)
+        sink = FlaskRecordingSink()
+        store = InMemoryWebhookReservationStore()
+        payload_data = {**SAMPLE_PAYLOAD, "event_id": "evt_flask_dup"}
+        attempt = store.reserve("evt_flask_dup", token="tok_f")
+        store.complete("evt_flask_dup", token=attempt.reservation.token)  # type: ignore[union-attr]
+
+        @app.route("/telemetry-dup", methods=["POST"])
+        @didit_webhook(
+            secret=SECRET, dedup_store=store, duplicate_action="respond_ok", event_sink=sink
+        )
+        def handle(payload: WebhookPayload) -> tuple[str, int]:
+            return "ok", 200
+
+        res = create_signed_flask_client(app, "/telemetry-dup", payload_data)
+        assert res.status_code == 200
+        assert b"acknowledged" in res.data
+        assert any(
+            isinstance(e, WebhookDuplicateObserved) and e.action_taken == "respond_ok"
+            for e in sink.events
+        )
+
+    def test_flask_telemetry_duplicate_processing(self) -> None:
+        app = Flask(__name__)
+        sink = FlaskRecordingSink()
+        store = InMemoryWebhookReservationStore()
+        payload_data = {**SAMPLE_PAYLOAD, "event_id": "evt_flask_proc"}
+        store.reserve("evt_flask_proc", token="tok_proc", ttl_seconds=60)
+
+        @app.route("/telemetry-proc", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=store, processing_action="retry", event_sink=sink)
+        def handle(payload: WebhookPayload) -> tuple[str, int]:
+            return "ok", 200
+
+        res = create_signed_flask_client(app, "/telemetry-proc", payload_data)
+        assert res.status_code == 503
+        assert any(
+            isinstance(e, WebhookDuplicateObserved) and e.action_taken == "retry"
+            for e in sink.events
+        )
+
+    def test_flask_telemetry_legacy_store_duplicate(self) -> None:
+        app = Flask(__name__)
+        sink = FlaskRecordingSink()
+        mock_legacy = MagicMock(spec=["claim", "release"])
+        mock_legacy.claim.return_value = False
+
+        @app.route("/telemetry-legacy-dup", methods=["POST"])
+        @didit_webhook(
+            secret=SECRET, dedup_store=mock_legacy, duplicate_action="respond_ok", event_sink=sink
+        )
+        def handle(payload: WebhookPayload) -> tuple[str, int]:
+            return "ok", 200
+
+        res = create_signed_flask_client(app, "/telemetry-legacy-dup", SAMPLE_PAYLOAD)
+        assert res.status_code == 200
+        assert b"acknowledged" in res.data
+        assert any(
+            isinstance(e, WebhookDuplicateObserved) and e.action_taken == "respond_ok"
+            for e in sink.events
+        )
+
+    def test_flask_telemetry_release_failure_during_unwind(self) -> None:
+        app = Flask(__name__)
+        app.testing = True
+        sink = FlaskRecordingSink()
+        store = MagicMock()
+        store.reserve.return_value = ReservationAttempt(
+            state=ReservationState.ACQUIRED,
+            reservation=MagicMock(token="tok_rel"),
+        )
+        store.release.side_effect = RuntimeError("network partition on release")
+
+        @app.route("/telemetry-unwind", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=store, event_sink=sink)
+        def handle(payload: WebhookPayload) -> tuple[str, int]:
+            raise ValueError("Endpoint crashed")
+
+        with pytest.raises(ValueError, match="Endpoint crashed"):
+            create_signed_flask_client(app, "/telemetry-unwind", SAMPLE_PAYLOAD)
+
+        lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
+        assert len(lost_events) == 1
+        assert "Release failed during exception unwind" in lost_events[0].reason
+
+    def test_flask_telemetry_cas_failure_emits_lease_lost(self) -> None:
+        app = Flask(__name__)
+        sink = FlaskRecordingSink()
+        store = MagicMock()
+        store.reserve.return_value = ReservationAttempt(
+            state=ReservationState.ACQUIRED,
+            reservation=MagicMock(token="tok_cas"),
+        )
+        store.complete.return_value = False
+
+        @app.route("/telemetry-cas", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=store, event_sink=sink)
+        def handle(payload: WebhookPayload) -> tuple[str, int]:
+            return "ok", 200
+
+        res = create_signed_flask_client(app, "/telemetry-cas", SAMPLE_PAYLOAD)
+        assert res.status_code == 200
+        lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
+        assert len(lost_events) == 1
+        assert lost_events[0].reason == "lease_cas_failed"
+
+    def test_flask_async_telemetry_suite(self) -> None:
+        app = Flask(__name__)
+        sink = FlaskRecordingSink()
+        store = MagicMock()
+        store.areserve = AsyncMock(
+            return_value=ReservationAttempt(
+                state=ReservationState.ACQUIRED,
+                reservation=MagicMock(token="tok_async"),
+                degraded=True,
+            )
+        )
+        store.acomplete = AsyncMock(return_value=False)
+
+        @app.route("/telemetry-async", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=store, event_sink=sink)
+        async def handle(payload: WebhookPayload) -> tuple[str, int]:
+            assert g.didit_event_sink is sink
+            assert g.didit_event_id == payload.event_id
+            return "ok", 200
+
+        res = create_signed_flask_client(app, "/telemetry-async", SAMPLE_PAYLOAD)
+        assert res.status_code == 200
+        assert any(isinstance(e, WebhookLeaseDegraded) for e in sink.events)
+        assert any(isinstance(e, WebhookLeaseLost) for e in sink.events)
+
+    def test_flask_async_telemetry_unwind_failure(self) -> None:
+        app = Flask(__name__)
+        app.testing = True
+        sink = FlaskRecordingSink()
+        store = MagicMock()
+        store.areserve = AsyncMock(
+            return_value=ReservationAttempt(
+                state=ReservationState.ACQUIRED,
+                reservation=MagicMock(token="tok_async_rel"),
+            )
+        )
+        store.arelease = AsyncMock(side_effect=RuntimeError("async release failed"))
+
+        @app.route("/telemetry-async-unwind", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=store, event_sink=sink)
+        async def handle(payload: WebhookPayload) -> tuple[str, int]:
+            raise ValueError("Async endpoint error")
+
+        with pytest.raises(ValueError, match="Async endpoint error"):
+            create_signed_flask_client(app, "/telemetry-async-unwind", SAMPLE_PAYLOAD)
+
+        lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
+        assert len(lost_events) == 1
+        assert "Release failed during exception unwind" in lost_events[0].reason

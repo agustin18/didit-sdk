@@ -16,6 +16,7 @@ from didit.errors import (
     DiditServerError,
     DiditTimeoutError,
 )
+from didit.events import DiditEventSink, DiditSDKEvent, RequestRetryScheduled
 from didit.transport import (
     RequestOptions,
     RetryPolicy,
@@ -1077,3 +1078,75 @@ class TestAsyncRequestor:
         resp = await requestor.request("GET", "/fast", options=opts)
         assert resp.status_code == 200
         await client.aclose()
+
+
+class TransportRecordingSink(DiditEventSink):
+    def __init__(self) -> None:
+        self.events: list[DiditSDKEvent] = []
+
+    def emit(self, event: DiditSDKEvent) -> None:
+        self.events.append(event)
+
+
+class TestTransportRetryTelemetryReasons:
+    def test_sync_retry_scheduled_reasons(self) -> None:
+        sink = TransportRecordingSink()
+
+        # Network error simulation
+        class FailTransport(httpx.BaseTransport):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                self.calls += 1
+                if self.calls == 1:
+                    raise httpx.RemoteProtocolError("corrupted frame")
+                return httpx.Response(200, json={"ok": True})
+
+        client = httpx.Client(transport=FailTransport())
+        requestor = _SyncRequestor(
+            client,
+            base_url="https://api.didit.me/v3",
+            api_key="k",
+            retry_policy=RetryPolicy(base_delay=0.001, jitter=False),
+            event_sink=sink,
+        )
+
+        resp = requestor.request("GET", "/test-net-err")
+        assert resp.status_code == 200
+        client.close()
+
+        retry_events = [e for e in sink.events if isinstance(e, RequestRetryScheduled)]
+        assert len(retry_events) == 1
+        assert retry_events[0].reason == "network_error"
+
+    @pytest.mark.asyncio
+    async def test_async_retry_scheduled_reasons(self) -> None:
+        sink = TransportRecordingSink()
+
+        class AsyncFailTransport(httpx.AsyncBaseTransport):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                self.calls += 1
+                if self.calls == 1:
+                    raise httpx.RemoteProtocolError("corrupted frame")
+                return httpx.Response(200, json={"ok": True})
+
+        client = httpx.AsyncClient(transport=AsyncFailTransport())
+        requestor = _AsyncRequestor(
+            client,
+            base_url="https://api.didit.me/v3",
+            api_key="k",
+            retry_policy=RetryPolicy(base_delay=0.001, jitter=False),
+            event_sink=sink,
+        )
+
+        resp = await requestor.request("GET", "/test-net-err-async")
+        assert resp.status_code == 200
+        await client.aclose()
+
+        retry_events = [e for e in sink.events if isinstance(e, RequestRetryScheduled)]
+        assert len(retry_events) == 1
+        assert retry_events[0].reason == "network_error"

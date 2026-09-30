@@ -120,7 +120,7 @@ client = Didit()
 page = client.sessions.list(
     status=SessionStatus.APPROVED,
     vendor_data="user_12345",
-    country="ES",
+    country="ESP",
     limit=50,
     offset=0,
 )
@@ -132,7 +132,7 @@ for item in page.results:
 
 ### 4. Snapshot Reconciliation (Drift Detection)
 
-Audit your local database state against upstream Didit ground truth to detect dropped webhooks, out-of-order deliveries, or status drift without exposing PII:
+Audit your local database state against upstream Didit API snapshots to detect state divergence that may result from delivery gaps, stale local state, or other synchronization failures without exposing PII:
 
 ```python
 from didit import Didit, ObservedSessionState, SessionStatus
@@ -155,7 +155,7 @@ if not report.is_in_sync:
     print(f"Warnings removed remotely: {report.warning_codes_removed}")
 
 
-# Batch reconcile over a time window against your database
+# Batch reconcile over a time window against your database with auto-pagination
 class DatabaseSessionSource:
     def get(self, session_id: str) -> ObservedSessionState | None:
         row = db.find_session(session_id)
@@ -170,13 +170,15 @@ batch_report = client.sessions.reconcile_range(
     since="2026-01-01T00:00:00Z",
     until="2026-01-02T00:00:00Z",
     source=DatabaseSessionSource(),
+    page_size=50,
+    max_sessions=1000,
 )
 print(f"Audited {batch_report.total_evaluated} sessions: {batch_report.drift_count} drifts found.")
 ```
 
-### 5. Zero-PII Telemetry Event Sink
+### 5. PII-Minimized Telemetry Event Sink
 
-Attach a passive `DiditEventSink` to collect structured, privacy-safe SDK operational metrics (backoff retries, rate limits, duplicate webhooks, lease degradations/losses, and reconciliation drift):
+Attach a passive `DiditEventSink` to collect structured, privacy-safe SDK operational metrics (backoff retries, rate limits, duplicate webhooks, lease degradations/losses, and reconciliation drift). The event sink is strictly non-blocking: any exception raised inside `emit()` is safely caught and suppressed by the SDK to guarantee that metric reporting never fails core business operations:
 
 ```python
 from didit import Didit, DiditEventSink, DiditSDKEvent
@@ -184,7 +186,7 @@ from didit import Didit, DiditEventSink, DiditSDKEvent
 
 class MetricsEventSink:
     def emit(self, event: DiditSDKEvent) -> None:
-        # PII-safe: contains only identifiers, status enums, and timing metrics
+        # PII-minimized: contains only structured identifiers, status enums, and timing metrics
         statsd.increment(f"didit.sdk.{event.event_type}")
 
 
@@ -371,7 +373,7 @@ except DiditServerError as exc:
 ```
 
 > [!NOTE]
-> **Zero-PII Exception Handling**: By default, `DiditAPIError` purges raw `response_body` and error detail dictionaries to protect user PII and biometrics from leaking into logs or APM dashboards (e.g. Sentry, Datadog). To retain raw response bodies in development or sandboxes, initialize `Didit(..., capture_sensitive_response=True)` or set `DIDIT_CAPTURE_SENSITIVE_RESPONSE=1`.
+> **PII-Minimized Exception Handling**: By default, `DiditAPIError` purges raw `response_body` and error detail dictionaries to protect user PII and biometrics from leaking into logs or APM dashboards (e.g. Sentry, Datadog). To retain raw response bodies in development or sandboxes, initialize `Didit(..., capture_sensitive_response=True)` or set `DIDIT_CAPTURE_SENSITIVE_RESPONSE=1`.
 
 ---
 

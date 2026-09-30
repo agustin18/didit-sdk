@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -56,17 +56,14 @@ class SessionResponse(BaseModel):
 class SessionListItem(BaseModel):
     """Item representation in session listing response."""
 
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     session_id: str = Field(..., description="Unique Didit session identifier")
+    status: SessionStatus = Field(..., description="Current verification status")
     session_token: str | None = Field(
         default=None, description="Client token for web SDK embedding"
     )
     url: str | None = Field(default=None, description="Hosted verification flow URL for the user")
-    status: SessionStatus = Field(
-        default=SessionStatus.NOT_STARTED,
-        description="Current verification status",
-    )
     workflow_id: str | None = Field(default=None, description="Associated workflow identifier")
     vendor_data: str | None = Field(default=None, description="Echoed vendor reference")
     callback: str | None = Field(default=None, description="Echoed callback URL")
@@ -75,24 +72,51 @@ class SessionListItem(BaseModel):
     created_at: int | float | str | None = Field(default=None, description="Creation timestamp")
     updated_at: int | float | str | None = Field(default=None, description="Update timestamp")
 
+    def __repr__(self) -> str:
+        token_repr = "'[REDACTED]'" if self.session_token else "None"
+        return (
+            f"SessionListItem(session_id={self.session_id!r}, status={self.status!r}, "
+            f"workflow_id={self.workflow_id!r}, session_token={token_repr})"
+        )
+
+    def redacted_dump(self) -> dict[str, Any]:
+        """Dump model dictionary with session_token redacted."""
+        data = self.model_dump()
+        if data.get("session_token"):
+            data["session_token"] = "[REDACTED]"
+        return data
+
 
 class SessionListPage(BaseModel):
     """Paginated collection of sessions returned by Didit API."""
 
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    count: int = Field(default=0, description="Total count of matching sessions")
+    count: int = Field(..., description="Total count of matching sessions")
+    results: list[SessionListItem] = Field(..., description="List of sessions on current page")
     next: str | None = Field(default=None, description="URL for the next page of results")
     previous: str | None = Field(default=None, description="URL for the previous page of results")
-    results: list[SessionListItem] = Field(
-        default_factory=list, description="List of sessions on current page"
-    )
+
+    def __repr__(self) -> str:
+        return (
+            f"SessionListPage(count={self.count}, results_count={len(self.results)}, "
+            f"has_next={self.next is not None}, has_previous={self.previous is not None})"
+        )
+
+    def redacted_dump(self) -> dict[str, Any]:
+        """Dump model dictionary with all contained session tokens redacted."""
+        return {
+            "count": self.count,
+            "next": self.next,
+            "previous": self.previous,
+            "results": [item.redacted_dump() for item in self.results],
+        }
 
 
 class ObservedSessionState(BaseModel):
     """Local snapshot of a session used for drift reconciliation."""
 
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     session_id: str = Field(..., description="Unique session identifier")
     status: SessionStatus | str | None = Field(
@@ -109,7 +133,7 @@ class ObservedSessionState(BaseModel):
 class SessionReconciliationReport(BaseModel):
     """Result of reconciling a local session snapshot against remote Didit state."""
 
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     session_id: str = Field(..., description="Unique session identifier")
     local_status: SessionStatus | str | None = Field(
@@ -154,9 +178,14 @@ class SessionReconciliationReport(BaseModel):
 
 
 class BatchReconciliationReport(BaseModel):
-    """Aggregated report from reconciling a range or batch of sessions."""
+    """Aggregated report from reconciling remote Didit inventory against a local state source.
 
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    Note: Batch reconciliation scans remote Didit inventory and detects local
+    missing/stale projections (one-way audit). Systemic remote missing is detected
+    via single-session reconcile().
+    """
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     total_evaluated: int = Field(default=0, description="Total sessions evaluated")
     drift_count: int = Field(
