@@ -10,6 +10,7 @@ from didit.errors import (
     DiditAPIError,
     DiditAuthenticationError,
     DiditConfigurationError,
+    DiditConnectionError,
     DiditNotFoundError,
     DiditPermissionError,
     DiditRateLimitError,
@@ -315,6 +316,51 @@ class TestDiditSyncClient:
             client_sensitive.sessions.get("s_leak")
         assert exc_sens.value.response_body == '{"detail": "Sensitive Biometric Payload"}'
         client_sensitive.close()
+
+        # Test exception causes suppression on connection/network error
+        import httpx
+
+        class ConnFailTransport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                raise httpx.ConnectError("Failed TCP connect")
+
+        client_cause_safe = Didit(
+            api_key="key",
+            base_url="https://api.example.com",
+            http_client=httpx.Client(transport=ConnFailTransport()),
+        )
+        with pytest.raises(DiditConnectionError) as conn_exc_safe:
+            client_cause_safe.sessions.get("s_cause")
+        assert conn_exc_safe.value.__cause__ is None
+        assert conn_exc_safe.value.__suppress_context__ is True
+        client_cause_safe.close()
+
+        client_cause_sens = Didit(
+            api_key="key",
+            base_url="https://api.example.com",
+            capture_sensitive_response=True,
+            http_client=httpx.Client(transport=ConnFailTransport()),
+        )
+        with pytest.raises(DiditConnectionError) as conn_exc_sens:
+            client_cause_sens.sessions.get("s_cause")
+        assert isinstance(conn_exc_sens.value.__cause__, httpx.ConnectError)
+        client_cause_sens.close()
+
+    @pytest.mark.parametrize(
+        ("kwargs",),
+        [
+            ({"api_key": "k"},),
+            ({"base_url": "https://api.example.com"},),
+            ({"timeout": 10.0},),
+            ({"max_retries": 1},),
+            ({"webhook_secret": "whsec"},),
+            ({"capture_sensitive_response": False},),
+        ],
+    )
+    def test_client_config_mutual_exclusivity(self, kwargs: dict[str, object]) -> None:
+        cfg = DiditConfig(api_key="cfg_key")
+        with pytest.raises(DiditConfigurationError, match="Cannot combine `config`"):
+            Didit(config=cfg, **kwargs)
 
     @respx.mock
     def test_rate_limit_error_retry_after(self, client: Didit, base_url: str) -> None:

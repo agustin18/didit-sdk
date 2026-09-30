@@ -38,6 +38,19 @@ class Didit:
         default_options: RequestOptions | None = None,
     ) -> None:
         if config is not None:
+            if (
+                api_key is not None
+                or base_url is not None
+                or timeout is not None
+                or max_retries is not None
+                or webhook_secret is not None
+                or capture_sensitive_response is not None
+            ):
+                raise DiditConfigurationError(
+                    "Cannot combine `config` with explicit configuration arguments "
+                    "(api_key, base_url, timeout, max_retries, webhook_secret, "
+                    "capture_sensitive_response). Pass either `config` or explicit arguments."
+                )
             self._config = config
         else:
             self._config = DiditConfig.from_env(
@@ -169,6 +182,19 @@ class AsyncDidit:
         default_options: RequestOptions | None = None,
     ) -> None:
         if config is not None:
+            if (
+                api_key is not None
+                or base_url is not None
+                or timeout is not None
+                or max_retries is not None
+                or webhook_secret is not None
+                or capture_sensitive_response is not None
+            ):
+                raise DiditConfigurationError(
+                    "Cannot combine `config` with explicit configuration arguments "
+                    "(api_key, base_url, timeout, max_retries, webhook_secret, "
+                    "capture_sensitive_response). Pass either `config` or explicit arguments."
+                )
             self._config = config
         else:
             self._config = DiditConfig.from_env(
