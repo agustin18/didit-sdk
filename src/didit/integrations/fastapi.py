@@ -29,6 +29,10 @@ from didit.errors import (
     DiditDuplicateWebhookError,
     DiditSignatureError,
 )
+from didit.events import (
+    WebhookLeaseLost,
+    safe_emit,
+)
 from didit.models.webhook import WebhookPayload
 from didit.webhooks import parse_webhook_payload
 
@@ -327,6 +331,12 @@ class DiditWebhookRoute(APIRoute):
       automatically completes the active reservation.
     - If the final response status is non-2xx (e.g. 404, 500):
       automatically releases the active reservation so retries succeed.
+
+    Note:
+        DiditWebhookRoute is intended for short, non-streaming webhook responses. Streaming
+        responses on claimed webhooks are buffered until completion before acknowledgment.
+        Any FastAPI BackgroundTasks execute prior to final ASGI response flush; keep background
+        tasks light or enqueue to a durable background worker/broker.
     """
 
     async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -339,7 +349,16 @@ class DiditWebhookRoute(APIRoute):
         try:
             await super().handle(scope, receive, capture.capture_send)
         except Exception:
-            await release_didit_claim(request)
+            try:
+                await release_didit_claim(request)
+            except Exception as release_exc:
+                safe_emit(
+                    getattr(getattr(request, "state", None), "didit_event_sink", None),
+                    WebhookLeaseLost(
+                        event_id=getattr(request.state, "didit_event_id", ""),
+                        reason=f"Release failed during exception unwind: {release_exc}",
+                    ),
+                )
             raise
 
         if 200 <= capture.status_code < 300:
@@ -575,6 +594,10 @@ def didit_webhook(
                         call_kwargs[p_name] = payload
                         break
 
+            route = (
+                request.scope.get("route") if hasattr(request, "scope") and request.scope else None
+            )
+
             try:
                 if is_async:
                     result = await view_func(*args, **call_kwargs)
@@ -583,15 +606,21 @@ def didit_webhook(
 
                     result = await run_in_threadpool(view_func, *args, **call_kwargs)
             except Exception:
-                if dedup_store is not None and is_new:
-                    await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
-                    request.state.didit_claimed = False
-                    request.state.didit_reservation = None
+                if dedup_store is not None and is_new and not isinstance(route, DiditWebhookRoute):
+                    try:
+                        await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                        request.state.didit_claimed = False
+                        request.state.didit_reservation = None
+                    except Exception as release_exc:
+                        req_state = getattr(request, "state", None)
+                        safe_emit(
+                            getattr(req_state, "didit_event_sink", None),
+                            WebhookLeaseLost(
+                                event_id=getattr(req_state, "didit_event_id", ""),
+                                reason=f"Release failed during exception unwind: {release_exc}",
+                            ),
+                        )
                 raise
-
-            route = (
-                request.scope.get("route") if hasattr(request, "scope") and request.scope else None
-            )
 
             if isinstance(result, StarletteResponse):
                 final_response = result

@@ -649,3 +649,117 @@ class TestWebhookPayload:
             sandbox_scenario="decline_document_expired",
         )
         assert req.sandbox_scenario == "decline_document_expired"
+
+
+class TestSessionListAndReconciliationModels:
+    def test_session_list_item_and_page_validation(self) -> None:
+        from didit.models.session import SessionListItem, SessionListPage
+
+        item = SessionListItem.model_validate(
+            {
+                "session_id": "sess_list_1",
+                "status": "Approved",
+                "workflow_id": "wf_1",
+                "vendor_data": "user_100",
+                "country": "ES",
+                "session_kind": "user",
+                "created_at": 1710000000,
+            }
+        )
+        assert item.session_id == "sess_list_1"
+        assert item.status == SessionStatus.APPROVED
+        assert item.country == "ES"
+        assert item.session_kind == "user"
+
+        page = SessionListPage.model_validate(
+            {
+                "count": 1,
+                "next": "https://verification.didit.me/v3/sessions/?offset=50&limit=50",
+                "previous": None,
+                "results": [item.model_dump()],
+            }
+        )
+        assert page.count == 1
+        assert page.next is not None
+        assert page.previous is None
+        assert len(page.results) == 1
+        assert page.results[0].session_id == "sess_list_1"
+
+    def test_observed_session_state_and_reconciliation_report(self) -> None:
+        from didit.models.session import (
+            BatchReconciliationReport,
+            ObservedSessionState,
+            SessionReconciliationReport,
+        )
+
+        observed = ObservedSessionState(
+            session_id="sess_rec_1",
+            status=SessionStatus.IN_REVIEW,
+            warning_codes=["LOW_LIVENESS"],
+        )
+        assert observed.session_id == "sess_rec_1"
+        assert observed.status == SessionStatus.IN_REVIEW
+        assert observed.warning_codes == ["LOW_LIVENESS"]
+
+        # In sync report
+        report_ok = SessionReconciliationReport(
+            session_id="sess_rec_1",
+            local_status=SessionStatus.IN_REVIEW,
+            remote_status=SessionStatus.IN_REVIEW,
+            status_drift=False,
+            warning_codes_added=[],
+            warning_codes_removed=[],
+        )
+        assert report_ok.is_in_sync is True
+        assert report_ok.warning_drift is False
+
+        # Status drift
+        report_drift = SessionReconciliationReport(
+            session_id="sess_rec_1",
+            local_status=SessionStatus.IN_REVIEW,
+            remote_status=SessionStatus.APPROVED,
+            status_drift=True,
+            warning_codes_added=["DOC_EXPIRING_SOON"],
+            warning_codes_removed=["LOW_LIVENESS"],
+        )
+        assert report_drift.is_in_sync is False
+        assert report_drift.status_drift is True
+        assert report_drift.warning_drift is True
+        assert report_drift.warning_codes_added == ["DOC_EXPIRING_SOON"]
+        assert report_drift.warning_codes_removed == ["LOW_LIVENESS"]
+
+        # Missing local / remote
+        report_missing = SessionReconciliationReport(
+            session_id="sess_missing",
+            local_missing=True,
+        )
+        assert report_missing.is_in_sync is False
+        assert report_missing.local_missing is True
+
+        batch = BatchReconciliationReport(
+            total_evaluated=2,
+            drift_count=1,
+            missing_local_count=1,
+            reports=[report_drift, report_missing],
+        )
+        assert batch.total_evaluated == 2
+        assert batch.drift_count == 1
+        assert len(batch.reports) == 2
+
+    def test_session_state_source_protocol_conformance(self) -> None:
+        from didit.models.session import (
+            AsyncSessionStateSource,
+            ObservedSessionState,
+            SessionStateSource,
+        )
+
+        class CustomSyncSource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        class CustomAsyncSource:
+            async def aget(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        assert isinstance(CustomSyncSource(), SessionStateSource)
+        assert isinstance(CustomAsyncSource(), AsyncSessionStateSource)

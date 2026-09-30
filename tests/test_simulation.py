@@ -285,3 +285,131 @@ class TestSimulatedAsyncDidit:
         decision = await client.sessions.get_decision(session.session_id)
         assert decision.status == SessionStatus.IN_REVIEW
         assert decision.has_warning("POSSIBLE_MATCH_FOUND") is True
+
+    def test_simulation_list_and_reconcile(self) -> None:
+        from didit.models.session import ObservedSessionState
+
+        client = SimulatedDidit()
+        s1 = client.sessions.create(vendor_data="u1", workflow_id="wf", sandbox_scenario="approve")
+        s2 = client.sessions.create(
+            vendor_data="u2", workflow_id="wf", sandbox_scenario="decline_document_expired"
+        )
+
+        page = client.sessions.list(workflow_id="wf", limit=10)
+        assert page.count == 2
+        assert len(page.results) == 2
+
+        # Test filters with no matches
+        assert client.sessions.list(status=SessionStatus.EXPIRED).count == 0
+        assert client.sessions.list(vendor_data="non_existent").count == 0
+        assert client.sessions.list(workflow_id="other_wf").count == 0
+
+        # Reconcile single in sync
+        rep1 = client.sessions.reconcile(
+            s1.session_id,
+            observed=ObservedSessionState(session_id=s1.session_id, status=SessionStatus.APPROVED),
+        )
+        assert rep1.is_in_sync is True
+
+        # Reconcile single drift
+        rep2 = client.sessions.reconcile(
+            s2.session_id,
+            observed=ObservedSessionState(session_id=s2.session_id, status=SessionStatus.IN_REVIEW),
+        )
+        assert rep2.status_drift is True
+        assert rep2.warning_codes_added == ["DOCUMENT_EXPIRED"]
+
+        # Reconcile 404 (non-existent session)
+        rep_404 = client.sessions.reconcile(
+            "sess_non_existent",
+            observed=ObservedSessionState(
+                session_id="sess_non_existent", status=SessionStatus.APPROVED
+            ),
+        )
+        assert rep_404.remote_missing is True
+
+        # Reconcile observed is None
+        rep_no_local = client.sessions.reconcile(s1.session_id, observed=None)
+        assert rep_no_local.local_missing is True
+
+        # Reconcile range batch
+        s3 = client.sessions.create(vendor_data="u3", workflow_id="wf", sandbox_scenario="approve")
+        del client._storage.decisions[s3.session_id]
+
+        class SimSource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                if session_id == s1.session_id:
+                    return ObservedSessionState(
+                        session_id=s1.session_id, status=SessionStatus.APPROVED
+                    )
+                if session_id == s2.session_id:
+                    return None
+                return ObservedSessionState(session_id=s3.session_id, status=SessionStatus.APPROVED)
+
+        batch = client.sessions.reconcile_range(source=SimSource())
+        assert batch.total_evaluated == 3
+        assert batch.missing_local_count == 1
+        assert batch.missing_remote_count == 1
+
+    @pytest.mark.asyncio
+    async def test_async_simulation_list_and_reconcile(self) -> None:
+        from didit.models.session import ObservedSessionState
+
+        client = SimulatedAsyncDidit()
+        s1 = await client.sessions.create(
+            vendor_data="u_async_1", workflow_id="wf", sandbox_scenario="approve"
+        )
+        s2 = await client.sessions.create(
+            vendor_data="u_async_2", workflow_id="wf", sandbox_scenario="decline_document_expired"
+        )
+        s3 = await client.sessions.create(
+            vendor_data="u_async_3", workflow_id="wf", sandbox_scenario="approve"
+        )
+        del client._storage.decisions[s3.session_id]
+
+        page = await client.sessions.list(vendor_data="u_async_1")
+        assert page.count == 1
+        assert page.results[0].session_id == s1.session_id
+
+        rep = await client.sessions.reconcile(
+            s1.session_id,
+            observed=ObservedSessionState(session_id=s1.session_id, status=SessionStatus.APPROVED),
+        )
+        assert rep.is_in_sync is True
+
+        # Reconcile 404 and observed=None in async
+        rep_async_404 = await client.sessions.reconcile(
+            "sess_non_existent",
+            observed=ObservedSessionState(
+                session_id="sess_non_existent", status=SessionStatus.APPROVED
+            ),
+        )
+        assert rep_async_404.remote_missing is True
+
+        rep_async_no_local = await client.sessions.reconcile(s1.session_id, observed=None)
+        assert rep_async_no_local.local_missing is True
+
+        class AsyncSource:
+            async def aget(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=s1.session_id, status=SessionStatus.APPROVED)
+
+        batch = await client.sessions.reconcile_range(source=AsyncSource())
+        assert batch.total_evaluated == 3
+
+        # Test sync source with .get() in async reconcile_range
+        class AsyncSimSyncSource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                if session_id == s1.session_id:
+                    return ObservedSessionState(
+                        session_id=s1.session_id, status=SessionStatus.APPROVED
+                    )
+                if session_id == s2.session_id:
+                    return ObservedSessionState(
+                        session_id=s2.session_id, status=SessionStatus.IN_REVIEW
+                    )
+                return None
+
+        batch_sync = await client.sessions.reconcile_range(source=AsyncSimSyncSource())
+        assert batch_sync.drift_count >= 1
+        assert batch_sync.missing_local_count >= 1
+        assert batch_sync.missing_remote_count >= 1

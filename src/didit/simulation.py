@@ -25,7 +25,16 @@ from didit.models.decision import (
     VerificationWarning,
 )
 from didit.models.enums import Language, SessionStatus
-from didit.models.session import SessionResponse
+from didit.models.session import (
+    AsyncSessionStateSource,
+    BatchReconciliationReport,
+    ObservedSessionState,
+    SessionListItem,
+    SessionListPage,
+    SessionReconciliationReport,
+    SessionResponse,
+    SessionStateSource,
+)
 from didit.webhooks import compute_signature
 
 SUPPORTED_SANDBOX_SCENARIOS: set[str] = {
@@ -379,6 +388,50 @@ class _SimulatedStorage:
         decision.reviews = [ReviewData(reviewed_by="simulator", decision_reason=reason)]
         return decision.model_copy(deep=True)
 
+    def list(
+        self,
+        *,
+        status: SessionStatus | str | None = None,
+        session_kind: str | None = "user",
+        vendor_data: str | None = None,
+        country: str | None = None,
+        workflow_id: str | None = None,
+        search: str | None = None,
+        date_from: Any = None,
+        date_to: Any = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> SessionListPage:
+        status_filter = status.value if isinstance(status, SessionStatus) else status
+        items: list[SessionListItem] = []
+        for s in self.sessions.values():
+            if status_filter is not None and s.status.value != status_filter:
+                continue
+            if vendor_data is not None and s.vendor_data != vendor_data:
+                continue
+            if workflow_id is not None and s.workflow_id != workflow_id:
+                continue
+            item = SessionListItem(
+                session_id=s.session_id,
+                session_token=s.session_token,
+                url=s.url,
+                status=s.status,
+                workflow_id=s.workflow_id,
+                vendor_data=s.vendor_data,
+                callback=s.callback,
+                session_kind=session_kind or "user",
+            )
+            items.append(item)
+
+        total = len(items)
+        sliced = items[offset : offset + limit]
+        return SessionListPage(
+            count=total,
+            next=None,
+            previous=None,
+            results=sliced,
+        )
+
 
 class SimulatedSessionsResource:
     """Synchronous in-memory sessions resource."""
@@ -423,6 +476,132 @@ class SimulatedSessionsResource:
             )
         return decision
 
+    def list(
+        self,
+        *,
+        status: SessionStatus | str | None = None,
+        session_kind: str | None = "user",
+        vendor_data: str | None = None,
+        country: str | None = None,
+        workflow_id: str | None = None,
+        search: str | None = None,
+        date_from: Any = None,
+        date_to: Any = None,
+        limit: int = 50,
+        offset: int = 0,
+        options: Any = None,
+    ) -> SessionListPage:
+        return self._storage.list(
+            status=status,
+            session_kind=session_kind,
+            vendor_data=vendor_data,
+            country=country,
+            workflow_id=workflow_id,
+            search=search,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+            offset=offset,
+        )
+
+    def reconcile(
+        self,
+        session_id: str,
+        observed: ObservedSessionState | None = None,
+        *,
+        options: Any = None,
+    ) -> SessionReconciliationReport:
+        try:
+            decision = self.get_decision(session_id)
+            remote_status: SessionStatus | str | None = decision.status
+            remote_warnings = set(decision.warning_codes)
+            remote_missing = False
+        except DiditNotFoundError:
+            remote_status = None
+            remote_warnings = set()
+            remote_missing = True
+
+        if observed is None:
+            return SessionReconciliationReport(
+                session_id=session_id,
+                local_status=None,
+                remote_status=remote_status,
+                status_drift=False,
+                warning_codes_added=sorted(remote_warnings),
+                warning_codes_removed=[],
+                local_missing=True,
+                remote_missing=remote_missing,
+            )
+
+        local_status_val = (
+            observed.status.value if isinstance(observed.status, SessionStatus) else observed.status
+        )
+        remote_status_val = (
+            remote_status.value if isinstance(remote_status, SessionStatus) else remote_status
+        )
+        status_drift = (remote_status_val is not None) and (local_status_val != remote_status_val)
+
+        local_warnings = set(observed.warning_codes)
+        warning_added = sorted(remote_warnings - local_warnings)
+        warning_removed = sorted(local_warnings - remote_warnings)
+
+        return SessionReconciliationReport(
+            session_id=session_id,
+            local_status=observed.status,
+            remote_status=remote_status,
+            status_drift=status_drift,
+            warning_codes_added=warning_added,
+            warning_codes_removed=warning_removed,
+            local_missing=False,
+            remote_missing=remote_missing,
+        )
+
+    def reconcile_range(
+        self,
+        *,
+        source: SessionStateSource,
+        since: Any = None,
+        until: Any = None,
+        date_from: Any = None,
+        date_to: Any = None,
+        status: SessionStatus | str | None = None,
+        limit: int = 50,
+        options: Any = None,
+    ) -> BatchReconciliationReport:
+        start = since if since is not None else date_from
+        end = until if until is not None else date_to
+
+        page = self.list(
+            date_from=start,
+            date_to=end,
+            status=status,
+            limit=limit,
+        )
+
+        reports: list[SessionReconciliationReport] = []
+        drift_count = 0
+        missing_local_count = 0
+        missing_remote_count = 0
+
+        for item in page.results:
+            observed = source.get(item.session_id)
+            report = self.reconcile(item.session_id, observed=observed)
+            reports.append(report)
+            if report.status_drift or report.warning_drift:
+                drift_count += 1
+            if report.local_missing:
+                missing_local_count += 1
+            if report.remote_missing:
+                missing_remote_count += 1
+
+        return BatchReconciliationReport(
+            total_evaluated=len(reports),
+            drift_count=drift_count,
+            missing_local_count=missing_local_count,
+            missing_remote_count=missing_remote_count,
+            reports=reports,
+        )
+
 
 class SimulatedAsyncSessionsResource:
     """Asynchronous in-memory sessions resource."""
@@ -466,6 +645,136 @@ class SimulatedAsyncSessionsResource:
                 f"Polling simulated session '{session_id}' timed out without terminal outcome"
             )
         return decision
+
+    async def list(
+        self,
+        *,
+        status: SessionStatus | str | None = None,
+        session_kind: str | None = "user",
+        vendor_data: str | None = None,
+        country: str | None = None,
+        workflow_id: str | None = None,
+        search: str | None = None,
+        date_from: Any = None,
+        date_to: Any = None,
+        limit: int = 50,
+        offset: int = 0,
+        options: Any = None,
+    ) -> SessionListPage:
+        return self._storage.list(
+            status=status,
+            session_kind=session_kind,
+            vendor_data=vendor_data,
+            country=country,
+            workflow_id=workflow_id,
+            search=search,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def reconcile(
+        self,
+        session_id: str,
+        observed: ObservedSessionState | None = None,
+        *,
+        options: Any = None,
+    ) -> SessionReconciliationReport:
+        try:
+            decision = await self.get_decision(session_id)
+            remote_status: SessionStatus | str | None = decision.status
+            remote_warnings = set(decision.warning_codes)
+            remote_missing = False
+        except DiditNotFoundError:
+            remote_status = None
+            remote_warnings = set()
+            remote_missing = True
+
+        if observed is None:
+            return SessionReconciliationReport(
+                session_id=session_id,
+                local_status=None,
+                remote_status=remote_status,
+                status_drift=False,
+                warning_codes_added=sorted(remote_warnings),
+                warning_codes_removed=[],
+                local_missing=True,
+                remote_missing=remote_missing,
+            )
+
+        local_status_val = (
+            observed.status.value if isinstance(observed.status, SessionStatus) else observed.status
+        )
+        remote_status_val = (
+            remote_status.value if isinstance(remote_status, SessionStatus) else remote_status
+        )
+        status_drift = (remote_status_val is not None) and (local_status_val != remote_status_val)
+
+        local_warnings = set(observed.warning_codes)
+        warning_added = sorted(remote_warnings - local_warnings)
+        warning_removed = sorted(local_warnings - remote_warnings)
+
+        return SessionReconciliationReport(
+            session_id=session_id,
+            local_status=observed.status,
+            remote_status=remote_status,
+            status_drift=status_drift,
+            warning_codes_added=warning_added,
+            warning_codes_removed=warning_removed,
+            local_missing=False,
+            remote_missing=remote_missing,
+        )
+
+    async def reconcile_range(
+        self,
+        *,
+        source: SessionStateSource | AsyncSessionStateSource,
+        since: Any = None,
+        until: Any = None,
+        date_from: Any = None,
+        date_to: Any = None,
+        status: SessionStatus | str | None = None,
+        limit: int = 50,
+        options: Any = None,
+    ) -> BatchReconciliationReport:
+        start = since if since is not None else date_from
+        end = until if until is not None else date_to
+
+        page = await self.list(
+            date_from=start,
+            date_to=end,
+            status=status,
+            limit=limit,
+        )
+
+        reports: list[SessionReconciliationReport] = []
+        drift_count = 0
+        missing_local_count = 0
+        missing_remote_count = 0
+
+        for item in page.results:
+            if hasattr(source, "aget"):
+                observed = await source.aget(item.session_id)
+            else:
+                observed = source.get(item.session_id)
+
+            report = await self.reconcile(item.session_id, observed=observed)
+            reports.append(report)
+            if report.status_drift or report.warning_drift:
+                drift_count += 1
+            if report.local_missing:
+                missing_local_count += 1
+            if report.remote_missing:
+                missing_remote_count += 1
+
+        return BatchReconciliationReport(
+            total_evaluated=len(reports),
+            drift_count=drift_count,
+            missing_local_count=missing_local_count,
+            missing_remote_count=missing_remote_count,
+            reports=reports,
+        )
 
 
 class SimulatedDidit:

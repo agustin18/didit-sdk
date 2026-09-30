@@ -6,17 +6,29 @@ import asyncio
 import random
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
 
 from didit.errors import (
     DiditConnectionError,
+    DiditNotFoundError,
     DiditRateLimitError,
     DiditServerError,
     DiditTimeoutError,
 )
+from didit.events import DiditEventSink, ReconciliationDriftObserved, safe_emit
 from didit.models.decision import DecisionResponse
 from didit.models.enums import Language, SessionStatus
-from didit.models.session import CreateSessionRequest, SessionResponse
+from didit.models.session import (
+    AsyncSessionStateSource,
+    BatchReconciliationReport,
+    CreateSessionRequest,
+    ObservedSessionState,
+    SessionListPage,
+    SessionReconciliationReport,
+    SessionResponse,
+    SessionStateSource,
+)
 from didit.transport import RequestOptions, _AsyncRequestor, _SyncRequestor
 
 if TYPE_CHECKING:
@@ -26,7 +38,12 @@ if TYPE_CHECKING:
 class SessionsResource:
     """Synchronous resource for managing Didit verification sessions."""
 
-    def __init__(self, requester: _SyncRequestor | httpx.Client) -> None:
+    def __init__(
+        self,
+        requester: _SyncRequestor | httpx.Client,
+        *,
+        event_sink: DiditEventSink | None = None,
+    ) -> None:
         if isinstance(requester, _SyncRequestor):
             self._requestor = requester
             self._http = requester._client
@@ -37,6 +54,7 @@ class SessionsResource:
                 base_url=str(requester.base_url),
                 api_key=requester.headers.get("x-api-key", ""),
             )
+        self._event_sink = event_sink
 
     def create(
         self,
@@ -82,6 +100,183 @@ class SessionsResource:
         """Retrieve details and status for an existing verification session."""
         resp = self._requestor.request("GET", f"/session/{session_id}/", options=options)
         return SessionResponse.model_validate(resp.json())
+
+    def list(
+        self,
+        *,
+        status: SessionStatus | str | None = None,
+        session_kind: str | None = "user",
+        vendor_data: str | None = None,
+        country: str | None = None,
+        workflow_id: str | None = None,
+        search: str | None = None,
+        date_from: datetime | str | None = None,
+        date_to: datetime | str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        options: RequestOptions | None = None,
+    ) -> SessionListPage:
+        """List verification sessions with optional filtering and pagination.
+
+        Args:
+            status: Filter by SessionStatus or status string.
+            session_kind: Filter by session kind (default "user" for KYC).
+            vendor_data: Filter by internal user/vendor identifier.
+            country: Filter by ISO country code.
+            workflow_id: Filter by workflow UUID.
+            search: Search query across user attributes.
+            date_from: Start timestamp filter (ISO string or datetime).
+            date_to: End timestamp filter (ISO string or datetime).
+            limit: Maximum records to return per page (default 50).
+            offset: Number of items to skip for pagination (default 0).
+            options: Optional per-request execution options.
+
+        Returns:
+            SessionListPage containing count, next, previous, and results.
+        """
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if session_kind is not None:
+            params["session_kind"] = session_kind
+        if status is not None:
+            params["status"] = status.value if isinstance(status, SessionStatus) else str(status)
+        if vendor_data is not None:
+            params["vendor_data"] = vendor_data
+        if country is not None:
+            params["country"] = country
+        if workflow_id is not None:
+            params["workflow_id"] = workflow_id
+        if search is not None:
+            params["search"] = search
+        if date_from is not None:
+            params["date_from"] = (
+                date_from.isoformat() if isinstance(date_from, datetime) else str(date_from)
+            )
+        if date_to is not None:
+            params["date_to"] = (
+                date_to.isoformat() if isinstance(date_to, datetime) else str(date_to)
+            )
+
+        resp = self._requestor.request("GET", "/sessions/", params=params, options=options)
+        return SessionListPage.model_validate(resp.json())
+
+    def reconcile(
+        self,
+        session_id: str,
+        observed: ObservedSessionState | None = None,
+        *,
+        options: RequestOptions | None = None,
+    ) -> SessionReconciliationReport:
+        """Reconcile a local session snapshot against remote Didit state.
+
+        Compares verification status and warning codes between local consumer state
+        and remote Didit decision snapshot without exposing or storing KYC PII.
+        """
+        try:
+            decision = self.get_decision(session_id, options=options)
+            remote_status: SessionStatus | str | None = decision.status
+            remote_warnings = set(decision.warning_codes)
+            remote_missing = False
+        except DiditNotFoundError:
+            remote_status = None
+            remote_warnings = set()
+            remote_missing = True
+
+        if observed is None:
+            return SessionReconciliationReport(
+                session_id=session_id,
+                local_status=None,
+                remote_status=remote_status,
+                status_drift=False,
+                warning_codes_added=sorted(remote_warnings),
+                warning_codes_removed=[],
+                local_missing=True,
+                remote_missing=remote_missing,
+            )
+
+        local_status_val = (
+            observed.status.value if isinstance(observed.status, SessionStatus) else observed.status
+        )
+        remote_status_val = (
+            remote_status.value if isinstance(remote_status, SessionStatus) else remote_status
+        )
+        status_drift = (remote_status_val is not None) and (local_status_val != remote_status_val)
+
+        local_warnings = set(observed.warning_codes)
+        warning_added = sorted(remote_warnings - local_warnings)
+        warning_removed = sorted(local_warnings - remote_warnings)
+
+        report = SessionReconciliationReport(
+            session_id=session_id,
+            local_status=observed.status,
+            remote_status=remote_status,
+            status_drift=status_drift,
+            warning_codes_added=warning_added,
+            warning_codes_removed=warning_removed,
+            local_missing=False,
+            remote_missing=remote_missing,
+        )
+
+        if report.status_drift or report.warning_drift:
+            safe_emit(
+                self._event_sink,
+                ReconciliationDriftObserved(
+                    session_id=session_id,
+                    local_status=observed.status,
+                    remote_status=remote_status,
+                    warning_codes_added=tuple(warning_added),
+                    warning_codes_removed=tuple(warning_removed),
+                ),
+            )
+
+        return report
+
+    def reconcile_range(
+        self,
+        *,
+        source: SessionStateSource,
+        since: datetime | str | None = None,
+        until: datetime | str | None = None,
+        date_from: datetime | str | None = None,
+        date_to: datetime | str | None = None,
+        status: SessionStatus | str | None = None,
+        limit: int = 50,
+        options: RequestOptions | None = None,
+    ) -> BatchReconciliationReport:
+        """Reconcile a range of sessions fetched from Didit against a local data source."""
+        start = since if since is not None else date_from
+        end = until if until is not None else date_to
+
+        page = self.list(
+            date_from=start,
+            date_to=end,
+            status=status,
+            limit=limit,
+            options=options,
+        )
+
+        reports: list[SessionReconciliationReport] = []
+        drift_count = 0
+        missing_local_count = 0
+        missing_remote_count = 0
+
+        for item in page.results:
+            observed = source.get(item.session_id)
+            report = self.reconcile(item.session_id, observed=observed, options=options)
+            reports.append(report)
+            if report.status_drift or report.warning_drift:
+                drift_count += 1
+            if report.local_missing:
+                missing_local_count += 1
+            if report.remote_missing:
+                missing_remote_count += 1
+
+        return BatchReconciliationReport(
+            total_evaluated=len(reports),
+            drift_count=drift_count,
+            missing_local_count=missing_local_count,
+            missing_remote_count=missing_remote_count,
+            reports=reports,
+        )
 
     def get_decision(
         self,
@@ -189,7 +384,12 @@ class SessionsResource:
 class AsyncSessionsResource:
     """Asynchronous resource for managing Didit verification sessions."""
 
-    def __init__(self, requester: _AsyncRequestor | httpx.AsyncClient) -> None:
+    def __init__(
+        self,
+        requester: _AsyncRequestor | httpx.AsyncClient,
+        *,
+        event_sink: DiditEventSink | None = None,
+    ) -> None:
         if isinstance(requester, _AsyncRequestor):
             self._requestor = requester
             self._http = requester._client
@@ -200,6 +400,7 @@ class AsyncSessionsResource:
                 base_url=str(requester.base_url),
                 api_key=requester.headers.get("x-api-key", ""),
             )
+        self._event_sink = event_sink
 
     async def create(
         self,
@@ -233,6 +434,168 @@ class AsyncSessionsResource:
         """Retrieve session status asynchronously."""
         resp = await self._requestor.request("GET", f"/session/{session_id}/", options=options)
         return SessionResponse.model_validate(resp.json())
+
+    async def list(
+        self,
+        *,
+        status: SessionStatus | str | None = None,
+        session_kind: str | None = "user",
+        vendor_data: str | None = None,
+        country: str | None = None,
+        workflow_id: str | None = None,
+        search: str | None = None,
+        date_from: datetime | str | None = None,
+        date_to: datetime | str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        options: RequestOptions | None = None,
+    ) -> SessionListPage:
+        """List verification sessions asynchronously with optional filtering and pagination."""
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if session_kind is not None:
+            params["session_kind"] = session_kind
+        if status is not None:
+            params["status"] = status.value if isinstance(status, SessionStatus) else str(status)
+        if vendor_data is not None:
+            params["vendor_data"] = vendor_data
+        if country is not None:
+            params["country"] = country
+        if workflow_id is not None:
+            params["workflow_id"] = workflow_id
+        if search is not None:
+            params["search"] = search
+        if date_from is not None:
+            params["date_from"] = (
+                date_from.isoformat() if isinstance(date_from, datetime) else str(date_from)
+            )
+        if date_to is not None:
+            params["date_to"] = (
+                date_to.isoformat() if isinstance(date_to, datetime) else str(date_to)
+            )
+
+        resp = await self._requestor.request("GET", "/sessions/", params=params, options=options)
+        return SessionListPage.model_validate(resp.json())
+
+    async def reconcile(
+        self,
+        session_id: str,
+        observed: ObservedSessionState | None = None,
+        *,
+        options: RequestOptions | None = None,
+    ) -> SessionReconciliationReport:
+        """Reconcile a local session snapshot against remote Didit state asynchronously."""
+        try:
+            decision = await self.get_decision(session_id, options=options)
+            remote_status: SessionStatus | str | None = decision.status
+            remote_warnings = set(decision.warning_codes)
+            remote_missing = False
+        except DiditNotFoundError:
+            remote_status = None
+            remote_warnings = set()
+            remote_missing = True
+
+        if observed is None:
+            return SessionReconciliationReport(
+                session_id=session_id,
+                local_status=None,
+                remote_status=remote_status,
+                status_drift=False,
+                warning_codes_added=sorted(remote_warnings),
+                warning_codes_removed=[],
+                local_missing=True,
+                remote_missing=remote_missing,
+            )
+
+        local_status_val = (
+            observed.status.value if isinstance(observed.status, SessionStatus) else observed.status
+        )
+        remote_status_val = (
+            remote_status.value if isinstance(remote_status, SessionStatus) else remote_status
+        )
+        status_drift = (remote_status_val is not None) and (local_status_val != remote_status_val)
+
+        local_warnings = set(observed.warning_codes)
+        warning_added = sorted(remote_warnings - local_warnings)
+        warning_removed = sorted(local_warnings - remote_warnings)
+
+        report = SessionReconciliationReport(
+            session_id=session_id,
+            local_status=observed.status,
+            remote_status=remote_status,
+            status_drift=status_drift,
+            warning_codes_added=warning_added,
+            warning_codes_removed=warning_removed,
+            local_missing=False,
+            remote_missing=remote_missing,
+        )
+
+        if report.status_drift or report.warning_drift:
+            safe_emit(
+                self._event_sink,
+                ReconciliationDriftObserved(
+                    session_id=session_id,
+                    local_status=observed.status,
+                    remote_status=remote_status,
+                    warning_codes_added=tuple(warning_added),
+                    warning_codes_removed=tuple(warning_removed),
+                ),
+            )
+
+        return report
+
+    async def reconcile_range(
+        self,
+        *,
+        source: SessionStateSource | AsyncSessionStateSource,
+        since: datetime | str | None = None,
+        until: datetime | str | None = None,
+        date_from: datetime | str | None = None,
+        date_to: datetime | str | None = None,
+        status: SessionStatus | str | None = None,
+        limit: int = 50,
+        options: RequestOptions | None = None,
+    ) -> BatchReconciliationReport:
+        """Reconcile a range of sessions fetched from Didit against a local data source
+        asynchronously.
+        """
+        start = since if since is not None else date_from
+        end = until if until is not None else date_to
+
+        page = await self.list(
+            date_from=start,
+            date_to=end,
+            status=status,
+            limit=limit,
+            options=options,
+        )
+
+        reports: list[SessionReconciliationReport] = []
+        drift_count = 0
+        missing_local_count = 0
+        missing_remote_count = 0
+
+        for item in page.results:
+            if hasattr(source, "aget"):
+                observed = await source.aget(item.session_id)
+            else:
+                observed = source.get(item.session_id)
+
+            report = await self.reconcile(item.session_id, observed=observed, options=options)
+            reports.append(report)
+            if report.status_drift or report.warning_drift:
+                drift_count += 1
+            if report.local_missing:
+                missing_local_count += 1
+            if report.remote_missing:
+                missing_remote_count += 1
+
+        return BatchReconciliationReport(
+            total_evaluated=len(reports),
+            drift_count=drift_count,
+            missing_local_count=missing_local_count,
+            missing_remote_count=missing_remote_count,
+            reports=reports,
+        )
 
     async def get_decision(
         self,

@@ -1450,6 +1450,55 @@ class TestDiditWebhookRoute:
         assert resp.status_code == 200
         assert resp.text == "stream_part1_part2"
 
+    def test_handler_error_not_shadowed_by_release_error(self) -> None:
+        from didit.dedup import InMemoryWebhookReservationStore
+        from didit.events import DiditSDKEvent, WebhookLeaseLost
+
+        class FaultyStore(InMemoryWebhookReservationStore):
+            async def arelease(self, event_id: str, token: str | None = None) -> bool:
+                raise RuntimeError("Redis connection broken during release")
+
+        class RecordingSink:
+            def __init__(self) -> None:
+                self.events: list[DiditSDKEvent] = []
+
+            def emit(self, event: DiditSDKEvent) -> None:
+                self.events.append(event)
+
+        sink = RecordingSink()
+        store = FaultyStore()
+        router = APIRouter(route_class=DiditWebhookRoute)
+
+        @router.post("/failing-route")
+        @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
+        async def failing_endpoint(payload: WebhookPayload, request: Request) -> dict[str, str]:
+            request.state.didit_event_sink = sink
+            request.state.didit_event_id = payload.event_id
+            raise ValueError("Original business logic exception")
+
+        app_fail = FastAPI()
+        app_fail.include_router(router)
+        client = TestClient(app_fail, raise_server_exceptions=True)
+
+        data = {
+            "event_id": "evt_lease_lost_test",
+            "session_id": "sess_lease_lost",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        with pytest.raises(ValueError, match="Original business logic exception"):
+            client.post("/failing-route", content=raw_body, headers=headers)
+
+        assert len(sink.events) == 1
+        event = sink.events[0]
+        assert isinstance(event, WebhookLeaseLost)
+        assert event.event_id == "evt_lease_lost_test"
+        assert "Redis connection broken during release" in event.reason
+
 
 class TestIntegrationsLazyLoading:
     def test_lazy_attribute_access_success(self) -> None:

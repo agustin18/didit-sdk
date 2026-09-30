@@ -19,6 +19,12 @@ from didit.errors import (
     DiditPoolTimeoutError,
     DiditTimeoutError,
 )
+from didit.events import (
+    DiditEventSink,
+    RateLimitObserved,
+    RequestRetryScheduled,
+    safe_emit,
+)
 from didit.resources.base import handle_http_error, parse_retry_after
 
 SDK_USER_AGENT = f"didit-sdk-python/{__version__}"
@@ -183,6 +189,7 @@ class _SyncRequestor:
         default_timeout: float | None = None,
         default_options: RequestOptions | None = None,
         capture_sensitive_response: bool = False,
+        event_sink: DiditEventSink | None = None,
     ) -> None:
         self._client = client
         self._base_url = base_url
@@ -191,6 +198,7 @@ class _SyncRequestor:
         self._default_timeout = default_timeout
         self._default_options = default_options
         self._capture_sensitive_response = capture_sensitive_response
+        self._event_sink = event_sink
 
     def request(
         self,
@@ -245,6 +253,17 @@ class _SyncRequestor:
                 if response.is_success:
                     return response
 
+                if response.status_code == 429:
+                    safe_emit(
+                        self._event_sink,
+                        RateLimitObserved(
+                            path=path,
+                            retry_after=self._retry_policy.parse_retry_after(
+                                response.headers.get("retry-after")
+                            ),
+                        ),
+                    )
+
                 if should_retry(
                     method=method,
                     status_code=response.status_code,
@@ -267,6 +286,16 @@ class _SyncRequestor:
                         retry_after
                         if retry_after is not None
                         else self._retry_policy.calculate_delay(attempt)
+                    )
+                    safe_emit(
+                        self._event_sink,
+                        RequestRetryScheduled(
+                            method=method,
+                            url=url,
+                            attempt=attempt + 1,
+                            delay=delay,
+                            reason=f"Status {response.status_code}",
+                        ),
                     )
                     if effective_opts and effective_opts.deadline is not None:
                         remaining = effective_opts.deadline - time.monotonic()
@@ -299,6 +328,16 @@ class _SyncRequestor:
                     idempotency_key=headers.get("Idempotency-Key"),
                 ):
                     delay = self._retry_policy.calculate_delay(attempt)
+                    safe_emit(
+                        self._event_sink,
+                        RequestRetryScheduled(
+                            method=method,
+                            url=url,
+                            attempt=attempt + 1,
+                            delay=delay,
+                            reason=str(exc),
+                        ),
+                    )
                     if effective_opts and effective_opts.deadline is not None:
                         remaining = effective_opts.deadline - time.monotonic()
                         if delay >= remaining or remaining <= 0:
@@ -322,6 +361,16 @@ class _SyncRequestor:
                     idempotency_key=headers.get("Idempotency-Key"),
                 ):
                     delay = self._retry_policy.calculate_delay(attempt)
+                    safe_emit(
+                        self._event_sink,
+                        RequestRetryScheduled(
+                            method=method,
+                            url=url,
+                            attempt=attempt + 1,
+                            delay=delay,
+                            reason=str(exc),
+                        ),
+                    )
                     if effective_opts and effective_opts.deadline is not None:
                         remaining = effective_opts.deadline - time.monotonic()
                         if delay >= remaining or remaining <= 0:
@@ -377,6 +426,7 @@ class _AsyncRequestor:
         default_timeout: float | None = None,
         default_options: RequestOptions | None = None,
         capture_sensitive_response: bool = False,
+        event_sink: DiditEventSink | None = None,
     ) -> None:
         self._client = client
         self._base_url = base_url
@@ -385,6 +435,7 @@ class _AsyncRequestor:
         self._default_timeout = default_timeout
         self._default_options = default_options
         self._capture_sensitive_response = capture_sensitive_response
+        self._event_sink = event_sink
 
     async def request(
         self,
@@ -452,6 +503,17 @@ class _AsyncRequestor:
                 if response.is_success:
                     return response
 
+                if response.status_code == 429:
+                    safe_emit(
+                        self._event_sink,
+                        RateLimitObserved(
+                            path=path,
+                            retry_after=self._retry_policy.parse_retry_after(
+                                response.headers.get("retry-after")
+                            ),
+                        ),
+                    )
+
                 if should_retry(
                     method=method,
                     status_code=response.status_code,
@@ -473,6 +535,16 @@ class _AsyncRequestor:
                         retry_after
                         if retry_after is not None
                         else self._retry_policy.calculate_delay(attempt)
+                    )
+                    safe_emit(
+                        self._event_sink,
+                        RequestRetryScheduled(
+                            method=method,
+                            url=url,
+                            attempt=attempt + 1,
+                            delay=delay,
+                            reason=f"Status {response.status_code}",
+                        ),
                     )
                     if effective_opts and effective_opts.deadline is not None:
                         remaining = effective_opts.deadline - time.monotonic()
@@ -505,6 +577,16 @@ class _AsyncRequestor:
                     idempotency_key=headers.get("Idempotency-Key"),
                 ):
                     delay = self._retry_policy.calculate_delay(attempt)
+                    safe_emit(
+                        self._event_sink,
+                        RequestRetryScheduled(
+                            method=method,
+                            url=url,
+                            attempt=attempt + 1,
+                            delay=delay,
+                            reason=str(exc),
+                        ),
+                    )
                     if effective_opts and effective_opts.deadline is not None:
                         remaining = effective_opts.deadline - time.monotonic()
                         if delay >= remaining or remaining <= 0:
@@ -533,6 +615,16 @@ class _AsyncRequestor:
                     idempotency_key=headers.get("Idempotency-Key"),
                 ):
                     delay = self._retry_policy.calculate_delay(attempt)
+                    safe_emit(
+                        self._event_sink,
+                        RequestRetryScheduled(
+                            method=method,
+                            url=url,
+                            attempt=attempt + 1,
+                            delay=delay,
+                            reason=str(exc),
+                        ),
+                    )
                     if effective_opts and effective_opts.deadline is not None:
                         remaining = effective_opts.deadline - time.monotonic()
                         if delay >= remaining or remaining <= 0:

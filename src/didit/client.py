@@ -9,6 +9,7 @@ import httpx
 
 from didit.config import DiditConfig
 from didit.errors import DiditConfigurationError
+from didit.events import DiditEventSink
 from didit.models.webhook import WebhookPayload
 from didit.resources.sessions import AsyncSessionsResource, SessionsResource
 from didit.transport import (
@@ -36,6 +37,7 @@ class Didit:
         http_client: httpx.Client | None = None,
         retry_policy: RetryPolicy | None = None,
         default_options: RequestOptions | None = None,
+        event_sink: DiditEventSink | None = None,
     ) -> None:
         if config is not None:
             if (
@@ -83,14 +85,20 @@ class Didit:
             default_timeout=self._config.timeout,
             default_options=self._default_options,
             capture_sensitive_response=self._config.capture_sensitive_response,
+            event_sink=event_sink,
         )
-
-        self.sessions = SessionsResource(self._requestor)
+        self._event_sink = event_sink
+        self.sessions = SessionsResource(self._requestor, event_sink=self._event_sink)
 
     @property
     def config(self) -> DiditConfig:
         """Client configuration instance."""
         return self._config
+
+    @property
+    def event_sink(self) -> DiditEventSink | None:
+        """Configured telemetry event sink."""
+        return self._event_sink
 
     @property
     def http_client(self) -> httpx.Client:
@@ -114,6 +122,7 @@ class Didit:
             http_client=self._http,
             retry_policy=self._retry_policy,
             default_options=options,
+            event_sink=self._event_sink,
         )
 
     def verify_webhook(
@@ -180,6 +189,7 @@ class AsyncDidit:
         http_client: httpx.AsyncClient | None = None,
         retry_policy: RetryPolicy | None = None,
         default_options: RequestOptions | None = None,
+        event_sink: DiditEventSink | None = None,
     ) -> None:
         if config is not None:
             if (
@@ -219,6 +229,7 @@ class AsyncDidit:
         self._retry_policy = retry_policy or RetryPolicy(
             max_retries=self._config.max_retries,
         )
+        self._event_sink = event_sink
         self._requestor = _AsyncRequestor(
             self._http,
             base_url=self._config.base_url,
@@ -227,14 +238,20 @@ class AsyncDidit:
             default_timeout=self._config.timeout,
             default_options=self._default_options,
             capture_sensitive_response=self._config.capture_sensitive_response,
+            event_sink=event_sink,
         )
 
-        self.sessions = AsyncSessionsResource(self._requestor)
+        self.sessions = AsyncSessionsResource(self._requestor, event_sink=self._event_sink)
 
     @property
     def config(self) -> DiditConfig:
         """Client configuration instance."""
         return self._config
+
+    @property
+    def event_sink(self) -> DiditEventSink | None:
+        """Configured telemetry event sink."""
+        return self._event_sink
 
     @property
     def http_client(self) -> httpx.AsyncClient:
@@ -258,6 +275,7 @@ class AsyncDidit:
             http_client=self._http,
             retry_policy=self._retry_policy,
             default_options=options,
+            event_sink=self._event_sink,
         )
 
     def verify_webhook(
