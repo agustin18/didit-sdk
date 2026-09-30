@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-09-30
+
+### Security & Forensic Hardening
+- **Webhook Deduplication Failure Recovery (RC2-H01):** Implemented `release()` and `arelease()` methods across `WebhookDedupStore` and `AsyncWebhookDedupStore` protocols, `InMemoryWebhookDedupStore`, `RedisWebhookDedupStore`, and `AsyncRedisWebhookDedupStore`. Automatic rollback of pre-claimed deduplication keys upon uncaught handler exceptions or HTTP 5xx responses prevents permanent suppression of genuine Didit webhook retries.
+- **Cross-Origin Credential Leak Prevention (RC2-H02):** Explicitly enforced `follow_redirects=False` on all HTTP requests executed by `_SyncRequestor` and `_AsyncRequestor`. Callers supplying external `httpx.Client(follow_redirects=True)` instances can no longer leak sensitive `x-api-key` headers to external origins via 3xx redirect responses.
+- **Async Socket Slow-Drip Wall-Clock Timeout (RC2-H03):** Wrapped async HTTP request executions in `asyncio.wait_for(..., timeout=wall_clock_timeout)`, guaranteeing strict wall-clock time bounds even against malicious servers streaming chunks below per-chunk timeout thresholds.
+- **Verification Warning Schema Parity (RC2-H04):** Reconciled `VerificationWarning.warning_code` with Didit V3 schemas to inspect `self.code or self.risk or self.short_description or getattr(self, "log_type", None)`, ensuring `decision.has_warning(...)` correctly detects warning codes provided via the upstream `risk` field.
+- **Streaming DoS Defense & Flask 3.1+ Upgrade (RC2-M01):** Bumped minimum Flask requirement to `flask>=3.1`. Enforced bounded chunked input stream inspection to reject oversized payloads with HTTP 413 even when `Content-Length` headers are absent.
+- **PII Leakage Prevention & Privacy-Safe APM:** Redacted operator/reviewer usernames (`reviewed_by`) from `DecisionResponse.redacted_dump()`. Implemented allowlist-based representations for `DecisionResponse`, `IdVerificationResult`, and `WebhookPayload` to prevent accidental PII leakage in application logs.
+- **Supply Chain Hardening:** Pinned GitHub Actions dependencies to immutable commit SHAs with version comments across all CI and release workflows.
+
+### Added
+- **Multi-Framework Webhook Adapters:**
+  - **FastAPI:** `DiditWebhookGuard` with streaming bounded body limits (HTTP 413), constant-time signature verification, single-pass JSON parsing, and integrated deduplication.
+  - **Django:** `@didit_webhook_view` decorator and `parse_django_webhook` with automatic CSRF exemption and body size capping.
+  - **Flask:** `@didit_webhook` decorator and `parse_flask_webhook` with streaming chunked body bounding.
+- **Resilient Transport & Retry Engine:** Full-jitter exponential backoff, RFC 7231 `Retry-After` header parser, transient error classification, idempotent retry policies, and per-request `RequestOptions(idempotency_key=..., timeout=..., max_retries=...)`.
+- **Advanced Decision Polling:** Monotonic clock scheduling (`time.monotonic()`), unified deadline budgets, adaptive jittered intervals, transient error absorption, and customizable stopping predicates (`stop_when`, `stop_on_review`).
+- **High-Fidelity Sandbox Parity:** Native `sandbox_scenario` configuration in session creation, support for official Didit sandbox slugs (`approve`, `decline_document_expired`, `decline_face_mismatch`, `decline_aml_hit`, `review_suspicious`, `resubmit`), and 0–100 calibrated biometric confidence scores.
+- **KYC Verification Warnings:** First-class typed `VerificationWarning` models, `decision.warnings`, and `decision.has_warning(...)` helper.
+
+### Changed
+- Decoupled client resource operations from raw `httpx.Client` instances via clean `_SyncRequestor` and `_AsyncRequestor` transport layers. External client instances passed by callers are never modified or reconfigured.
+- Refactored `DecisionResponse` singular feature properties (`.document`, `.biometrics`, `.aml`, `.review`) into read-only compatibility accessors preserving multi-node arrays.
+
 ## [0.1.2] - 2026-09-29
 
 ### Security & Contractual Fidelity Fixes
