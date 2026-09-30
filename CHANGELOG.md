@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Session Listing & Pagination (`client.sessions.list()` / `async_client.sessions.list()`):**
+  - Query upstream `GET /v3/sessions/` with comprehensive filtering (`status`, `vendor_data`, `country`, `workflow_id`, `search`, `date_from`, `date_to`) and pagination (`limit`, `offset`).
+  - Typed `SessionListPage` and `SessionListItem` models for ergonomic consumption.
+- **Snapshot Reconciliation Engine (`sessions.reconcile()` / `sessions.reconcile_range()`):**
+  - State verification against remote Didit API snapshots, detecting status drift and warning code additions/removals (`ObservedSessionState`, `SessionReconciliationReport`, `BatchReconciliationReport`).
+  - Multi-page auto-pagination across full time windows with configurable `page_size` and safety `max_sessions` caps. Added `truncated: bool` and `remote_count: int | None` to `BatchReconciliationReport` for caller visibility into batch bounds.
+  - Fail-explicit validation against upstream pagination corruption: raises `DiditAPIError(status_code=502)` if `next` page metadata exists without progress or if pagination terminates prematurely while received sessions are fewer than remote count.
+  - Pluggable state protocols (`SessionStateSource` and `AsyncSessionStateSource`) supporting synchronous and asynchronous database adapters.
+  - Strict PII-minimized design: reconciliation reports carry only identifiers, statuses, and warning codes (no discrete or speculative `missed_events`). Allowlist-based `redacted_dump()` and `__str__ = __repr__` for `SessionListItem` and `SessionListPage` redact bearer tokens and query URLs.
+- **PII-Minimized Telemetry Event Sink Protocol (`DiditEventSink`):**
+  - Protocol for passive observability without breaking SDK operations: `safe_emit()` isolates consumer exceptions synchronously.
+  - PII-minimized typed events: `RequestRetryScheduled`, `RateLimitObserved`, `WebhookDuplicateObserved`, `WebhookLeaseDegraded`, `WebhookLeaseLost` (with fixed allowlisted reason literals: `"lease_cas_failed"`, `"lease_release_failed"`, `"lease_release_cas_failed"`), and `ReconciliationDriftObserved`.
+  - Native integration with HTTP transport backoff retries, rate limits, session reconciliation drift, and webhook lease failures across FastAPI, Django, and Flask.
 - **Tokenized Webhook Reservation Protocol (Distributed Redis Lease & In-Memory Parity):**
   - Distributed tokenized reservation store with atomic Lua CAS primitives (`reserve`, `complete`, `release`, `renew`) preventing concurrent processing races and duplicate execution across distributed workers.
   - Decoupled `lease_ttl_seconds` (default: 30s) from `completed_ttl_seconds` (default: 86400s), ensuring crash recovery from OOM/SIGKILL before Didit retry delivery windows.
@@ -19,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - **Flask:** `@didit_webhook` auto-completing 2xx responses and auto-releasing non-2xx responses / exceptions.
   - Typed `DiditDuplicateWebhookError` exception subclassing `DiditDedupError` with `event_id` and `state` context.
   - Safe `FAIL_OPEN` semantics: `reserve()` returns `ReservationAttempt(state=ACQUIRED, degraded=True)` for availability; `complete()`, `release()`, and `renew()` return `False` when Redis is unreachable to prevent false confirmation of distributed mutual exclusion extensions.
+  - Exception unwinding protection: `DiditWebhookRoute` captures and emits `WebhookLeaseLost` if claim release fails during exception unwinding without shadowing the original handler exception.
 
 ## [0.2.0] - 2026-09-30
 

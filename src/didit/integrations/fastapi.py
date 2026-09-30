@@ -29,6 +29,13 @@ from didit.errors import (
     DiditDuplicateWebhookError,
     DiditSignatureError,
 )
+from didit.events import (
+    DiditEventSink,
+    WebhookDuplicateObserved,
+    WebhookLeaseDegraded,
+    WebhookLeaseLost,
+    safe_emit,
+)
 from didit.models.webhook import WebhookPayload
 from didit.webhooks import parse_webhook_payload
 
@@ -76,6 +83,7 @@ class DiditWebhookGuard:
         duplicate_action: Literal["respond_ok", "pass", "raise"] = "pass",
         processing_action: Literal["retry", "pass", "raise", "conflict"] = "retry",
         dedup_key_builder: Callable[[WebhookPayload, Request], str] | None = None,
+        event_sink: DiditEventSink | None = None,
     ) -> None:
         resolved_secret = secret or os.environ.get("DIDIT_WEBHOOK_SECRET")
         if not resolved_secret:
@@ -107,6 +115,7 @@ class DiditWebhookGuard:
         self.duplicate_action = duplicate_action
         self.processing_action = processing_action
         self.dedup_key_builder = dedup_key_builder
+        self.event_sink = event_sink
 
     async def __call__(self, request: Request) -> WebhookPayload:
         from fastapi import HTTPException
@@ -159,6 +168,17 @@ class DiditWebhookGuard:
                 detail="Invalid webhook signature or expired timestamp",
             ) from None
 
+        sink = (
+            self.event_sink
+            or getattr(getattr(request, "state", None), "didit_event_sink", None)
+            or getattr(
+                getattr(getattr(request, "app", None), "state", None), "didit_event_sink", None
+            )
+        )
+        request.state.didit_event_sink = sink
+        request.state.didit_event_id = payload.event_id
+        request.state.didit_session_id = payload.session_id
+
         if self.dedup_store is not None:
             if self.dedup_key_builder is not None:
                 dedup_key = self.dedup_key_builder(payload, request)
@@ -181,7 +201,25 @@ class DiditWebhookGuard:
             request.state.didit_claimed = attempt.state == ReservationState.ACQUIRED
             request.state.didit_completed_ttl = self.effective_completed_ttl
 
+            if attempt.degraded:
+                safe_emit(
+                    sink,
+                    WebhookLeaseDegraded(
+                        event_id=payload.event_id,
+                        session_id=payload.session_id,
+                        reason="dedup_store_fail_open",
+                    ),
+                )
+
             if attempt.state == ReservationState.COMPLETED:
+                safe_emit(
+                    sink,
+                    WebhookDuplicateObserved(
+                        event_id=payload.event_id,
+                        session_id=payload.session_id,
+                        action_taken=self.duplicate_action,
+                    ),
+                )
                 if self.duplicate_action == "respond_ok":
                     raise HTTPException(
                         status_code=200,
@@ -197,6 +235,14 @@ class DiditWebhookGuard:
                 request.state.is_duplicate = True
 
             elif attempt.state == ReservationState.PROCESSING:
+                safe_emit(
+                    sink,
+                    WebhookDuplicateObserved(
+                        event_id=payload.event_id,
+                        session_id=payload.session_id,
+                        action_taken=self.processing_action,
+                    ),
+                )
                 if self.processing_action == "retry":
                     raise HTTPException(
                         status_code=503,
@@ -224,7 +270,7 @@ class DiditWebhookGuard:
 
         return payload
 
-    async def release_claim(self, request: Request) -> None:
+    async def release_claim(self, request: Request) -> bool:
         """Release dedup claim or reservation associated with this request if processing failed."""
         if self.dedup_store is not None:
             key = getattr(request.state, "didit_dedup_key", None)
@@ -232,8 +278,30 @@ class DiditWebhookGuard:
             res = getattr(request.state, "didit_reservation", None)
             token = res.token if res else None
             if key and claimed:
-                await arelease_webhook_event(self.dedup_store, key, token=token)
+                released = await arelease_webhook_event(self.dedup_store, key, token=token)
                 request.state.didit_claimed = False
+                if not released:
+                    sink = (
+                        self.event_sink
+                        or getattr(getattr(request, "state", None), "didit_event_sink", None)
+                        or getattr(
+                            getattr(getattr(request, "app", None), "state", None),
+                            "didit_event_sink",
+                            None,
+                        )
+                    )
+                    safe_emit(
+                        sink,
+                        WebhookLeaseLost(
+                            event_id=getattr(getattr(request, "state", None), "didit_event_id", ""),
+                            session_id=getattr(
+                                getattr(request, "state", None), "didit_session_id", None
+                            ),
+                            reason="lease_release_cas_failed",
+                        ),
+                    )
+                return released
+        return True
 
     async def complete_reservation(
         self, request: Request, completed_ttl: int | None = None
@@ -252,7 +320,7 @@ class DiditWebhookGuard:
         return False
 
 
-async def release_didit_claim(request: Request) -> None:
+async def release_didit_claim(request: Request) -> bool:
     """Helper to release claim or reservation recorded on request.state if processing failed."""
     store = getattr(request.state, "didit_dedup_store", None)
     key = getattr(request.state, "didit_dedup_key", None)
@@ -260,9 +328,23 @@ async def release_didit_claim(request: Request) -> None:
     res = getattr(request.state, "didit_reservation", None)
     token = res.token if res else None
     if store and key and claimed:
-        await arelease_webhook_event(store, key, token=token)
+        released = await arelease_webhook_event(store, key, token=token)
         request.state.didit_claimed = False
         request.state.didit_reservation = None
+        if not released:
+            sink = getattr(getattr(request, "state", None), "didit_event_sink", None) or getattr(
+                getattr(getattr(request, "app", None), "state", None), "didit_event_sink", None
+            )
+            safe_emit(
+                sink,
+                WebhookLeaseLost(
+                    event_id=getattr(getattr(request, "state", None), "didit_event_id", ""),
+                    session_id=getattr(getattr(request, "state", None), "didit_session_id", None),
+                    reason="lease_release_cas_failed",
+                ),
+            )
+        return released
+    return True
 
 
 async def complete_didit_reservation(request: Request, completed_ttl: int = 86400) -> bool:
@@ -276,6 +358,18 @@ async def complete_didit_reservation(request: Request, completed_ttl: int = 8640
         success = await acomplete_webhook_event(store, key, token=res.token, completed_ttl=ttl)
         request.state.didit_claimed = False
         request.state.didit_reservation = None
+        if not success:
+            sink = getattr(getattr(request, "state", None), "didit_event_sink", None) or getattr(
+                getattr(getattr(request, "app", None), "state", None), "didit_event_sink", None
+            )
+            safe_emit(
+                sink,
+                WebhookLeaseLost(
+                    event_id=getattr(getattr(request, "state", None), "didit_event_id", ""),
+                    session_id=getattr(getattr(request, "state", None), "didit_session_id", None),
+                    reason="lease_cas_failed",
+                ),
+            )
         return success
     return False
 
@@ -327,6 +421,12 @@ class DiditWebhookRoute(APIRoute):
       automatically completes the active reservation.
     - If the final response status is non-2xx (e.g. 404, 500):
       automatically releases the active reservation so retries succeed.
+
+    Note:
+        DiditWebhookRoute is intended for short, non-streaming webhook responses. Streaming
+        responses on claimed webhooks are buffered until completion before acknowledgment.
+        Any FastAPI BackgroundTasks execute prior to final ASGI response flush; keep background
+        tasks light or enqueue to a durable background worker/broker.
     """
 
     async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -339,7 +439,22 @@ class DiditWebhookRoute(APIRoute):
         try:
             await super().handle(scope, receive, capture.capture_send)
         except Exception:
-            await release_didit_claim(request)
+            sink = getattr(getattr(request, "state", None), "didit_event_sink", None) or getattr(
+                getattr(getattr(request, "app", None), "state", None), "didit_event_sink", None
+            )
+            try:
+                await release_didit_claim(request)
+            except Exception:
+                safe_emit(
+                    sink,
+                    WebhookLeaseLost(
+                        event_id=getattr(getattr(request, "state", None), "didit_event_id", ""),
+                        session_id=getattr(
+                            getattr(request, "state", None), "didit_session_id", None
+                        ),
+                        reason="lease_release_failed",
+                    ),
+                )
             raise
 
         if 200 <= capture.status_code < 300:
@@ -368,6 +483,7 @@ def didit_webhook(
     duplicate_action: Literal["respond_ok", "pass", "raise"] = "pass",
     processing_action: Literal["retry", "pass", "raise", "conflict"] = "retry",
     dedup_key_builder: Callable[[WebhookPayload, Request], str] | None = None,
+    event_sink: DiditEventSink | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """FastAPI route decorator for verifying, parsing, and managing webhook lifecycle.
 
@@ -504,6 +620,17 @@ def didit_webhook(
                     detail="Invalid webhook signature or expired timestamp",
                 ) from None
 
+            sink = (
+                event_sink
+                or getattr(getattr(request, "state", None), "didit_event_sink", None)
+                or getattr(
+                    getattr(getattr(request, "app", None), "state", None), "didit_event_sink", None
+                )
+            )
+            request.state.didit_event_sink = sink
+            request.state.didit_event_id = payload.event_id
+            request.state.didit_session_id = payload.session_id
+
             is_new = False
             dedup_key = ""
             res_token: str | None = None
@@ -531,7 +658,25 @@ def didit_webhook(
                 if attempt.reservation is not None:
                     res_token = attempt.reservation.token
 
+                if attempt.degraded:
+                    safe_emit(
+                        sink,
+                        WebhookLeaseDegraded(
+                            event_id=payload.event_id,
+                            session_id=payload.session_id,
+                            reason="dedup_store_fail_open",
+                        ),
+                    )
+
                 if attempt.state == ReservationState.COMPLETED:
+                    safe_emit(
+                        sink,
+                        WebhookDuplicateObserved(
+                            event_id=payload.event_id,
+                            session_id=payload.session_id,
+                            action_taken=duplicate_action,
+                        ),
+                    )
                     if duplicate_action == "respond_ok":
                         return StarletteResponse(
                             content="Duplicate webhook event acknowledged",
@@ -546,6 +691,14 @@ def didit_webhook(
                     payload.is_duplicate = True
 
                 elif attempt.state == ReservationState.PROCESSING:
+                    safe_emit(
+                        sink,
+                        WebhookDuplicateObserved(
+                            event_id=payload.event_id,
+                            session_id=payload.session_id,
+                            action_taken=processing_action,
+                        ),
+                    )
                     if processing_action == "retry":
                         raise HTTPException(
                             status_code=503,
@@ -575,6 +728,10 @@ def didit_webhook(
                         call_kwargs[p_name] = payload
                         break
 
+            route = (
+                request.scope.get("route") if hasattr(request, "scope") and request.scope else None
+            )
+
             try:
                 if is_async:
                     result = await view_func(*args, **call_kwargs)
@@ -583,15 +740,36 @@ def didit_webhook(
 
                     result = await run_in_threadpool(view_func, *args, **call_kwargs)
             except Exception:
-                if dedup_store is not None and is_new:
-                    await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
-                    request.state.didit_claimed = False
-                    request.state.didit_reservation = None
+                if dedup_store is not None and is_new and not isinstance(route, DiditWebhookRoute):
+                    req_state = getattr(request, "state", None)
+                    event_sink_to_use = getattr(req_state, "didit_event_sink", None) or sink
+                    evt_id = getattr(req_state, "didit_event_id", payload.event_id)
+                    sess_id = getattr(req_state, "didit_session_id", payload.session_id)
+                    try:
+                        released = await arelease_webhook_event(
+                            dedup_store, dedup_key, token=res_token
+                        )
+                        request.state.didit_claimed = False
+                        request.state.didit_reservation = None
+                        if not released:
+                            safe_emit(
+                                event_sink_to_use,
+                                WebhookLeaseLost(
+                                    event_id=evt_id,
+                                    session_id=sess_id,
+                                    reason="lease_release_cas_failed",
+                                ),
+                            )
+                    except Exception:
+                        safe_emit(
+                            event_sink_to_use,
+                            WebhookLeaseLost(
+                                event_id=evt_id,
+                                session_id=sess_id,
+                                reason="lease_release_failed",
+                            ),
+                        )
                 raise
-
-            route = (
-                request.scope.get("route") if hasattr(request, "scope") and request.scope else None
-            )
 
             if isinstance(result, StarletteResponse):
                 final_response = result
@@ -641,9 +819,20 @@ def didit_webhook(
                         )
                     except Exception:
                         if dedup_store is not None and is_new:
-                            await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                            rel = await arelease_webhook_event(
+                                dedup_store, dedup_key, token=res_token
+                            )
                             request.state.didit_claimed = False
                             request.state.didit_reservation = None
+                            if not rel:
+                                safe_emit(
+                                    sink,
+                                    WebhookLeaseLost(
+                                        event_id=payload.event_id,
+                                        session_id=payload.session_id,
+                                        reason="lease_release_cas_failed",
+                                    ),
+                                )
                         raise
 
                 try:
@@ -656,9 +845,18 @@ def didit_webhook(
                         final_response.headers.raw.extend(response_param.headers.raw)
                 except Exception:
                     if dedup_store is not None and is_new:
-                        await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                        rel = await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
                         request.state.didit_claimed = False
                         request.state.didit_reservation = None
+                        if not rel:
+                            safe_emit(
+                                sink,
+                                WebhookLeaseLost(
+                                    event_id=payload.event_id,
+                                    session_id=payload.session_id,
+                                    reason="lease_release_cas_failed",
+                                ),
+                            )
                     raise
 
             # If the route is managed by DiditWebhookRoute, the route's ASGI wrapper
@@ -666,7 +864,7 @@ def didit_webhook(
             if dedup_store is not None and is_new and not isinstance(route, DiditWebhookRoute):
                 if 200 <= final_response.status_code < 300:
                     if res_token is not None:
-                        await acomplete_webhook_event(
+                        success = await acomplete_webhook_event(
                             dedup_store,
                             dedup_key,
                             token=res_token,
@@ -674,10 +872,28 @@ def didit_webhook(
                         )
                         request.state.didit_claimed = False
                         request.state.didit_reservation = None
+                        if not success:
+                            safe_emit(
+                                sink,
+                                WebhookLeaseLost(
+                                    event_id=payload.event_id,
+                                    session_id=payload.session_id,
+                                    reason="lease_cas_failed",
+                                ),
+                            )
                 else:
-                    await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                    rel = await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
                     request.state.didit_claimed = False
                     request.state.didit_reservation = None
+                    if not rel:
+                        safe_emit(
+                            sink,
+                            WebhookLeaseLost(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                reason="lease_release_cas_failed",
+                            ),
+                        )
 
             return final_response
 

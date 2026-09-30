@@ -41,6 +41,13 @@ from didit.errors import (
     DiditDuplicateWebhookError,
     DiditSignatureError,
 )
+from didit.events import (
+    DiditEventSink,
+    WebhookDuplicateObserved,
+    WebhookLeaseDegraded,
+    WebhookLeaseLost,
+    safe_emit,
+)
 from didit.models.webhook import WebhookPayload
 from didit.webhooks import parse_webhook_payload
 
@@ -143,6 +150,7 @@ def didit_webhook_view(
     duplicate_action: Literal["respond_ok", "pass", "raise"] = "pass",
     processing_action: Literal["retry", "pass", "raise", "conflict"] = "retry",
     dedup_key_builder: Callable[[WebhookPayload, HttpRequest], str] | None = None,
+    event_sink: DiditEventSink | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Django view decorator for verifying, parsing, and reserving Didit webhooks.
 
@@ -230,6 +238,11 @@ def didit_webhook_view(
                         content_type="text/plain",
                     )
 
+                sink = event_sink or getattr(request, "didit_event_sink", None)
+                request.didit_event_sink = sink
+                request.didit_event_id = payload.event_id
+                request.didit_session_id = payload.session_id
+
                 is_new = False
                 dedup_key = ""
                 res_token: str | None = None
@@ -253,7 +266,25 @@ def didit_webhook_view(
                         res_token = attempt.reservation.token
                         request.didit_reservation = attempt.reservation
 
+                    if attempt.degraded:
+                        safe_emit(
+                            sink,
+                            WebhookLeaseDegraded(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                reason="dedup_store_fail_open",
+                            ),
+                        )
+
                     if attempt.state == ReservationState.COMPLETED:
+                        safe_emit(
+                            sink,
+                            WebhookDuplicateObserved(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                action_taken=duplicate_action,
+                            ),
+                        )
                         if duplicate_action == "respond_ok":
                             return HttpResponse(
                                 "Duplicate webhook event acknowledged",
@@ -269,6 +300,14 @@ def didit_webhook_view(
                         payload.is_duplicate = True
 
                     elif attempt.state == ReservationState.PROCESSING:
+                        safe_emit(
+                            sink,
+                            WebhookDuplicateObserved(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                action_taken=processing_action,
+                            ),
+                        )
                         if processing_action == "retry":
                             resp = HttpResponse(
                                 "Webhook event currently being processed by another worker",
@@ -299,21 +338,62 @@ def didit_webhook_view(
                         result = await view_func(request, *args, **kwargs)
                 except Exception:
                     if dedup_store is not None and is_new:
-                        await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                        try:
+                            released = await arelease_webhook_event(
+                                dedup_store, dedup_key, token=res_token
+                            )
+                            if not released:
+                                safe_emit(
+                                    sink,
+                                    WebhookLeaseLost(
+                                        event_id=payload.event_id,
+                                        session_id=payload.session_id,
+                                        reason="lease_release_cas_failed",
+                                    ),
+                                )
+                        except Exception:
+                            safe_emit(
+                                sink,
+                                WebhookLeaseLost(
+                                    event_id=payload.event_id,
+                                    session_id=payload.session_id,
+                                    reason="lease_release_failed",
+                                ),
+                            )
                     raise
 
                 if dedup_store is not None and is_new:
                     status_code = getattr(result, "status_code", 200)
                     if isinstance(status_code, int) and 200 <= status_code < 300:
                         if res_token is not None:
-                            await acomplete_webhook_event(
+                            success = await acomplete_webhook_event(
                                 dedup_store,
                                 dedup_key,
                                 token=res_token,
                                 completed_ttl=effective_completed_ttl,
                             )
+                            if not success:
+                                safe_emit(
+                                    sink,
+                                    WebhookLeaseLost(
+                                        event_id=payload.event_id,
+                                        session_id=payload.session_id,
+                                        reason="lease_cas_failed",
+                                    ),
+                                )
                     else:
-                        await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                        released = await arelease_webhook_event(
+                            dedup_store, dedup_key, token=res_token
+                        )
+                        if not released:
+                            safe_emit(
+                                sink,
+                                WebhookLeaseLost(
+                                    event_id=payload.event_id,
+                                    session_id=payload.session_id,
+                                    reason="lease_release_cas_failed",
+                                ),
+                            )
 
                 if result is None:
                     return HttpResponse(status=200)
@@ -349,6 +429,11 @@ def didit_webhook_view(
                     status=401,
                     content_type="text/plain",
                 )
+
+            sink = event_sink or getattr(request, "didit_event_sink", None)
+            request.didit_event_sink = sink
+            request.didit_event_id = payload.event_id
+            request.didit_session_id = payload.session_id
 
             is_new = False
             dedup_key = ""
@@ -389,6 +474,14 @@ def didit_webhook_view(
                         )
                     is_new = bool(claim_res)
                     if not is_new:
+                        safe_emit(
+                            sink,
+                            WebhookDuplicateObserved(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                action_taken=duplicate_action,
+                            ),
+                        )
                         if duplicate_action == "respond_ok":
                             return HttpResponse(
                                 "Duplicate webhook event acknowledged",
@@ -414,7 +507,25 @@ def didit_webhook_view(
                         res_token = attempt.reservation.token
                         request.didit_reservation = attempt.reservation
 
+                    if attempt.degraded:
+                        safe_emit(
+                            sink,
+                            WebhookLeaseDegraded(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                reason="dedup_store_fail_open",
+                            ),
+                        )
+
                     if attempt.state == ReservationState.COMPLETED:
+                        safe_emit(
+                            sink,
+                            WebhookDuplicateObserved(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                action_taken=duplicate_action,
+                            ),
+                        )
                         if duplicate_action == "respond_ok":
                             return HttpResponse(
                                 "Duplicate webhook event acknowledged",
@@ -430,6 +541,14 @@ def didit_webhook_view(
                         payload.is_duplicate = True
 
                     elif attempt.state == ReservationState.PROCESSING:
+                        safe_emit(
+                            sink,
+                            WebhookDuplicateObserved(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                action_taken=processing_action,
+                            ),
+                        )
                         if processing_action == "retry":
                             resp = HttpResponse(
                                 "Webhook event currently being processed by another worker",
@@ -460,21 +579,58 @@ def didit_webhook_view(
                     result = view_func(request, *args, **kwargs)
             except Exception:
                 if dedup_store is not None and is_new:
-                    release_webhook_event(dedup_store, dedup_key, token=res_token)
+                    try:
+                        released = release_webhook_event(dedup_store, dedup_key, token=res_token)
+                        if not released:
+                            safe_emit(
+                                sink,
+                                WebhookLeaseLost(
+                                    event_id=payload.event_id,
+                                    session_id=payload.session_id,
+                                    reason="lease_release_cas_failed",
+                                ),
+                            )
+                    except Exception:
+                        safe_emit(
+                            sink,
+                            WebhookLeaseLost(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                reason="lease_release_failed",
+                            ),
+                        )
                 raise
 
             if dedup_store is not None and is_new:
                 status_code = getattr(result, "status_code", 200)
                 if isinstance(status_code, int) and 200 <= status_code < 300:
                     if res_token is not None:
-                        complete_webhook_event(
+                        success = complete_webhook_event(
                             dedup_store,
                             dedup_key,
                             token=res_token,
                             completed_ttl=effective_completed_ttl,
                         )
+                        if not success:
+                            safe_emit(
+                                sink,
+                                WebhookLeaseLost(
+                                    event_id=payload.event_id,
+                                    session_id=payload.session_id,
+                                    reason="lease_cas_failed",
+                                ),
+                            )
                 else:
-                    release_webhook_event(dedup_store, dedup_key, token=res_token)
+                    released = release_webhook_event(dedup_store, dedup_key, token=res_token)
+                    if not released:
+                        safe_emit(
+                            sink,
+                            WebhookLeaseLost(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                reason="lease_release_cas_failed",
+                            ),
+                        )
 
             if result is None:
                 return HttpResponse(status=200)

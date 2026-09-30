@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 import json
+from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 import respx
@@ -18,6 +22,7 @@ from didit.errors import (
     DiditTimeoutError,
 )
 from didit.models.enums import SessionStatus
+from didit.transport import RequestOptions
 from didit.webhooks import compute_signature
 
 
@@ -120,6 +125,232 @@ class TestDiditSyncClient:
         assert route.called
         assert resp.session_id == "sess_456"
         assert resp.status == SessionStatus.APPROVED
+
+    @respx.mock
+    def test_list_sessions_success_and_filters(self, client: Didit, base_url: str) -> None:
+        from didit.models.session import SessionListPage
+
+        route = respx.get(f"{base_url}/sessions/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "count": 2,
+                    "next": None,
+                    "previous": None,
+                    "results": [
+                        {
+                            "session_id": "sess_1",
+                            "status": "Approved",
+                            "workflow_id": "wf_1",
+                            "vendor_data": "user_1",
+                            "country": "ES",
+                            "session_kind": "user",
+                        },
+                        {
+                            "session_id": "sess_2",
+                            "status": "Declined",
+                            "workflow_id": "wf_1",
+                            "vendor_data": "user_2",
+                            "country": "FR",
+                            "session_kind": "user",
+                        },
+                    ],
+                },
+            )
+        )
+
+        from datetime import datetime
+
+        page = client.sessions.list(
+            status=SessionStatus.APPROVED,
+            vendor_data="user_1",
+            country="ESP",
+            workflow_id="wf_1",
+            search="query",
+            date_from=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+            date_to=datetime(2026, 1, 2, 0, 0, tzinfo=timezone.utc),
+            limit=25,
+            offset=10,
+        )
+
+        assert isinstance(page, SessionListPage)
+        assert route.called
+        req = route.calls.last.request
+        assert req.url.params["status"] == "Approved"
+        assert req.url.params["session_kind"] == "user"
+        assert req.url.params["vendor_data"] == "user_1"
+        assert req.url.params["country"] == "ESP"
+        assert req.url.params["workflow_id"] == "wf_1"
+        assert req.url.params["search"] == "query"
+        assert req.url.params["date_from"] == "2026-01-01T00:00:00+00:00"
+        assert req.url.params["date_to"] == "2026-01-02T00:00:00+00:00"
+        assert req.url.params["limit"] == "25"
+        assert req.url.params["offset"] == "10"
+        assert page.count == 2
+        assert len(page.results) == 2
+        assert page.results[0].session_id == "sess_1"
+        assert page.results[0].status == SessionStatus.APPROVED
+
+        # Also test with string dates
+        client.sessions.list(
+            date_from="2026-01-01T00:00:00Z",
+            date_to="2026-01-02T00:00:00Z",
+        )
+        req2 = route.calls.last.request
+        assert req2.url.params["session_kind"] == "user"
+
+        # Test listing with pure defaults
+        page_default = client.sessions.list()
+        assert page_default.count == 2
+
+    @respx.mock
+    def test_reconcile_single_session_in_sync_and_drift(self, client: Didit, base_url: str) -> None:
+        from didit.models.session import ObservedSessionState
+
+        # 1. In sync scenario
+        respx.get(f"{base_url}/session/sess_sync/decision/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "session_id": "sess_sync",
+                    "status": "Approved",
+                    "warnings": [],
+                },
+            )
+        )
+
+        report_sync = client.sessions.reconcile(
+            "sess_sync",
+            observed=ObservedSessionState(session_id="sess_sync", status=SessionStatus.APPROVED),
+        )
+        assert report_sync.is_in_sync is True
+        assert report_sync.status_drift is False
+        assert report_sync.warning_drift is False
+
+        # 2. Status & warning drift scenario
+        respx.get(f"{base_url}/session/sess_drift/decision/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "session_id": "sess_drift",
+                    "status": "Declined",
+                    "warnings": [{"code": "SUSPECTED_FRAUD", "severity": "high"}],
+                },
+            )
+        )
+
+        report_drift = client.sessions.reconcile(
+            "sess_drift",
+            observed=ObservedSessionState(
+                session_id="sess_drift",
+                status=SessionStatus.IN_REVIEW,
+                warning_codes=["OLD_WARN"],
+            ),
+        )
+        assert report_drift.is_in_sync is False
+        assert report_drift.status_drift is True
+        assert report_drift.warning_drift is True
+        assert report_drift.warning_codes_added == ["SUSPECTED_FRAUD"]
+        assert report_drift.warning_codes_removed == ["OLD_WARN"]
+
+        # 3. Missing local scenario
+        respx.get(f"{base_url}/session/sess_no_local/decision/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "session_id": "sess_no_local",
+                    "status": "Approved",
+                },
+            )
+        )
+        report_no_local = client.sessions.reconcile("sess_no_local", observed=None)
+        assert report_no_local.local_missing is True
+        assert report_no_local.is_in_sync is False
+
+        # 4. Missing remote scenario (404)
+        respx.get(f"{base_url}/session/sess_404/decision/").mock(
+            return_value=Response(404, json={"detail": "Not found"})
+        )
+        report_404 = client.sessions.reconcile(
+            "sess_404",
+            observed=ObservedSessionState(session_id="sess_404", status=SessionStatus.APPROVED),
+        )
+        assert report_404.remote_missing is True
+        assert report_404.is_in_sync is False
+
+    @respx.mock
+    def test_reconcile_range_batch(self, client: Didit, base_url: str) -> None:
+        from didit.models.session import ObservedSessionState
+
+        # Mock list sessions
+        respx.get(f"{base_url}/sessions/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "count": 4,
+                    "next": None,
+                    "previous": None,
+                    "results": [
+                        {"session_id": "sess_b1", "status": "Approved"},
+                        {"session_id": "sess_b2", "status": "Declined"},
+                        {"session_id": "sess_b3", "status": "Approved"},
+                        {"session_id": "sess_b4", "status": "Approved"},
+                    ],
+                },
+            )
+        )
+        # Mock decision for sess_b1 (in sync)
+        respx.get(f"{base_url}/session/sess_b1/decision/").mock(
+            return_value=Response(
+                200,
+                json={"session_id": "sess_b1", "status": "Approved", "warnings": []},
+            )
+        )
+        # Mock decision for sess_b2 (drift)
+        respx.get(f"{base_url}/session/sess_b2/decision/").mock(
+            return_value=Response(
+                200,
+                json={"session_id": "sess_b2", "status": "Declined", "warnings": []},
+            )
+        )
+        # Mock decision for sess_b3 (missing locally)
+        respx.get(f"{base_url}/session/sess_b3/decision/").mock(
+            return_value=Response(
+                200,
+                json={"session_id": "sess_b3", "status": "Approved", "warnings": []},
+            )
+        )
+        # Mock decision for sess_b4 (missing remotely -> 404)
+        respx.get(f"{base_url}/session/sess_b4/decision/").mock(
+            return_value=Response(
+                404,
+                json={"detail": "Not found"},
+            )
+        )
+
+        class MockSource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                if session_id == "sess_b1":
+                    return ObservedSessionState(session_id="sess_b1", status=SessionStatus.APPROVED)
+                if session_id == "sess_b2":
+                    return ObservedSessionState(
+                        session_id="sess_b2", status=SessionStatus.IN_REVIEW
+                    )
+                if session_id == "sess_b3":
+                    return None
+                return ObservedSessionState(session_id="sess_b4", status=SessionStatus.APPROVED)
+
+        batch_report = client.sessions.reconcile_range(
+            since="2026-01-01T00:00:00Z",
+            until="2026-01-02T00:00:00Z",
+            source=MockSource(),
+        )
+
+        assert batch_report.total_evaluated == 4
+        assert batch_report.drift_count == 1
+        assert batch_report.missing_local_count == 1
+        assert batch_report.missing_remote_count == 1
+        assert len(batch_report.reports) == 4
 
     @respx.mock
     def test_get_decision_success(self, client: Didit, base_url: str) -> None:
@@ -514,3 +745,439 @@ class TestDiditSyncClient:
         session = res.get("sess_compat")
         assert session.session_id == "sess_compat"
         raw_http.close()
+
+    @respx.mock
+    def test_client_event_sink_integration(self, base_url: str) -> None:
+        from didit.events import (
+            DiditSDKEvent,
+            RateLimitObserved,
+            ReconciliationDriftObserved,
+            RequestRetryScheduled,
+        )
+        from didit.models.session import ObservedSessionState
+
+        events: list[DiditSDKEvent] = []
+
+        class TestSink:
+            def emit(self, event: DiditSDKEvent) -> None:
+                events.append(event)
+
+        sink = TestSink()
+        client = Didit(
+            api_key="key",
+            base_url=base_url,
+            event_sink=sink,
+            max_retries=1,
+        )
+        assert client.event_sink is sink
+
+        # Check with_options preserves event_sink
+        cloned = client.with_options(RequestOptions())
+        assert cloned.event_sink is sink
+
+        # 1. Reconciliation drift emission
+        respx.get(f"{base_url}/session/sess_sink_test/decision/").mock(
+            return_value=Response(
+                200,
+                json={"session_id": "sess_sink_test", "status": "Approved", "warnings": []},
+            )
+        )
+        client.sessions.reconcile(
+            "sess_sink_test",
+            observed=ObservedSessionState(
+                session_id="sess_sink_test", status=SessionStatus.DECLINED
+            ),
+        )
+        assert len(events) == 1
+        assert isinstance(events[0], ReconciliationDriftObserved)
+        assert events[0].session_id == "sess_sink_test"
+
+        # 2. Rate limit and retry emission
+        events.clear()
+        route = respx.get(f"{base_url}/session/sess_rl/").mock(
+            side_effect=[
+                Response(429, headers={"retry-after": "0.01"}),
+                Response(200, json={"session_id": "sess_rl", "status": "Approved"}),
+            ]
+        )
+        client.sessions.get("sess_rl")
+        assert route.call_count == 2
+        assert len(events) == 2
+        assert isinstance(events[0], RateLimitObserved)
+        assert isinstance(events[1], RequestRetryScheduled)
+        client.close()
+
+    @respx.mock
+    def test_reconcile_range_multi_page_pagination(self, client: Didit, base_url: str) -> None:
+        from didit.models.session import ObservedSessionState
+
+        page1_items = [{"session_id": f"sess_p1_{i}", "status": "Approved"} for i in range(50)]
+        page2_items = [{"session_id": f"sess_p2_{i}", "status": "Approved"} for i in range(2)]
+        respx.get(f"{base_url}/sessions/").mock(
+            side_effect=[
+                Response(
+                    200,
+                    json={
+                        "count": 52,
+                        "next": f"{base_url}/sessions/?offset=50&limit=50",
+                        "previous": None,
+                        "results": page1_items,
+                    },
+                ),
+                Response(
+                    200,
+                    json={
+                        "count": 52,
+                        "next": None,
+                        "previous": f"{base_url}/sessions/?offset=0&limit=50",
+                        "results": page2_items,
+                    },
+                ),
+            ]
+        )
+        for i in range(50):
+            respx.get(f"{base_url}/session/sess_p1_{i}/decision/").mock(
+                return_value=Response(
+                    200,
+                    json={"session_id": f"sess_p1_{i}", "status": "Approved", "warnings": []},
+                )
+            )
+        for i in range(2):
+            respx.get(f"{base_url}/session/sess_p2_{i}/decision/").mock(
+                return_value=Response(
+                    200,
+                    json={"session_id": f"sess_p2_{i}", "status": "Approved", "warnings": []},
+                )
+            )
+
+        class AllSyncSource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        batch_report = client.sessions.reconcile_range(
+            since="2026-01-01T00:00:00Z",
+            until="2026-01-02T00:00:00Z",
+            source=AllSyncSource(),
+        )
+        assert batch_report.total_evaluated == 52
+        assert len(batch_report.reports) == 52
+        assert batch_report.drift_count == 0
+        assert batch_report.truncated is False
+        assert batch_report.remote_count == 52
+
+    @respx.mock
+    def test_reconcile_range_max_sessions_cap(self, client: Didit, base_url: str) -> None:
+        from didit.models.session import ObservedSessionState
+
+        page1_items = [{"session_id": f"sess_cap_{i}", "status": "Approved"} for i in range(50)]
+        respx.get(f"{base_url}/sessions/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "count": 100,
+                    "next": f"{base_url}/sessions/?offset=50&limit=50",
+                    "previous": None,
+                    "results": page1_items,
+                },
+            )
+        )
+        for i in range(30):
+            respx.get(f"{base_url}/session/sess_cap_{i}/decision/").mock(
+                return_value=Response(
+                    200,
+                    json={"session_id": f"sess_cap_{i}", "status": "Approved", "warnings": []},
+                )
+            )
+
+        class AllSyncSource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        batch_report = client.sessions.reconcile_range(
+            since="2026-01-01T00:00:00Z",
+            until="2026-01-02T00:00:00Z",
+            source=AllSyncSource(),
+            max_sessions=30,
+        )
+        assert batch_report.total_evaluated == 30
+        assert len(batch_report.reports) == 30
+        assert batch_report.truncated is True
+        assert batch_report.remote_count == 100
+
+    @respx.mock
+    def test_reconcile_range_short_page_with_next_continues_pagination(
+        self, client: Didit, base_url: str
+    ) -> None:
+        from didit.models.session import ObservedSessionState
+
+        page1_items = [{"session_id": f"sess_short1_{i}", "status": "Approved"} for i in range(50)]
+        page2_items = [{"session_id": f"sess_short2_{i}", "status": "Approved"} for i in range(20)]
+        respx.get(f"{base_url}/sessions/").mock(
+            side_effect=[
+                Response(
+                    200,
+                    json={
+                        "count": 70,
+                        "next": f"{base_url}/sessions/?offset=50&limit=100",
+                        "previous": None,
+                        "results": page1_items,
+                    },
+                ),
+                Response(
+                    200,
+                    json={
+                        "count": 70,
+                        "next": None,
+                        "previous": f"{base_url}/sessions/?offset=0&limit=100",
+                        "results": page2_items,
+                    },
+                ),
+            ]
+        )
+        for i in range(50):
+            respx.get(f"{base_url}/session/sess_short1_{i}/decision/").mock(
+                return_value=Response(
+                    200,
+                    json={"session_id": f"sess_short1_{i}", "status": "Approved", "warnings": []},
+                )
+            )
+        for i in range(20):
+            respx.get(f"{base_url}/session/sess_short2_{i}/decision/").mock(
+                return_value=Response(
+                    200,
+                    json={"session_id": f"sess_short2_{i}", "status": "Approved", "warnings": []},
+                )
+            )
+
+        class AllSyncSource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        batch_report = client.sessions.reconcile_range(
+            page_size=100,
+            source=AllSyncSource(),
+        )
+        assert batch_report.total_evaluated == 70
+        assert len(batch_report.reports) == 70
+        assert batch_report.drift_count == 0
+        assert batch_report.truncated is False
+        assert batch_report.remote_count == 70
+
+    @respx.mock
+    def test_reconcile_range_empty_results_with_next_raises_api_error(
+        self, client: Didit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/sessions/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "count": 10,
+                    "next": f"{base_url}/sessions/?offset=0&limit=50",
+                    "previous": None,
+                    "results": [],
+                },
+            )
+        )
+
+        class DummySource:
+            def get(self, session_id: str) -> None:
+                return None
+
+        with pytest.raises(
+            DiditAPIError,
+            match="Didit pagination returned next page metadata without progress",
+        ) as exc_info:
+            client.sessions.reconcile_range(source=DummySource())
+        assert exc_info.value.status_code == 502
+
+    @respx.mock
+    def test_reconcile_range_inconsistent_count_without_next_raises_api_error(
+        self, client: Didit, base_url: str
+    ) -> None:
+        from didit.models.session import ObservedSessionState
+
+        page_items = [{"session_id": f"sess_incon_{i}", "status": "Approved"} for i in range(5)]
+        respx.get(f"{base_url}/sessions/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "count": 50,
+                    "next": None,
+                    "previous": None,
+                    "results": page_items,
+                },
+            )
+        )
+        for i in range(5):
+            respx.get(f"{base_url}/session/sess_incon_{i}/decision/").mock(
+                return_value=Response(
+                    200,
+                    json={"session_id": f"sess_incon_{i}", "status": "Approved", "warnings": []},
+                )
+            )
+
+        class AllSyncSource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        with pytest.raises(
+            DiditAPIError,
+            match="Inconsistent pagination metadata: received 5 of 50 sessions without next page",
+        ) as exc_info:
+            client.sessions.reconcile_range(source=AllSyncSource())
+        assert exc_info.value.status_code == 502
+
+    @respx.mock
+    def test_reconcile_range_empty_results_inconsistent_count_raises_api_error(
+        self, client: Didit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/sessions/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "count": 50,
+                    "next": None,
+                    "previous": None,
+                    "results": [],
+                },
+            )
+        )
+
+        class DummySource:
+            def get(self, session_id: str) -> None:
+                return None
+
+        with pytest.raises(
+            DiditAPIError,
+            match="Inconsistent pagination metadata: received 0 of 50 sessions without next page",
+        ) as exc_info:
+            client.sessions.reconcile_range(source=DummySource())
+        assert exc_info.value.status_code == 502
+
+    @pytest.mark.parametrize(
+        ("filter_kwargs", "err_match"),
+        [
+            ({"session_kind": "business"}, "Unsupported session_kind 'business'"),
+            ({"session_kind": None}, "Unsupported session_kind 'None'"),
+            ({"country": "ES"}, "Expected 3-letter ISO 3166-1 alpha-3 code"),
+            ({"country": "españa"}, "Expected 3-letter ISO 3166-1 alpha-3 code"),
+            ({"limit": 0}, "limit must be between 1 and 100"),
+            ({"limit": 101}, "limit must be between 1 and 100"),
+            ({"offset": -1}, "offset must be non-negative"),
+            ({"date_from": "2026-01-01T00:00:00"}, "must include timezone information"),
+            ({"date_from": datetime(2026, 1, 1)}, "must be timezone-aware"),
+            ({"date_from": 12345}, "must be a datetime or ISO-8601 string"),
+            ({"date_from": "invalid-iso-string"}, "Invalid ISO-8601 timestamp string"),
+            (
+                {"date_from": "2026-01-02T00:00:00Z", "date_to": "2026-01-01T00:00:00Z"},
+                "cannot be later than date_to",
+            ),
+        ],
+    )
+    def test_session_list_filter_validations(
+        self, client: Didit, filter_kwargs: dict[str, Any], err_match: str
+    ) -> None:
+        with pytest.raises(ValueError, match=err_match):
+            client.sessions.list(**filter_kwargs)
+
+    @pytest.mark.parametrize(
+        ("conflict_kwargs", "err_match"),
+        [
+            (
+                {"since": "2026-01-01T00:00:00Z", "date_from": "2026-01-01T00:00:00Z"},
+                "Specify either 'since' or 'date_from', not both",
+            ),
+            (
+                {"until": "2026-01-02T00:00:00Z", "date_to": "2026-01-02T00:00:00Z"},
+                "Specify either 'until' or 'date_to', not both",
+            ),
+            (
+                {"page_size": 0},
+                "page_size must be between 1 and 100",
+            ),
+            (
+                {"limit": 101},
+                "page_size must be between 1 and 100",
+            ),
+            (
+                {"max_sessions": 0},
+                "max_sessions must be greater than 0",
+            ),
+        ],
+    )
+    def test_reconcile_range_conflicting_parameters(
+        self, client: Didit, conflict_kwargs: dict[str, Any], err_match: str
+    ) -> None:
+        class DummySource:
+            def get(self, session_id: str) -> None:
+                return None
+
+        with pytest.raises(ValueError, match=err_match):
+            client.sessions.reconcile_range(source=DummySource(), **conflict_kwargs)
+
+    @respx.mock
+    def test_reconcile_range_empty_results(self, client: Didit, base_url: str) -> None:
+        respx.get(f"{base_url}/sessions/").mock(
+            return_value=Response(
+                200,
+                json={"count": 0, "next": None, "previous": None, "results": []},
+            )
+        )
+
+        class DummySource:
+            def get(self, session_id: str) -> None:
+                return None
+
+        report = client.sessions.reconcile_range(source=DummySource())
+        assert report.total_evaluated == 0
+        assert report.reports == []
+
+    def test_reconcile_session_id_mismatch(self, client: Didit) -> None:
+        from didit.models.session import ObservedSessionState
+
+        with pytest.raises(
+            ValueError,
+            match="ObservedSessionState session_id mismatch: expected 'sess_target'",
+        ):
+            client.sessions.reconcile(
+                "sess_target",
+                observed=ObservedSessionState(
+                    session_id="sess_other", status=SessionStatus.APPROVED
+                ),
+            )
+
+    @respx.mock
+    def test_reconcile_clean_missing_local_and_remote(self, client: Didit, base_url: str) -> None:
+        # 1. Local missing: observed is None
+        respx.get(f"{base_url}/session/sess_clean_local/decision/").mock(
+            return_value=Response(
+                200,
+                json={"session_id": "sess_clean_local", "status": "Approved", "warnings": ["w1"]},
+            )
+        )
+        report_local = client.sessions.reconcile("sess_clean_local", observed=None)
+        assert report_local.local_missing is True
+        assert report_local.remote_missing is False
+        assert report_local.status_drift is False
+        assert report_local.warning_codes_added == []
+        assert report_local.warning_codes_removed == []
+        assert report_local.is_in_sync is False
+
+        # 2. Remote missing: 404 from upstream
+        respx.get(f"{base_url}/session/sess_clean_remote/decision/").mock(
+            return_value=Response(404, json={"detail": "Not found"})
+        )
+        from didit.models.session import ObservedSessionState
+
+        report_remote = client.sessions.reconcile(
+            "sess_clean_remote",
+            observed=ObservedSessionState(
+                session_id="sess_clean_remote", status=SessionStatus.APPROVED, warnings=["w1"]
+            ),
+        )
+        assert report_remote.local_missing is False
+        assert report_remote.remote_missing is True
+        assert report_remote.status_drift is False
+        assert report_remote.warning_codes_added == []
+        assert report_remote.warning_codes_removed == []
+        assert report_remote.is_in_sync is False

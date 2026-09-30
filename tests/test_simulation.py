@@ -1,10 +1,11 @@
 """Tests for in-memory simulated client."""
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
-from didit.errors import DiditNotFoundError
+from didit.errors import DiditAPIError, DiditNotFoundError
 from didit.models.decision import DocumentData
 from didit.models.enums import SessionStatus
 from didit.simulation import SimulatedAsyncDidit, SimulatedDidit
@@ -285,3 +286,420 @@ class TestSimulatedAsyncDidit:
         decision = await client.sessions.get_decision(session.session_id)
         assert decision.status == SessionStatus.IN_REVIEW
         assert decision.has_warning("POSSIBLE_MATCH_FOUND") is True
+
+    def test_simulation_list_and_reconcile(self) -> None:
+        from didit.models.session import ObservedSessionState
+
+        client = SimulatedDidit()
+        s1 = client.sessions.create(vendor_data="u1", workflow_id="wf", sandbox_scenario="approve")
+        s2 = client.sessions.create(
+            vendor_data="u2", workflow_id="wf", sandbox_scenario="decline_document_expired"
+        )
+
+        page = client.sessions.list(workflow_id="wf", limit=10)
+        assert page.count == 2
+        assert len(page.results) == 2
+
+        # Test filters with no matches
+        assert client.sessions.list(status=SessionStatus.EXPIRED).count == 0
+        assert client.sessions.list(vendor_data="non_existent").count == 0
+        assert client.sessions.list(workflow_id="other_wf").count == 0
+
+        # Reconcile single in sync
+        rep1 = client.sessions.reconcile(
+            s1.session_id,
+            observed=ObservedSessionState(session_id=s1.session_id, status=SessionStatus.APPROVED),
+        )
+        assert rep1.is_in_sync is True
+
+        # Reconcile single drift
+        rep2 = client.sessions.reconcile(
+            s2.session_id,
+            observed=ObservedSessionState(session_id=s2.session_id, status=SessionStatus.IN_REVIEW),
+        )
+        assert rep2.status_drift is True
+        assert rep2.warning_codes_added == ["DOCUMENT_EXPIRED"]
+
+        # Reconcile 404 (non-existent session)
+        rep_404 = client.sessions.reconcile(
+            "sess_non_existent",
+            observed=ObservedSessionState(
+                session_id="sess_non_existent", status=SessionStatus.APPROVED
+            ),
+        )
+        assert rep_404.remote_missing is True
+
+        # Reconcile observed is None
+        rep_no_local = client.sessions.reconcile(s1.session_id, observed=None)
+        assert rep_no_local.local_missing is True
+
+        # Reconcile range batch
+        s3 = client.sessions.create(vendor_data="u3", workflow_id="wf", sandbox_scenario="approve")
+        del client._storage.decisions[s3.session_id]
+
+        class SimSource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                if session_id == s1.session_id:
+                    return ObservedSessionState(
+                        session_id=s1.session_id, status=SessionStatus.APPROVED
+                    )
+                if session_id == s2.session_id:
+                    return None
+                return ObservedSessionState(session_id=s3.session_id, status=SessionStatus.APPROVED)
+
+        batch = client.sessions.reconcile_range(source=SimSource())
+        assert batch.total_evaluated == 3
+        assert batch.missing_local_count == 1
+        assert batch.missing_remote_count == 1
+
+    @pytest.mark.asyncio
+    async def test_async_simulation_list_and_reconcile(self) -> None:
+        from didit.models.session import ObservedSessionState
+
+        client = SimulatedAsyncDidit()
+        s1 = await client.sessions.create(
+            vendor_data="u_async_1", workflow_id="wf", sandbox_scenario="approve"
+        )
+        s2 = await client.sessions.create(
+            vendor_data="u_async_2", workflow_id="wf", sandbox_scenario="decline_document_expired"
+        )
+        s3 = await client.sessions.create(
+            vendor_data="u_async_3", workflow_id="wf", sandbox_scenario="approve"
+        )
+        del client._storage.decisions[s3.session_id]
+
+        page = await client.sessions.list(vendor_data="u_async_1")
+        assert page.count == 1
+        assert page.results[0].session_id == s1.session_id
+
+        rep = await client.sessions.reconcile(
+            s1.session_id,
+            observed=ObservedSessionState(session_id=s1.session_id, status=SessionStatus.APPROVED),
+        )
+        assert rep.is_in_sync is True
+
+        # Reconcile 404 and observed=None in async
+        rep_async_404 = await client.sessions.reconcile(
+            "sess_non_existent",
+            observed=ObservedSessionState(
+                session_id="sess_non_existent", status=SessionStatus.APPROVED
+            ),
+        )
+        assert rep_async_404.remote_missing is True
+
+        rep_async_no_local = await client.sessions.reconcile(s1.session_id, observed=None)
+        assert rep_async_no_local.local_missing is True
+
+        class AsyncSource:
+            async def aget(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        batch = await client.sessions.reconcile_range(source=AsyncSource())
+        assert batch.total_evaluated == 3
+
+        # Test sync source with .get() in async reconcile_range
+        class AsyncSimSyncSource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                if session_id == s1.session_id:
+                    return ObservedSessionState(
+                        session_id=s1.session_id, status=SessionStatus.APPROVED
+                    )
+                if session_id == s2.session_id:
+                    return ObservedSessionState(
+                        session_id=s2.session_id, status=SessionStatus.IN_REVIEW
+                    )
+                return None
+
+        batch_sync = await client.sessions.reconcile_range(source=AsyncSimSyncSource())
+        assert batch_sync.drift_count >= 1
+        assert batch_sync.missing_local_count >= 1
+        assert batch_sync.missing_remote_count >= 1
+
+        # Test async source with coroutine get()
+        class AsyncSimCoroSource:
+            async def get(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        batch_coro = await client.sessions.reconcile_range(source=AsyncSimCoroSource())
+        assert batch_coro.total_evaluated == 3
+
+    def test_simulation_list_filters_and_validations(self) -> None:
+        client = SimulatedDidit()
+        # session_kind != "user" raises ValueError matching real API validation parity
+        with pytest.raises(ValueError, match="Unsupported session_kind 'business'"):
+            client.sessions.list(session_kind="business")  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="Unsupported session_kind 'None'"):
+            client.sessions.list(session_kind=None)  # type: ignore[arg-type]
+
+        # Shared validation parity checks
+        with pytest.raises(ValueError, match="limit must be between 1 and 100"):
+            client.sessions.list(limit=0)
+        with pytest.raises(ValueError, match="offset must be non-negative"):
+            client.sessions.list(offset=-1)
+        with pytest.raises(ValueError, match="Expected 3-letter ISO 3166-1 alpha-3 code"):
+            client.sessions.list(country="ES")
+        with pytest.raises(ValueError, match="must be timezone-aware"):
+            client.sessions.list(date_from=datetime(2026, 1, 1))
+
+        # Create session with decision containing country
+        s = client.sessions.create(
+            vendor_data="user_es", workflow_id="wf", sandbox_scenario="approve"
+        )
+
+        # Test datetime vs str date_from / date_to
+        now = datetime.now(timezone.utc)
+        assert client.sessions.list(date_from=now).count <= 1
+        assert client.sessions.list(date_from=now.isoformat()).count <= 1
+        assert client.sessions.list(date_to=now).count >= 0
+        assert client.sessions.list(date_to=now.isoformat()).count >= 0
+
+        # Test future date_from and past date_to
+        future_dt = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        past_dt = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        assert client.sessions.list(date_from=future_dt).count == 0
+        assert client.sessions.list(date_to=past_dt).count == 0
+
+        # Search matching vendor_data and session_id
+        assert client.sessions.list(search="user_es").count == 1
+        assert client.sessions.list(search=s.session_id[:8]).count == 1
+        assert client.sessions.list(search="nonexistent_query").count == 0
+
+        # Country filter
+        assert client.sessions.list(country="ESP").count == 1
+        assert client.sessions.list(country="FRA").count == 0
+
+    def test_simulation_reconcile_and_range_edge_cases(self) -> None:
+        from didit.models.session import ObservedSessionState
+
+        client = SimulatedDidit()
+        s = client.sessions.create(vendor_data="u1", workflow_id="wf", sandbox_scenario="approve")
+
+        # Session mismatch error
+        with pytest.raises(ValueError, match="session_id mismatch"):
+            client.sessions.reconcile(
+                s.session_id,
+                observed=ObservedSessionState(session_id="wrong_id", status=SessionStatus.APPROVED),
+            )
+
+        class DummySource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                if session_id == s.session_id:
+                    return ObservedSessionState(
+                        session_id=session_id, status=SessionStatus.DECLINED
+                    )
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        # Range conflict parameter errors
+        with pytest.raises(ValueError, match="Specify either 'since' or 'date_from'"):
+            client.sessions.reconcile_range(
+                source=DummySource(), since="2026-01-01T00:00:00Z", date_from="2026-01-01T00:00:00Z"
+            )
+        with pytest.raises(ValueError, match="Specify either 'until' or 'date_to'"):
+            client.sessions.reconcile_range(
+                source=DummySource(), until="2026-01-02T00:00:00Z", date_to="2026-01-02T00:00:00Z"
+            )
+        with pytest.raises(ValueError, match="page_size must be between 1 and 100"):
+            client.sessions.reconcile_range(source=DummySource(), page_size=0)
+        with pytest.raises(ValueError, match="max_sessions must be greater than 0"):
+            client.sessions.reconcile_range(source=DummySource(), max_sessions=0)
+
+        # Range max_sessions cap and v3 URL verification
+        for i in range(5):
+            client.sessions.create(
+                vendor_data=f"multi_{i}", workflow_id="wf", sandbox_scenario="approve"
+            )
+
+        page = client.sessions.list(limit=2)
+        assert page.count == 6
+        assert page.next == "https://verification.didit.me/v3/sessions/?offset=2&limit=2"
+        assert page.previous is None
+
+        cap_report = client.sessions.reconcile_range(source=DummySource(), max_sessions=2)
+        assert cap_report.total_evaluated == 2
+        assert cap_report.truncated is True
+        assert cap_report.remote_count == 6
+
+        full_report = client.sessions.reconcile_range(source=DummySource(), page_size=2)
+        assert full_report.total_evaluated == 6
+        assert full_report.truncated is False
+        assert full_report.remote_count == 6
+
+        # Multi-page pagination in reconcile_range (page_size=2)
+        paginated_report = client.sessions.reconcile_range(source=DummySource(), page_size=2)
+        assert paginated_report.total_evaluated == 6
+
+        # Empty client reconcile_range
+        empty_client = SimulatedDidit()
+        empty_report = empty_client.sessions.reconcile_range(source=DummySource())
+        assert empty_report.total_evaluated == 0
+
+    @pytest.mark.asyncio
+    async def test_async_simulation_reconcile_and_range_edge_cases(self) -> None:
+        from didit.models.session import ObservedSessionState
+
+        client = SimulatedAsyncDidit()
+        s = await client.sessions.create(
+            vendor_data="u_async_edges", workflow_id="wf", sandbox_scenario="approve"
+        )
+
+        # Session mismatch error
+        with pytest.raises(ValueError, match="session_id mismatch"):
+            await client.sessions.reconcile(
+                s.session_id,
+                observed=ObservedSessionState(session_id="wrong_id", status=SessionStatus.APPROVED),
+            )
+
+        class DummyAsyncSource:
+            async def aget(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        # Range conflict parameter errors
+        with pytest.raises(ValueError, match="Specify either 'since' or 'date_from'"):
+            await client.sessions.reconcile_range(
+                source=DummyAsyncSource(),
+                since="2026-01-01T00:00:00Z",
+                date_from="2026-01-01T00:00:00Z",
+            )
+        with pytest.raises(ValueError, match="Specify either 'until' or 'date_to'"):
+            await client.sessions.reconcile_range(
+                source=DummyAsyncSource(),
+                until="2026-01-02T00:00:00Z",
+                date_to="2026-01-02T00:00:00Z",
+            )
+        with pytest.raises(ValueError, match="page_size must be between 1 and 100"):
+            await client.sessions.reconcile_range(source=DummyAsyncSource(), page_size=0)
+        with pytest.raises(ValueError, match="max_sessions must be greater than 0"):
+            await client.sessions.reconcile_range(source=DummyAsyncSource(), max_sessions=0)
+
+        # Range max_sessions cap
+        for i in range(5):
+            await client.sessions.create(
+                vendor_data=f"multi_async_{i}", workflow_id="wf", sandbox_scenario="approve"
+            )
+
+        cap_report = await client.sessions.reconcile_range(
+            source=DummyAsyncSource(), max_sessions=2
+        )
+        assert cap_report.total_evaluated == 2
+
+        # Multi-page pagination in reconcile_range (page_size=2)
+        paginated_report = await client.sessions.reconcile_range(
+            source=DummyAsyncSource(), page_size=2
+        )
+        assert paginated_report.total_evaluated == 6
+
+        # Empty client reconcile_range
+        empty_client = SimulatedAsyncDidit()
+        empty_report = await empty_client.sessions.reconcile_range(source=DummyAsyncSource())
+        assert empty_report.total_evaluated == 0
+
+    def test_simulation_reconcile_range_inconsistent_pagination_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from didit.models.session import ObservedSessionState, SessionListPage
+
+        client = SimulatedDidit()
+
+        class DummySource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        # 1. Empty results with next != None
+        monkeypatch.setattr(
+            client.sessions,
+            "list",
+            lambda **kwargs: SessionListPage(
+                count=10, next="https://test/next", previous=None, results=[]
+            ),
+        )
+        with pytest.raises(
+            DiditAPIError,
+            match="Didit pagination returned next page metadata without progress",
+        ) as exc_info:
+            client.sessions.reconcile_range(source=DummySource())
+        assert exc_info.value.status_code == 502
+
+        # 2. Empty results with next == None and offset < page.count
+        monkeypatch.setattr(
+            client.sessions,
+            "list",
+            lambda **kwargs: SessionListPage(count=10, next=None, previous=None, results=[]),
+        )
+        with pytest.raises(
+            DiditAPIError,
+            match="Inconsistent pagination metadata: received 0 of 10 sessions without next page",
+        ) as exc_info:
+            client.sessions.reconcile_range(source=DummySource())
+        assert exc_info.value.status_code == 502
+
+        # 3. Non-empty results with next == None and offset < page.count
+        from didit.models.session import SessionListItem
+
+        s = client.sessions.create(vendor_data="incon", workflow_id="wf")
+        item = SessionListItem(session_id=s.session_id, status=SessionStatus.APPROVED)
+        monkeypatch.setattr(
+            client.sessions,
+            "list",
+            lambda **kwargs: SessionListPage(count=10, next=None, previous=None, results=[item]),
+        )
+        with pytest.raises(
+            DiditAPIError,
+            match="Inconsistent pagination metadata: received 1 of 10 sessions without next page",
+        ) as exc_info:
+            client.sessions.reconcile_range(source=DummySource())
+        assert exc_info.value.status_code == 502
+
+    @pytest.mark.asyncio
+    async def test_async_simulation_reconcile_range_inconsistent_pagination_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typing import Any
+
+        from didit.models.session import ObservedSessionState, SessionListPage
+
+        client = SimulatedAsyncDidit()
+
+        class DummyAsyncSource:
+            async def aget(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        # 1. Empty results with next != None
+        async def mock_list_1(**kwargs: Any) -> SessionListPage:
+            return SessionListPage(count=10, next="https://test/next", previous=None, results=[])
+
+        monkeypatch.setattr(client.sessions, "list", mock_list_1)
+        with pytest.raises(
+            DiditAPIError,
+            match="Didit pagination returned next page metadata without progress",
+        ) as exc_info:
+            await client.sessions.reconcile_range(source=DummyAsyncSource())
+        assert exc_info.value.status_code == 502
+
+        # 2. Empty results with next == None and offset < page.count
+        async def mock_list_2(**kwargs: Any) -> SessionListPage:
+            return SessionListPage(count=10, next=None, previous=None, results=[])
+
+        monkeypatch.setattr(client.sessions, "list", mock_list_2)
+        with pytest.raises(
+            DiditAPIError,
+            match="Inconsistent pagination metadata: received 0 of 10 sessions without next page",
+        ) as exc_info:
+            await client.sessions.reconcile_range(source=DummyAsyncSource())
+        assert exc_info.value.status_code == 502
+
+        # 3. Non-empty results with next == None and offset < page.count
+        from didit.models.session import SessionListItem
+
+        s = await client.sessions.create(vendor_data="incon_async", workflow_id="wf")
+        item = SessionListItem(session_id=s.session_id, status=SessionStatus.APPROVED)
+
+        async def mock_list_3(**kwargs: Any) -> SessionListPage:
+            return SessionListPage(count=10, next=None, previous=None, results=[item])
+
+        monkeypatch.setattr(client.sessions, "list", mock_list_3)
+        with pytest.raises(
+            DiditAPIError,
+            match="Inconsistent pagination metadata: received 1 of 10 sessions without next page",
+        ) as exc_info:
+            await client.sessions.reconcile_range(source=DummyAsyncSource())
+        assert exc_info.value.status_code == 502

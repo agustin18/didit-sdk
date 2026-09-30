@@ -107,6 +107,95 @@ async def main():
 asyncio.run(main())
 ```
 
+### 3. Session Listing & Pagination
+
+Query verification sessions from Didit V3 (`GET /v3/sessions/`) with typed pagination and multi-attribute filtering:
+
+```python
+from didit import Didit, SessionStatus
+
+client = Didit()
+
+# Fetch paginated verification sessions
+page = client.sessions.list(
+    status=SessionStatus.APPROVED,
+    vendor_data="user_12345",
+    country="ESP",  # Normalized to uppercase and validated as 3-letter alpha-3-shaped code
+    limit=50,
+    offset=0,
+)
+
+print(f"Total matching sessions: {page.count}")
+for item in page.results:
+    print(f"- Session {item.session_id}: {item.status.value} (Workflow: {item.workflow_id})")
+```
+
+### 4. Snapshot Reconciliation (Drift Detection)
+
+Audit your local database state against upstream Didit API snapshots to detect state divergence that may result from delivery gaps, stale local state, or other synchronization failures without exposing PII:
+
+```python
+from didit import Didit, ObservedSessionState, SessionStatus
+
+client = Didit()
+
+# Reconcile a single session snapshot
+report = client.sessions.reconcile(
+    "sess_12345",
+    observed=ObservedSessionState(
+        session_id="sess_12345",
+        status=SessionStatus.IN_REVIEW,
+        warning_codes=["SUSPECTED_FRAUD"],
+    ),
+)
+
+if not report.is_in_sync:
+    print(f"Drift detected! Remote status is {report.remote_status} (Local: {report.local_status})")
+    print(f"Warnings added remotely: {report.warning_codes_added}")
+    print(f"Warnings removed remotely: {report.warning_codes_removed}")
+
+
+# Batch reconcile over a time window against your database with auto-pagination
+class DatabaseSessionSource:
+    def get(self, session_id: str) -> ObservedSessionState | None:
+        row = db.find_session(session_id)
+        if not row:
+            return None
+        return ObservedSessionState(
+            session_id=row.id, status=row.status, warning_codes=row.warnings
+        )
+
+
+batch_report = client.sessions.reconcile_range(
+    since="2026-01-01T00:00:00Z",
+    until="2026-01-02T00:00:00Z",
+    source=DatabaseSessionSource(),
+    page_size=50,
+    max_sessions=1000,
+)
+print(
+    f"Audited {batch_report.total_evaluated} sessions (remote: {batch_report.remote_count}, "
+    f"truncated: {batch_report.truncated}): {batch_report.drift_count} drifts found."
+)
+```
+
+### 5. PII-Minimized Telemetry Event Sink
+
+Attach a passive `DiditEventSink` to collect structured, privacy-safe SDK operational metrics (backoff retries, rate limits, duplicate webhooks, lease degradations/losses, and reconciliation drift). Event delivery is synchronous and fail-isolated (exceptions raised inside `emit()` are safely caught and suppressed by `safe_emit`); sink implementations MUST return promptly and should enqueue external I/O:
+
+```python
+from didit import Didit, DiditEventSink, DiditSDKEvent
+
+
+class MetricsEventSink:
+    def emit(self, event: DiditSDKEvent) -> None:
+        # PII-minimized: contains only structured identifiers, status enums, and timing metrics
+        statsd.increment(f"didit.sdk.{event.event_type}")
+
+
+client = Didit(event_sink=MetricsEventSink())
+```
+
 ---
 
 ## Webhook Integrations & Tokenized Reservation Protocol
@@ -173,6 +262,10 @@ app.include_router(router)
 ```
 
 When using `DiditWebhookGuard` on standard routers without `DiditWebhookRoute`, manage the lifecycle explicitly via `await guard.complete_reservation(request)` or `await guard.release_claim(request)`.
+
+> [!NOTE]
+> **FastAPI Lifecycle & Background Tasks**:
+> `DiditWebhookRoute` observes response status and dependency teardown at the ASGI boundary before committing `COMPLETED` or releasing the lease. Webhook endpoints should return standard, non-streaming responses. Note that FastAPI `BackgroundTasks` execute prior to final ASGI response delivery; keep background tasks lightweight or offload to a durable queue (e.g. Celery, ARQ, SQS).
 
 > [!TIP]
 > **Deduplication Semantics (`duplicate_action`)**:
@@ -283,7 +376,7 @@ except DiditServerError as exc:
 ```
 
 > [!NOTE]
-> **Zero-PII Exception Handling**: By default, `DiditAPIError` purges raw `response_body` and error detail dictionaries to protect user PII and biometrics from leaking into logs or APM dashboards (e.g. Sentry, Datadog). To retain raw response bodies in development or sandboxes, initialize `Didit(..., capture_sensitive_response=True)` or set `DIDIT_CAPTURE_SENSITIVE_RESPONSE=1`.
+> **PII-Minimized Exception Handling**: By default, `DiditAPIError` purges raw `response_body` and error detail dictionaries to protect user PII and biometrics from leaking into logs or APM dashboards (e.g. Sentry, Datadog). To retain raw response bodies in development or sandboxes, initialize `Didit(..., capture_sensitive_response=True)` or set `DIDIT_CAPTURE_SENSITIVE_RESPONSE=1`.
 
 ---
 

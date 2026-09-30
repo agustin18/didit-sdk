@@ -923,56 +923,80 @@ async def acomplete_webhook_event(
     return True
 
 
+def _callable_takes_token(store: Any, fn: Any, token: str | None) -> bool:
+    """Determine whether a release callable expects a lease token parameter.
+
+    Resolves via inspect.signature first; if the callable signature cannot be introspected
+    (e.g. Python 3.10 AsyncMock or C-extensions), resolves deterministically via store capabilities
+    (reserve/areserve presence) rather than speculative execution.
+    """
+    if token is None:
+        return False
+    try:
+        sig = inspect.signature(fn)
+        return len(sig.parameters) >= 2
+    except (ValueError, TypeError):
+        return bool(hasattr(store, "reserve") or hasattr(store, "areserve"))
+
+
 def release_webhook_event(
     store: Any,
     event_id: str,
     token: str | None = None,
-) -> None:
-    """Safely release a webhook event reservation synchronously."""
+) -> bool:
+    """Safely release a webhook event reservation synchronously.
+
+    Returns:
+        bool: True if released or not a reservation store, False if CAS release failed.
+    """
     release_fn = getattr(store, "release", None)
     if (
         release_fn is not None
         and callable(release_fn)
         and not inspect.iscoroutinefunction(release_fn)
     ):
-        sig = inspect.signature(release_fn)
-        if len(sig.parameters) >= 2 and token is not None:
-            release_fn(event_id, token)
+        if _callable_takes_token(store, release_fn, token):
+            res = release_fn(event_id, token)
         else:
-            release_fn(event_id)
+            res = release_fn(event_id)
+        return bool(res) if res is not None else True
+    return True
 
 
 async def arelease_webhook_event(
     store: Any,
     event_id: str,
     token: str | None = None,
-) -> None:
-    """Safely release a webhook event reservation across sync and async stores."""
+) -> bool:
+    """Safely release a webhook event reservation across sync and async stores.
+
+    Returns:
+        bool: True if released or not a reservation store, False if CAS release failed.
+    """
     if hasattr(store, "arelease") and callable(store.arelease):
-        sig = inspect.signature(store.arelease)
-        if len(sig.parameters) >= 2 and token is not None:
-            await store.arelease(event_id, token)
+        if _callable_takes_token(store, store.arelease, token):
+            res = await store.arelease(event_id, token)
         else:
-            await store.arelease(event_id)
-        return
+            res = await store.arelease(event_id)
+        return bool(res) if res is not None else True
 
     release_fn = getattr(store, "release", None)
     if release_fn is None or not callable(release_fn):
-        return
+        return True
 
-    sig = inspect.signature(release_fn)
-    takes_token = len(sig.parameters) >= 2 and token is not None
+    takes_token = _callable_takes_token(store, release_fn, token)
 
     if inspect.iscoroutinefunction(release_fn):
         if takes_token:
-            await release_fn(event_id, token)
+            res = await release_fn(event_id, token)
         else:
-            await release_fn(event_id)
+            res = await release_fn(event_id)
     else:
         if takes_token:
-            await asyncio.to_thread(release_fn, event_id, token)
+            res = await asyncio.to_thread(release_fn, event_id, token)
         else:
-            await asyncio.to_thread(release_fn, event_id)
+            res = await asyncio.to_thread(release_fn, event_id)
+    return bool(res) if res is not None else True
 
 
 def renew_webhook_event(
