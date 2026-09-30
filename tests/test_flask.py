@@ -240,6 +240,23 @@ class TestFlaskWebhookIntegration:
         create_signed_flask_client(app, "/webhook", SAMPLE_PAYLOAD)
         assert seen_duplicates == [False, True]
 
+    def test_dedup_store_default_action_is_pass(self) -> None:
+        app = Flask(__name__)
+        store = InMemoryWebhookDedupStore()
+        seen_duplicates: list[bool] = []
+
+        @app.route("/webhook", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=store)
+        def handle(payload: WebhookPayload):
+            seen_duplicates.append(payload.is_duplicate)
+            return "ok", 200
+
+        create_signed_flask_client(app, "/webhook", SAMPLE_PAYLOAD)
+        assert seen_duplicates == [False]
+
+        create_signed_flask_client(app, "/webhook", SAMPLE_PAYLOAD)
+        assert seen_duplicates == [False, True]
+
     def test_custom_dedup_key_builder(self) -> None:
         app = Flask(__name__)
         store = InMemoryWebhookDedupStore()

@@ -119,7 +119,7 @@ def didit_webhook_view(
     max_body_bytes: int = DEFAULT_MAX_WEBHOOK_BYTES,
     dedup_store: WebhookDedupStore | AsyncWebhookDedupStore | None = None,
     dedup_ttl_seconds: int = 86400,
-    duplicate_action: Literal["respond_ok", "pass", "raise"] = "respond_ok",
+    duplicate_action: Literal["respond_ok", "pass", "raise"] = "pass",
     dedup_key_builder: Callable[[WebhookPayload, HttpRequest], str] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Django view decorator for verifying, parsing, and deduplicating Didit webhooks.
@@ -128,6 +128,14 @@ def didit_webhook_view(
     memory, validates cryptographic signatures, handles deduplication, and passes
     the parsed WebhookPayload into the decorated view function. Supports both synchronous
     and asynchronous Django view functions.
+
+    `duplicate_action` semantics:
+    - `"pass"` (default): Duplicate events are passed to the view with
+      `payload.is_duplicate = True`. This safe default ensures Didit delivery retries
+      are never swallowed if a previous attempt crashed or failed before durable processing.
+    - `"respond_ok"`: Short-circuits with an immediate 200 OK without invoking the view. Use only
+      when claiming the event constitutes durable acceptance (e.g. transactional inbox).
+    - `"raise"`: Raises an HTTP 409 Conflict.
 
     Example:
         ```python

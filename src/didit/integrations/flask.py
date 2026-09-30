@@ -123,7 +123,7 @@ def didit_webhook(
     max_body_bytes: int = DEFAULT_MAX_WEBHOOK_BYTES,
     dedup_store: WebhookDedupStore | AsyncWebhookDedupStore | None = None,
     dedup_ttl_seconds: int = 86400,
-    duplicate_action: Literal["respond_ok", "pass", "raise"] = "respond_ok",
+    duplicate_action: Literal["respond_ok", "pass", "raise"] = "pass",
     dedup_key_builder: Callable[[WebhookPayload, Request], str] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Flask view decorator for verifying, parsing, and deduplicating Didit webhooks.
@@ -131,6 +131,14 @@ def didit_webhook(
     Enforces POST method, bounds request body memory (HTTP 413), verifies HMAC-SHA256
     signatures, prevents duplicate processing via WebhookDedupStore, assigns the payload to
     `flask.g.didit_payload`, and injects `payload: WebhookPayload` into the route handler.
+
+    `duplicate_action` semantics:
+    - `"pass"` (default): Duplicate events are passed to the route handler with
+      `payload.is_duplicate = True`. This safe default ensures Didit delivery retries
+      are never swallowed if a previous attempt crashed or failed before durable processing.
+    - `"respond_ok"`: Short-circuits with an immediate 200 OK without invoking the handler.
+      Use only when claiming the event constitutes durable acceptance (e.g. transactional inbox).
+    - `"raise"`: Raises an HTTP 409 Conflict.
 
     Example:
         ```python

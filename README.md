@@ -24,7 +24,7 @@ Unofficial, community-maintained Python client for the [Didit](https://didit.me)
 - **Webhook Deduplication**: Thread-safe in-memory and atomic Redis deduplication stores (`InMemoryWebhookDedupStore`, `RedisWebhookDedupStore`, `AsyncRedisWebhookDedupStore`) with configurable duplicate actions (`respond_ok`, `pass`, `raise`).
 - **Multi-Framework Integrations**: Native adapters for **FastAPI** (`DiditWebhookGuard`), **Django** (`@didit_webhook_view`), and **Flask** (`@didit_webhook`).
 - **Resilient HTTP Engine**: Deterministic jittered exponential backoff retries with fail-fast budget timers for transient errors (HTTP 429, 502, 503, 504).
-- **High-Fidelity Sandbox Parity**: Predefined outcome simulation slugs (`approve`, `decline_document_expired`, `decline_face_mismatch`, `decline_aml_hit`, `review_suspicious`, `resubmit`) and calibrated 0–100 biometric confidence scoring.
+- **High-Fidelity Sandbox Parity**: 16 official Didit sandbox outcome simulation slugs (`approve`, `decline_document_expired`, `decline_face_match_low_similarity`, `decline_aml_hit`, `review_face_match_borderline`, `review_aml_possible_match`, etc.) and calibrated 0–100 biometric confidence scoring.
 
 ---
 
@@ -121,17 +121,27 @@ app = FastAPI()
 guard = DiditWebhookGuard(
     secret="whsec_...",
     dedup_store=RedisWebhookDedupStore.from_url("redis://localhost:6379/0"),
-    duplicate_action="respond_ok",
+    # duplicate_action defaults to "pass" for at-least-once safe delivery
 )
 
 
 @app.post("/webhooks/didit")
 async def handle_webhook(payload: WebhookPayload = Depends(guard)):
+    if payload.is_duplicate:
+        # Event already claimed; handle idempotently or return fast 200
+        return {"status": "already_processed"}
+
     if payload.status == SessionStatus.APPROVED:
         # Idempotently process approved KYC verification
         ...
     return {"status": "ok"}
 ```
+
+> [!TIP]
+> **Deduplication Semantics (`duplicate_action`)**:
+> - `"pass"` (**default, recommended**): When a duplicate event is detected, it is passed to your handler with `payload.is_duplicate = True`. This guarantees that if a process crashed during previous handling, Didit's delivery retries will still reach your handler, and you can enforce idempotency safely at the database boundary.
+> - `"respond_ok"`: Short-circuits with an immediate HTTP 200 OK without invoking your handler. Opt-in only when claiming the event itself constitutes durable acceptance (e.g., immediate transactional inbox insertion or durable broker enqueueing).
+> - `"raise"`: Raises an HTTP 409 Conflict.
 
 ### Django
 
