@@ -102,7 +102,7 @@ class _SimulatedStorage:
         )
         self.sessions[session_id] = session
         self.decisions[session_id] = decision
-        self.created_at[session_id] = time.time()
+        self.created_at[session_id] = datetime.now(timezone.utc).timestamp()
 
         if scenario == "approve":
             self.approve(session_id)
@@ -451,9 +451,9 @@ class _SimulatedStorage:
                     continue
 
             s_created = self.created_at.get(s.session_id, 0.0)
-            if from_ts is not None and s_created < from_ts:
+            if from_ts is not None and s_created < from_ts - 0.1:
                 continue
-            if to_ts is not None and s_created > to_ts:
+            if to_ts is not None and s_created > to_ts + 0.1:
                 continue
 
             item = SessionListItem(
