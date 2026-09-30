@@ -163,6 +163,9 @@ guard = DiditWebhookGuard(secret="whsec_...", dedup_store=store)
 @router.post("/webhooks/didit")
 async def handle_webhook_guard(payload: WebhookPayload = Depends(guard)):
     return {"status": "ok"}
+
+
+app.include_router(router)
 ```
 
 When using `DiditWebhookGuard` on standard routers without `DiditWebhookRoute`, manage the lifecycle explicitly via `await guard.complete_reservation(request)` or `await guard.release_claim(request)`.

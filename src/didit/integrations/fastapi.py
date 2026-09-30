@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from starlette.requests import Request
 from starlette.responses import Response as StarletteResponse
+from starlette.types import Message, Receive, Scope, Send
 
 from didit.config import DEFAULT_WEBHOOK_MAX_AGE_SECONDS
 from didit.dedup import (
@@ -178,6 +179,7 @@ class DiditWebhookGuard:
             request.state.didit_attempt = attempt
             request.state.didit_reservation = attempt.reservation
             request.state.didit_claimed = attempt.state == ReservationState.ACQUIRED
+            request.state.didit_completed_ttl = self.effective_completed_ttl
 
             if attempt.state == ReservationState.COMPLETED:
                 if self.duplicate_action == "respond_ok":
@@ -269,14 +271,31 @@ async def complete_didit_reservation(request: Request, completed_ttl: int = 8640
     key = getattr(request.state, "didit_dedup_key", None)
     claimed = getattr(request.state, "didit_claimed", False)
     res = getattr(request.state, "didit_reservation", None)
+    ttl = getattr(request.state, "didit_completed_ttl", completed_ttl)
     if store and key and claimed and res:
-        success = await acomplete_webhook_event(
-            store, key, token=res.token, completed_ttl=completed_ttl
-        )
+        success = await acomplete_webhook_event(store, key, token=res.token, completed_ttl=ttl)
         request.state.didit_claimed = False
         request.state.didit_reservation = None
         return success
     return False
+
+
+class _ResponseCapture:
+    """ASGI Send capture buffer to inspect HTTP status code before committing reservation."""
+
+    def __init__(self, send: Send) -> None:
+        self.send = send
+        self.status_code: int = 500
+        self.messages: list[Message] = []
+
+    async def capture_send(self, message: Message) -> None:
+        if message["type"] == "http.response.start":
+            self.status_code = message.get("status", 500)
+        self.messages.append(message)
+
+    async def flush(self) -> None:
+        for msg in self.messages:
+            await self.send(msg)
 
 
 try:
@@ -289,11 +308,12 @@ except ImportError:  # pragma: no cover
 
 class DiditWebhookRoute(APIRoute):
     """FastAPI APIRoute subclass that manages Didit webhook reservation lifecycles
-    at the final response boundary.
+    at the final ASGI response boundary.
 
-    Wraps the route handler to observe the concrete Response after endpoint execution,
-    response validation, serialization, and rendering:
-    - If route handler or serialization/rendering raises an exception:
+    Wraps route execution at the ASGI boundary to observe the complete request lifecycle,
+    including endpoint execution, response validation, serialization, rendering,
+    and dependency teardown (e.g. database transaction commit):
+    - If route handler, response rendering, or dependency teardown raises an exception:
       automatically releases any active reservation recorded on request.state.
     - If the final response status is 2xx (200-299):
       automatically completes the active reservation.
@@ -301,24 +321,26 @@ class DiditWebhookRoute(APIRoute):
       automatically releases the active reservation so retries succeed.
     """
 
-    def get_route_handler(self) -> Callable[[Request], Any]:
-        original_route_handler = super().get_route_handler()
+    async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await super().handle(scope, receive, send)
+            return
 
-        async def didit_route_handler(request: Request) -> StarletteResponse:
-            try:
-                response = await original_route_handler(request)
-            except Exception:
-                await release_didit_claim(request)
-                raise
+        capture = _ResponseCapture(send)
+        try:
+            await super().handle(scope, receive, capture.capture_send)
+        except Exception:
+            request = Request(scope, receive=receive)
+            await release_didit_claim(request)
+            raise
 
-            if 200 <= response.status_code < 300:
-                await complete_didit_reservation(request)
-            else:
-                await release_didit_claim(request)
+        request = Request(scope, receive=receive)
+        if 200 <= capture.status_code < 300:
+            await complete_didit_reservation(request)
+        else:
+            await release_didit_claim(request)
 
-            return response
-
-        return didit_route_handler
+        await capture.flush()
 
 
 def didit_webhook(
@@ -477,9 +499,13 @@ def didit_webhook(
                     legacy_ttl_seconds=effective_legacy_ttl,
                 )
                 is_new = attempt.state == ReservationState.ACQUIRED
+                request.state.didit_dedup_store = dedup_store
+                request.state.didit_dedup_key = dedup_key
+                request.state.didit_claimed = is_new
+                request.state.didit_reservation = attempt.reservation
+                request.state.didit_completed_ttl = effective_completed_ttl
                 if attempt.reservation is not None:
                     res_token = attempt.reservation.token
-                    request.state.didit_reservation = attempt.reservation
 
                 if attempt.state == ReservationState.COMPLETED:
                     if duplicate_action == "respond_ok":
@@ -535,6 +561,8 @@ def didit_webhook(
             except Exception:
                 if dedup_store is not None and is_new:
                     await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                    request.state.didit_claimed = False
+                    request.state.didit_reservation = None
                 raise
 
             route = (
@@ -590,6 +618,8 @@ def didit_webhook(
                     except Exception:
                         if dedup_store is not None and is_new:
                             await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                            request.state.didit_claimed = False
+                            request.state.didit_reservation = None
                         raise
 
                 try:
@@ -603,9 +633,13 @@ def didit_webhook(
                 except Exception:
                     if dedup_store is not None and is_new:
                         await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                        request.state.didit_claimed = False
+                        request.state.didit_reservation = None
                     raise
 
-            if dedup_store is not None and is_new:
+            # If the route is managed by DiditWebhookRoute, the route's ASGI wrapper
+            # manages final completion or release after dependency teardown.
+            if dedup_store is not None and is_new and not isinstance(route, DiditWebhookRoute):
                 if 200 <= final_response.status_code < 300:
                     if res_token is not None:
                         await acomplete_webhook_event(
@@ -614,8 +648,12 @@ def didit_webhook(
                             token=res_token,
                             completed_ttl=effective_completed_ttl,
                         )
+                        request.state.didit_claimed = False
+                        request.state.didit_reservation = None
                 else:
                     await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                    request.state.didit_claimed = False
+                    request.state.didit_reservation = None
 
             return final_response
 
@@ -649,6 +687,7 @@ def didit_webhook(
                 inspect.Parameter(
                     "response",
                     inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    default=None,
                     annotation=StarletteResponse,
                 ),
             )

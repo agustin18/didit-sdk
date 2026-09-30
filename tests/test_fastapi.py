@@ -1216,6 +1216,152 @@ class TestDiditWebhookRoute:
         attempt = store.reserve("evt_route_err_1")
         assert attempt.state == ReservationState.ACQUIRED
 
+    def test_didit_webhook_route_yield_dependency_failure_releases_reservation(
+        self,
+    ) -> None:
+        from fastapi import APIRouter
+
+        from didit.dedup import InMemoryWebhookReservationStore, ReservationState
+        from didit.integrations.fastapi import DiditWebhookGuard, DiditWebhookRoute
+
+        store = InMemoryWebhookReservationStore()
+        guard = DiditWebhookGuard(secret=WEBHOOK_SECRET, dedup_store=store)
+
+        async def failing_transaction():
+            yield object()
+            raise RuntimeError("Database transaction commit failed")
+
+        router = APIRouter(route_class=DiditWebhookRoute)
+
+        @router.post("/webhook-yield-fail")
+        async def endpoint(
+            payload: WebhookPayload = Depends(guard),
+            tx: Any = Depends(failing_transaction, scope="function"),
+        ) -> dict[str, str]:
+            return {"status": "ok"}
+
+        app_route = FastAPI()
+        app_route.include_router(router)
+
+        client = TestClient(app_route, raise_server_exceptions=False)
+        data = {
+            "event_id": "evt_yield_fail_1",
+            "session_id": "sess_yield_fail",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/webhook-yield-fail", content=raw_body, headers=headers)
+        assert resp.status_code == 500
+
+        # Reservation must NOT be completed; it must remain available for retry
+        attempt = store.reserve("evt_yield_fail_1")
+        assert attempt.state == ReservationState.ACQUIRED
+
+    def test_didit_webhook_route_yield_dependency_success_completes_reservation(
+        self,
+    ) -> None:
+        from fastapi import APIRouter
+
+        from didit.dedup import InMemoryWebhookReservationStore, ReservationState
+        from didit.integrations.fastapi import DiditWebhookGuard, DiditWebhookRoute
+
+        store = InMemoryWebhookReservationStore()
+        guard = DiditWebhookGuard(secret=WEBHOOK_SECRET, dedup_store=store)
+
+        async def successful_transaction():
+            yield object()
+            # Clean transaction commit
+
+        router = APIRouter(route_class=DiditWebhookRoute)
+
+        @router.post("/webhook-yield-success")
+        async def endpoint(
+            payload: WebhookPayload = Depends(guard),
+            tx: Any = Depends(successful_transaction, scope="function"),
+        ) -> dict[str, str]:
+            return {"status": "ok"}
+
+        app_route = FastAPI()
+        app_route.include_router(router)
+
+        client = TestClient(app_route)
+        data = {
+            "event_id": "evt_yield_ok_1",
+            "session_id": "sess_yield_ok",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/webhook-yield-success", content=raw_body, headers=headers)
+        assert resp.status_code == 200
+
+        attempt = store.reserve("evt_yield_ok_1")
+        assert attempt.state == ReservationState.COMPLETED
+
+    def test_didit_webhook_decorator_with_route_yield_dependency_failure_releases(
+        self,
+    ) -> None:
+        from fastapi import APIRouter
+
+        from didit.dedup import InMemoryWebhookReservationStore, ReservationState
+        from didit.integrations.fastapi import DiditWebhookRoute, didit_webhook
+
+        store = InMemoryWebhookReservationStore()
+
+        async def failing_transaction():
+            yield object()
+            raise RuntimeError("DB commit failed after return")
+
+        router = APIRouter(route_class=DiditWebhookRoute)
+
+        @router.post("/webhook-dec-yield-fail")
+        @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
+        async def endpoint(
+            payload: WebhookPayload,
+            tx: Any = Depends(failing_transaction, scope="function"),
+        ) -> dict[str, str]:
+            return {"status": "ok"}
+
+        app_route = FastAPI()
+        app_route.include_router(router)
+
+        client = TestClient(app_route, raise_server_exceptions=False)
+        data = {
+            "event_id": "evt_dec_yield_fail_1",
+            "session_id": "sess_dec_yield_fail",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/webhook-dec-yield-fail", content=raw_body, headers=headers)
+        assert resp.status_code == 500
+
+        attempt = store.reserve("evt_dec_yield_fail_1")
+        assert attempt.state == ReservationState.ACQUIRED
+
+    @pytest.mark.asyncio
+    async def test_didit_webhook_route_non_http_scope_passthrough(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from didit.integrations.fastapi import DiditWebhookRoute
+
+        route = DiditWebhookRoute("/test-non-http", lambda: None, methods=["GET"])
+        route.app = AsyncMock()
+
+        scope = {"type": "websocket", "method": "GET"}
+        await route.handle(scope, AsyncMock(), AsyncMock())
+        assert route.app.called
+
 
 class TestIntegrationsLazyLoading:
     def test_lazy_attribute_access_success(self) -> None:
