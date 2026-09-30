@@ -36,7 +36,10 @@ from didit.dedup import (
     release_webhook_event,
     reserve_webhook_event,
 )
-from didit.errors import DiditConfigurationError, DiditSignatureError
+from didit.errors import (
+    DiditConfigurationError,
+    DiditSignatureError,
+)
 from didit.models.webhook import WebhookPayload
 from didit.webhooks import parse_webhook_payload
 
@@ -133,9 +136,11 @@ def didit_webhook_view(
         | AsyncWebhookReservationStore
         | None
     ) = None,
-    dedup_ttl_seconds: int = 86400,
+    lease_ttl_seconds: int = 30,
+    completed_ttl_seconds: int = 86400,
+    dedup_ttl_seconds: int | None = None,
     duplicate_action: Literal["respond_ok", "pass", "raise"] = "pass",
-    processing_action: Literal["retry", "pass", "raise"] = "retry",
+    processing_action: Literal["retry", "pass", "raise", "conflict"] = "retry",
     dedup_key_builder: Callable[[WebhookPayload, HttpRequest], str] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Django view decorator for verifying, parsing, and reserving Didit webhooks.
@@ -156,10 +161,14 @@ def didit_webhook_view(
             f"Invalid duplicate_action '{duplicate_action}'. "
             "Must be 'respond_ok', 'pass', or 'raise'."
         )
-    if processing_action not in ("retry", "pass", "raise"):
+    if processing_action not in ("retry", "pass", "raise", "conflict"):
         raise ValueError(
-            f"Invalid processing_action '{processing_action}'. Must be 'retry', 'pass', or 'raise'."
+            f"Invalid processing_action '{processing_action}'. "
+            "Must be 'retry', 'pass', 'raise', or 'conflict'."
         )
+
+    effective_lease_ttl = dedup_ttl_seconds if dedup_ttl_seconds is not None else lease_ttl_seconds
+    effective_completed_ttl = completed_ttl_seconds
 
     def decorator(view_func: Callable[..., Any]) -> Callable[..., Any]:
         is_async = inspect.iscoroutinefunction(view_func)
@@ -232,7 +241,7 @@ def didit_webhook_view(
                         dedup_key = compute_dedup_key(payload, signature=sig)
 
                     attempt = await areserve_webhook_event(
-                        dedup_store, dedup_key, ttl_seconds=dedup_ttl_seconds
+                        dedup_store, dedup_key, ttl_seconds=effective_lease_ttl
                     )
                     is_new = attempt.state == ReservationState.ACQUIRED
                     if attempt.reservation is not None:
@@ -263,7 +272,7 @@ def didit_webhook_view(
                             )
                             resp["Retry-After"] = "5"
                             return resp
-                        if processing_action == "raise":
+                        if processing_action in ("raise", "conflict"):
                             return HttpResponse(
                                 "Webhook event currently being processed",
                                 status=409,
@@ -283,11 +292,17 @@ def didit_webhook_view(
                     raise
 
                 if dedup_store is not None and is_new:
-                    status_code = getattr(result, "status_code", None)
-                    if isinstance(status_code, int) and status_code >= 500:
+                    status_code = getattr(result, "status_code", 200)
+                    if isinstance(status_code, int) and 200 <= status_code < 300:
+                        if res_token is not None:
+                            await acomplete_webhook_event(
+                                dedup_store,
+                                dedup_key,
+                                token=res_token,
+                                completed_ttl=effective_completed_ttl,
+                            )
+                    else:
                         await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
-                    elif res_token is not None:
-                        await acomplete_webhook_event(dedup_store, dedup_key, token=res_token)
 
                 if result is None:
                     return HttpResponse(status=200)
@@ -353,7 +368,7 @@ def didit_webhook_view(
 
                 claim_fn = getattr(dedup_store, "claim", None)
                 if claim_fn is not None and not hasattr(dedup_store, "reserve"):
-                    claim_res = claim_fn(dedup_key, ttl_seconds=dedup_ttl_seconds)
+                    claim_res = claim_fn(dedup_key, ttl_seconds=effective_lease_ttl)
                     if inspect.isawaitable(claim_res):
                         if inspect.iscoroutine(claim_res):
                             claim_res.close()
@@ -378,7 +393,7 @@ def didit_webhook_view(
                         payload.is_duplicate = True
                 else:
                     attempt = reserve_webhook_event(
-                        dedup_store, dedup_key, ttl_seconds=dedup_ttl_seconds
+                        dedup_store, dedup_key, ttl_seconds=effective_lease_ttl
                     )
                     is_new = attempt.state == ReservationState.ACQUIRED
                     if attempt.reservation is not None:
@@ -409,7 +424,7 @@ def didit_webhook_view(
                             )
                             resp["Retry-After"] = "5"
                             return resp
-                        if processing_action == "raise":
+                        if processing_action in ("raise", "conflict"):
                             return HttpResponse(
                                 "Webhook event currently being processed",
                                 status=409,
@@ -429,11 +444,17 @@ def didit_webhook_view(
                 raise
 
             if dedup_store is not None and is_new:
-                status_code = getattr(result, "status_code", None)
-                if isinstance(status_code, int) and status_code >= 500:
+                status_code = getattr(result, "status_code", 200)
+                if isinstance(status_code, int) and 200 <= status_code < 300:
+                    if res_token is not None:
+                        complete_webhook_event(
+                            dedup_store,
+                            dedup_key,
+                            token=res_token,
+                            completed_ttl=effective_completed_ttl,
+                        )
+                else:
                     release_webhook_event(dedup_store, dedup_key, token=res_token)
-                elif res_token is not None:
-                    complete_webhook_event(dedup_store, dedup_key, token=res_token)
 
             if result is None:
                 return HttpResponse(status=200)

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Tokenized Webhook Reservation Protocol (Distributed Redis Lease & In-Memory Parity):**
+  - Distributed tokenized reservation store with atomic Lua CAS primitives (`reserve`, `complete`, `release`, `renew`) preventing concurrent processing races and duplicate execution across distributed workers.
+  - Decoupled `lease_ttl_seconds` (default: 30s) from `completed_ttl_seconds` (default: 86400s), ensuring crash recovery from OOM/SIGKILL before Didit retry delivery windows.
+  - Single-key Redis Cluster compatibility using keys formatted as `didit:webhook:<namespace>:<sha256(event_id)>` with explicit rejection of `{}` curly braces in namespaces to prevent hot shard bottlenecks.
+  - Lua same-token TTL refresh via `redis.call('EXPIRE', KEYS[1], ARGV[2])` and In-Memory parity to enable clean recovery from ambiguous network disconnects.
+  - Full automated lifecycle management across web framework adapters:
+    - **FastAPI:** Route decorator `@didit_webhook` observing endpoint execution to automatically mark 2xx responses as `COMPLETED` and auto-release non-2xx responses (e.g. 404, 500) and exceptions. `DiditWebhookGuard` dependency for custom lifecycles.
+    - **Django:** `@didit_webhook_view` auto-completing 2xx responses and auto-releasing non-2xx responses / exceptions.
+    - **Flask:** `@didit_webhook` auto-completing 2xx responses and auto-releasing non-2xx responses / exceptions.
+  - Typed `DiditDuplicateWebhookError` exception subclassing `DiditDedupError` with `event_id` and `state` context.
+  - Safe `FAIL_OPEN` semantics: `reserve()` returns `ReservationAttempt(state=ACQUIRED, degraded=True)` for availability; `complete()`, `release()`, and `renew()` return `False` when Redis is unreachable to prevent false confirmation of distributed mutual exclusion extensions.
+
 ## [0.2.0] - 2026-09-30
 
 ### Security & Forensic Hardening

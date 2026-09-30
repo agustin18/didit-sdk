@@ -415,6 +415,14 @@ class TestKeyBuilder:
         key = build_reservation_key("session_456")
         assert key.startswith("didit:webhook:default:")
 
+    def test_build_reservation_key_rejects_braces(self) -> None:
+        with pytest.raises(ValueError, match="namespace cannot contain '{' or '}'"):
+            build_reservation_key("session_123", namespace="{prod}")
+        with pytest.raises(ValueError, match="namespace cannot contain '{' or '}'"):
+            build_reservation_key("session_123", namespace="prod}")
+        with pytest.raises(ValueError, match="namespace cannot contain '{' or '}'"):
+            build_reservation_key("session_123", namespace="{all")
+
 
 class TestReservationProtocols:
     def test_reservation_protocol_conformance(self) -> None:
@@ -511,6 +519,51 @@ class TestInMemoryReservationStore:
         # Can now be reserved again
         new_attempt = store.reserve("evt_rel", ttl_seconds=30)
         assert new_attempt.state == ReservationState.ACQUIRED
+
+    def test_same_token_ttl_refresh(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        store = InMemoryWebhookReservationStore()
+        current_time = 1_000.0
+        monkeypatch.setattr(time, "monotonic", lambda: current_time)
+
+        attempt1 = store.reserve("evt_refresh", token="tok_a", ttl_seconds=30)
+        assert attempt1.state == ReservationState.ACQUIRED
+        assert attempt1.reservation is not None
+        assert attempt1.reservation.expires_at == 1030.0
+
+        current_time = 1020.0
+        attempt2 = store.reserve("evt_refresh", token="tok_a", ttl_seconds=30)
+        assert attempt2.state == ReservationState.ACQUIRED
+        assert attempt2.reservation is not None
+        # Must be refreshed to current_time + 30 = 1050.0, NOT original 1030.0!
+        assert attempt2.reservation.expires_at == 1050.0
+
+    def test_lease_expiry_during_old_worker_execution(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = InMemoryWebhookReservationStore()
+        current_time = 1_000.0
+        monkeypatch.setattr(time, "monotonic", lambda: current_time)
+
+        # Worker A acquires lease for 30s
+        attempt_a = store.reserve("evt_steal", token="worker_a", ttl_seconds=30)
+        assert attempt_a.state == ReservationState.ACQUIRED
+
+        # Worker A stalls; clock advances past lease
+        current_time = 1035.0
+
+        # Worker B acquires the expired lease
+        attempt_b = store.reserve("evt_steal", token="worker_b", ttl_seconds=30)
+        assert attempt_b.state == ReservationState.ACQUIRED
+
+        # Stale Worker A wakes up and attempts to release its lease with worker_a token
+        assert store.release("evt_steal", "worker_a") is False
+
+        # Verify Worker B's lease was NOT altered or deleted by Worker A
+        competing = store.reserve("evt_steal", token="worker_c", ttl_seconds=30)
+        assert competing.state == ReservationState.PROCESSING
+
+        # Worker B successfully completes
+        assert store.complete("evt_steal", "worker_b") is True
 
     def test_expiration_re_reservation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         store = InMemoryWebhookReservationStore()
@@ -683,6 +736,31 @@ class TestRedisReservationStore:
             attempt = store.reserve("evt_err", token="tok")
             assert attempt.state == expected_state
 
+    def test_redis_lua_reserve_script_contract(self) -> None:
+        from didit.dedup import LUA_COMPLETE, LUA_RELEASE, LUA_RESERVE
+
+        # Lua reserve MUST call EXPIRE on same-token reentrancy to refresh TTL
+        assert "redis.call('EXPIRE', KEYS[1], ARGV[2])" in LUA_RESERVE
+        assert "PROCESSING:' .. ARGV[1]" in LUA_RESERVE
+        assert "COMPLETED" in LUA_COMPLETE
+        assert "redis.call('DEL', KEYS[1])" in LUA_RELEASE
+
+    def test_redis_ambiguous_reserve_recovery(self) -> None:
+        client = MagicMock()
+        # Attempt 1: command executed in Redis, but network response timed out
+        # Attempt 2: retry with the exact same token succeeds via Lua same-token CAS branch
+        client.eval.side_effect = [TimeoutError("ambiguous network disconnect"), "ACQUIRED"]
+        store = RedisWebhookReservationStore(client=client, failure_mode=DedupFailureMode.RAISE)
+
+        with pytest.raises(DiditDedupError):
+            store.reserve("evt_ambig", token="worker_token_1", ttl_seconds=30)
+
+        # Retry with the same token recovers the lease and refreshes TTL
+        retry_attempt = store.reserve("evt_ambig", token="worker_token_1", ttl_seconds=30)
+        assert retry_attempt.state == ReservationState.ACQUIRED
+        assert retry_attempt.reservation is not None
+        assert retry_attempt.reservation.token == "worker_token_1"
+
     @pytest.mark.parametrize(
         ("lua_output", "expected"),
         [(1, True), (0, False)],
@@ -697,7 +775,7 @@ class TestRedisReservationStore:
         ("failure_mode", "expected", "should_raise"),
         [
             (DedupFailureMode.RAISE, None, True),
-            (DedupFailureMode.FAIL_OPEN, True, False),
+            (DedupFailureMode.FAIL_OPEN, False, False),
         ],
     )
     def test_complete_failure_modes(
@@ -730,7 +808,7 @@ class TestRedisReservationStore:
         ("failure_mode", "expected", "should_raise"),
         [
             (DedupFailureMode.RAISE, None, True),
-            (DedupFailureMode.FAIL_OPEN, True, False),
+            (DedupFailureMode.FAIL_OPEN, False, False),
         ],
     )
     def test_release_failure_modes(
@@ -763,7 +841,7 @@ class TestRedisReservationStore:
         ("failure_mode", "expected", "should_raise"),
         [
             (DedupFailureMode.RAISE, None, True),
-            (DedupFailureMode.FAIL_OPEN, True, False),
+            (DedupFailureMode.FAIL_OPEN, False, False),
         ],
     )
     def test_renew_failure_modes(
@@ -920,7 +998,7 @@ class TestAsyncRedisReservationStore:
         ("failure_mode", "expected", "should_raise"),
         [
             (DedupFailureMode.RAISE, None, True),
-            (DedupFailureMode.FAIL_OPEN, True, False),
+            (DedupFailureMode.FAIL_OPEN, False, False),
         ],
     )
     async def test_acomplete_failure_modes(
@@ -946,7 +1024,7 @@ class TestAsyncRedisReservationStore:
         ("failure_mode", "expected", "should_raise"),
         [
             (DedupFailureMode.RAISE, None, True),
-            (DedupFailureMode.FAIL_OPEN, True, False),
+            (DedupFailureMode.FAIL_OPEN, False, False),
         ],
     )
     async def test_arelease_failure_modes(
@@ -972,7 +1050,7 @@ class TestAsyncRedisReservationStore:
         ("failure_mode", "expected", "should_raise"),
         [
             (DedupFailureMode.RAISE, None, True),
-            (DedupFailureMode.FAIL_OPEN, True, False),
+            (DedupFailureMode.FAIL_OPEN, False, False),
         ],
     )
     async def test_arenew_failure_modes(
@@ -1020,18 +1098,13 @@ class TestAsyncRedisReservationStore:
         ):
             await store_raise.arelease_claim("k_legacy")
 
-    def test_sync_methods_raise_not_implemented(self) -> None:
+    def test_sync_methods_do_not_exist(self) -> None:
         store = AsyncRedisWebhookReservationStore(client=MagicMock())
-        with pytest.raises(NotImplementedError, match="Use areserve"):
-            store.reserve("evt")
-        with pytest.raises(NotImplementedError, match="Use acomplete"):
-            store.complete("evt", "tok")
-        with pytest.raises(NotImplementedError, match="Use arelease"):
-            store.release("evt", "tok")
-        with pytest.raises(NotImplementedError, match="Use arenew"):
-            store.renew("evt", "tok")
-        with pytest.raises(NotImplementedError, match="Use aclaim"):
-            store.claim("evt")
+        assert not hasattr(store, "reserve")
+        assert not hasattr(store, "complete")
+        assert not hasattr(store, "release")
+        assert not hasattr(store, "renew")
+        assert not hasattr(store, "claim")
 
 
 class TestReservationDispatchHelpers:

@@ -181,3 +181,19 @@ class TestErrors:
             assert f"request_id={expected_req_id}" in str(exc_info.value)
         else:
             assert "request_id=" not in str(exc_info.value)
+
+    def test_didit_duplicate_webhook_error(self) -> None:
+        from didit.errors import DiditDedupError, DiditDuplicateWebhookError
+
+        err = DiditDuplicateWebhookError(
+            "Event already processed", event_id="evt_123", state="COMPLETED"
+        )
+        assert isinstance(err, DiditDedupError)
+        assert str(err) == "Event already processed"
+        assert err.event_id == "evt_123"
+        assert err.state == "COMPLETED"
+
+        default_err = DiditDuplicateWebhookError()
+        assert "Duplicate or in-flight" in str(default_err)
+        assert default_err.event_id is None
+        assert default_err.state is None

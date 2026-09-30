@@ -46,6 +46,7 @@ class ReservationAttempt:
 
     state: ReservationState
     reservation: WebhookReservation | None = None
+    degraded: bool = False
 
 
 @runtime_checkable
@@ -132,6 +133,10 @@ class AsyncWebhookReservationStore(Protocol):
 
 def build_reservation_key(event_id: str, namespace: str = "default") -> str:
     """Build standard distributed Redis key with sha256 digest and no fixed cluster hashtag."""
+    if "{" in namespace or "}" in namespace:
+        raise ValueError(
+            "namespace cannot contain '{' or '}' as they alter Redis Cluster slot hashing"
+        )
     digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()
     return f"didit:webhook:{namespace}:{digest}"
 
@@ -143,6 +148,7 @@ if not current then
     redis.call('SET', KEYS[1], 'PROCESSING:' .. ARGV[1], 'EX', ARGV[2])
     return 'ACQUIRED'
 elseif current == ('PROCESSING:' .. ARGV[1]) then
+    redis.call('EXPIRE', KEYS[1], ARGV[2])
     return 'ACQUIRED'
 elseif current == 'COMPLETED' then
     return 'COMPLETED'
@@ -293,10 +299,12 @@ class InMemoryWebhookReservationStore:
             curr_state, curr_tok, curr_expiry = entry
             if curr_state == ReservationState.PROCESSING:
                 if curr_tok == tok:
+                    new_expiry = now + ttl_seconds
+                    self._entries[key] = (ReservationState.PROCESSING, tok, new_expiry)
                     return ReservationAttempt(
                         state=ReservationState.ACQUIRED,
                         reservation=WebhookReservation(
-                            event_id=event_id, token=tok, expires_at=curr_expiry
+                            event_id=event_id, token=tok, expires_at=new_expiry
                         ),
                     )
                 return ReservationAttempt(state=ReservationState.PROCESSING)
@@ -556,6 +564,7 @@ class RedisWebhookReservationStore:
         tok = token or secrets.token_urlsafe(16)
         key = build_reservation_key(event_id, namespace=self.namespace)
         try:
+            started_at = time.monotonic()
             raw_res = self._client.eval(LUA_RESERVE, 1, key, tok, str(ttl_seconds))
             res = (
                 raw_res.decode("utf-8") if isinstance(raw_res, (bytes, bytearray)) else str(raw_res)
@@ -564,7 +573,7 @@ class RedisWebhookReservationStore:
                 return ReservationAttempt(
                     state=ReservationState.ACQUIRED,
                     reservation=WebhookReservation(
-                        event_id=event_id, token=tok, expires_at=time.monotonic() + ttl_seconds
+                        event_id=event_id, token=tok, expires_at=started_at + ttl_seconds
                     ),
                 )
             if res == "COMPLETED":
@@ -577,6 +586,7 @@ class RedisWebhookReservationStore:
                     reservation=WebhookReservation(
                         event_id=event_id, token=tok, expires_at=time.monotonic() + ttl_seconds
                     ),
+                    degraded=True,
                 )
             raise DiditDedupError(f"Redis reservation store reserve failed: {exc}") from exc
 
@@ -590,7 +600,7 @@ class RedisWebhookReservationStore:
             return bool(int(res) == 1)
         except Exception as exc:
             if self.failure_mode == DedupFailureMode.FAIL_OPEN:
-                return True
+                return False
             raise DiditDedupError(f"Redis reservation store complete failed: {exc}") from exc
 
     def release(self, event_id: str, token: str) -> bool:
@@ -601,7 +611,7 @@ class RedisWebhookReservationStore:
             return bool(int(res) == 1)
         except Exception as exc:
             if self.failure_mode == DedupFailureMode.FAIL_OPEN:
-                return True
+                return False
             raise DiditDedupError(f"Redis reservation store release failed: {exc}") from exc
 
     def renew(self, event_id: str, token: str, ttl_seconds: int = 30) -> bool:
@@ -614,7 +624,7 @@ class RedisWebhookReservationStore:
             return bool(int(res) == 1)
         except Exception as exc:
             if self.failure_mode == DedupFailureMode.FAIL_OPEN:
-                return True
+                return False
             raise DiditDedupError(f"Redis reservation store renew failed: {exc}") from exc
 
     # Backward compatibility with WebhookDedupStore
@@ -624,7 +634,10 @@ class RedisWebhookReservationStore:
         return attempt.state == ReservationState.ACQUIRED
 
     def release_claim(self, key: str) -> None:
-        """Backward-compatible best-effort release."""
+        """Deprecated: Blind key deletion for legacy compatibility.
+
+        Does not verify token ownership.
+        """
         full_key = build_reservation_key(key, namespace=self.namespace)
         try:
             self._client.delete(full_key)
@@ -680,6 +693,7 @@ class AsyncRedisWebhookReservationStore:
         tok = token or secrets.token_urlsafe(16)
         key = build_reservation_key(event_id, namespace=self.namespace)
         try:
+            started_at = time.monotonic()
             raw_res = await self._client.eval(LUA_RESERVE, 1, key, tok, str(ttl_seconds))
             res = (
                 raw_res.decode("utf-8") if isinstance(raw_res, (bytes, bytearray)) else str(raw_res)
@@ -688,7 +702,7 @@ class AsyncRedisWebhookReservationStore:
                 return ReservationAttempt(
                     state=ReservationState.ACQUIRED,
                     reservation=WebhookReservation(
-                        event_id=event_id, token=tok, expires_at=time.monotonic() + ttl_seconds
+                        event_id=event_id, token=tok, expires_at=started_at + ttl_seconds
                     ),
                 )
             if res == "COMPLETED":
@@ -701,6 +715,7 @@ class AsyncRedisWebhookReservationStore:
                     reservation=WebhookReservation(
                         event_id=event_id, token=tok, expires_at=time.monotonic() + ttl_seconds
                     ),
+                    degraded=True,
                 )
             raise DiditDedupError(f"Async Redis reservation store reserve failed: {exc}") from exc
 
@@ -714,7 +729,7 @@ class AsyncRedisWebhookReservationStore:
             return bool(int(res) == 1)
         except Exception as exc:
             if self.failure_mode == DedupFailureMode.FAIL_OPEN:
-                return True
+                return False
             raise DiditDedupError(f"Async Redis reservation store complete failed: {exc}") from exc
 
     async def arelease(self, event_id: str, token: str) -> bool:
@@ -725,7 +740,7 @@ class AsyncRedisWebhookReservationStore:
             return bool(int(res) == 1)
         except Exception as exc:
             if self.failure_mode == DedupFailureMode.FAIL_OPEN:
-                return True
+                return False
             raise DiditDedupError(f"Async Redis reservation store release failed: {exc}") from exc
 
     async def arenew(self, event_id: str, token: str, ttl_seconds: int = 30) -> bool:
@@ -738,7 +753,7 @@ class AsyncRedisWebhookReservationStore:
             return bool(int(res) == 1)
         except Exception as exc:
             if self.failure_mode == DedupFailureMode.FAIL_OPEN:
-                return True
+                return False
             raise DiditDedupError(f"Async Redis reservation store renew failed: {exc}") from exc
 
     # Backward compatibility with WebhookDedupStore
@@ -748,7 +763,10 @@ class AsyncRedisWebhookReservationStore:
         return attempt.state == ReservationState.ACQUIRED
 
     async def arelease_claim(self, key: str) -> None:
-        """Backward-compatible best-effort async release."""
+        """Deprecated: Blind key deletion for legacy compatibility.
+
+        Does not verify token ownership.
+        """
         full_key = build_reservation_key(key, namespace=self.namespace)
         try:
             await self._client.delete(full_key)
@@ -758,24 +776,6 @@ class AsyncRedisWebhookReservationStore:
             raise DiditDedupError(
                 f"Async Redis reservation store arelease_claim failed: {exc}"
             ) from exc
-
-    # Sync aliases
-    def reserve(
-        self, event_id: str, token: str | None = None, ttl_seconds: int = 30
-    ) -> ReservationAttempt:
-        raise NotImplementedError("Use areserve() with AsyncRedisWebhookReservationStore.")
-
-    def complete(self, event_id: str, token: str, completed_ttl: int = 86400) -> bool:
-        raise NotImplementedError("Use acomplete() with AsyncRedisWebhookReservationStore.")
-
-    def release(self, event_id: str, token: str) -> bool:
-        raise NotImplementedError("Use arelease() with AsyncRedisWebhookReservationStore.")
-
-    def renew(self, event_id: str, token: str, ttl_seconds: int = 30) -> bool:
-        raise NotImplementedError("Use arenew() with AsyncRedisWebhookReservationStore.")
-
-    def claim(self, key: str, ttl_seconds: int = 86400) -> bool:
-        raise NotImplementedError("Use aclaim() with AsyncRedisWebhookReservationStore.")
 
 
 def compute_dedup_key(payload: WebhookPayload, signature: str | None = None) -> str:

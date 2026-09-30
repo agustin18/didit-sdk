@@ -26,6 +26,24 @@ class DiditDedupSaturationError(DiditDedupError):
     """Raised when in-memory deduplication store saturates without expired entries to evict."""
 
 
+class DiditDuplicateWebhookError(DiditDedupError):
+    """Raised when a duplicate or in-flight webhook delivery is detected.
+
+    Used when duplicate_action='raise' or processing_action='raise'.
+    """
+
+    def __init__(
+        self,
+        message: str = "Duplicate or in-flight webhook event detected.",
+        *,
+        event_id: str | None = None,
+        state: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.event_id = event_id
+        self.state = state
+
+
 class DiditTimeoutError(DiditError):
     """Raised when an operation such as polling exceeds the configured timeout limit."""
 

@@ -3,10 +3,14 @@ import time
 from typing import Any
 
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 
-from didit.integrations.fastapi import DiditWebhookGuard
+from didit.integrations.fastapi import (
+    DiditWebhookGuard,
+    didit_webhook,
+    didit_webhook_view,
+)
 from didit.models.webhook import WebhookPayload
 from didit.webhooks import compute_signature
 
@@ -598,6 +602,207 @@ class TestFastAPIWebhookReservation:
         assert await guard_with_store.complete_reservation(req) is False
 
         assert await complete_didit_reservation(req) is False
+
+
+class TestFastAPIRouteDecoratorLifecycle:
+    def test_default_adapter_lease_ttl_is_30_seconds(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from didit.dedup import ReservationAttempt, ReservationState
+
+        mock_store = AsyncMock()
+        mock_store.areserve.return_value = ReservationAttempt(state=ReservationState.ACQUIRED)
+
+        app_ttl = FastAPI()
+
+        @app_ttl.post("/res-ttl")
+        @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=mock_store)
+        async def endpoint(payload: WebhookPayload, request: Request) -> dict[str, str]:
+            return {"status": "ok"}
+
+        client = TestClient(app_ttl)
+        data = {
+            "session_id": "sess_ttl",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        client.post("/res-ttl", content=raw_body, headers=headers)
+        mock_store.areserve.assert_called_once()
+        _, kwargs = mock_store.areserve.call_args
+        assert kwargs.get("ttl_seconds") == 30
+
+    def test_fastapi_success_auto_completion(self) -> None:
+        from didit.dedup import InMemoryWebhookReservationStore
+
+        store = InMemoryWebhookReservationStore()
+        app_ac = FastAPI()
+
+        @app_ac.post("/res-auto-complete")
+        @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store, duplicate_action="respond_ok")
+        async def endpoint(payload: WebhookPayload, request: Request) -> dict[str, str]:
+            # Handler does NOT call complete_reservation manually!
+            return {"status": "ok"}
+
+        client = TestClient(app_ac)
+        data = {
+            "event_id": "evt_auto_comp",
+            "session_id": "sess_ac",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        # Request 1 -> 200 OK; decorator automatically completes the reservation
+        r1 = client.post("/res-auto-complete", content=raw_body, headers=headers)
+        assert r1.status_code == 200
+        assert r1.json() == {"status": "ok"}
+
+        # Request 2 (identical event) -> acknowledged as duplicate because state is COMPLETED!
+        r2 = client.post("/res-auto-complete", content=raw_body, headers=headers)
+        assert r2.status_code == 200
+        assert "Duplicate webhook event acknowledged" in r2.text
+
+    def test_fastapi_exception_auto_release(self) -> None:
+        from didit.dedup import InMemoryWebhookReservationStore
+
+        store = InMemoryWebhookReservationStore()
+        app_ar = FastAPI()
+        should_crash = True
+
+        @app_ar.post("/res-auto-release")
+        @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
+        async def endpoint(payload: WebhookPayload, request: Request) -> dict[str, str]:
+            if should_crash:
+                raise ValueError("Database failure")
+            return {"status": "ok"}
+
+        client = TestClient(app_ar, raise_server_exceptions=False)
+        data = {
+            "event_id": "evt_auto_rel",
+            "session_id": "sess_ar",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        # Request 1 crashes -> 500; decorator automatically releases the reservation
+        r1 = client.post("/res-auto-release", content=raw_body, headers=headers)
+        assert r1.status_code == 500
+
+        # Request 2 (retry by Didit) -> succeeds because lease was released
+        should_crash = False
+        r2 = client.post("/res-auto-release", content=raw_body, headers=headers)
+        assert r2.status_code == 200
+        assert r2.json() == {"status": "ok"}
+
+    def test_fastapi_404_releases_reservation(self) -> None:
+        from starlette.responses import Response as StarletteResponse
+
+        from didit.dedup import InMemoryWebhookReservationStore
+
+        store = InMemoryWebhookReservationStore()
+        app_404 = FastAPI()
+        return_404 = True
+
+        @app_404.post("/res-404")
+        @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
+        async def endpoint(payload: WebhookPayload, request: Request) -> Any:
+            if return_404:
+                return StarletteResponse(content="not found", status_code=404)
+            return {"status": "recovered"}
+
+        client = TestClient(app_404)
+        data = {
+            "event_id": "evt_404_rel",
+            "session_id": "sess_404",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        # Request 1 -> 404; non-2xx response automatically releases reservation
+        r1 = client.post("/res-404", content=raw_body, headers=headers)
+        assert r1.status_code == 404
+
+        # Request 2 (retry) -> successfully acquires lease
+        return_404 = False
+        r2 = client.post("/res-404", content=raw_body, headers=headers)
+        assert r2.status_code == 200
+        assert r2.json() == {"status": "recovered"}
+
+    def test_fastapi_processing_action_conflict(self) -> None:
+        from didit.dedup import InMemoryWebhookReservationStore
+
+        store = InMemoryWebhookReservationStore()
+        store.reserve("evt_fastapi_conflict", token="other_worker", ttl_seconds=60)
+        app_conf = FastAPI()
+
+        @app_conf.post("/res-conflict")
+        @didit_webhook(
+            secret=WEBHOOK_SECRET,
+            dedup_store=store,
+            processing_action="conflict",
+        )
+        async def endpoint(payload: WebhookPayload, request: Request) -> dict[str, str]:
+            return {"status": "ok"}
+
+        client = TestClient(app_conf)
+        data = {
+            "event_id": "evt_fastapi_conflict",
+            "session_id": "sess_conf",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/res-conflict", content=raw_body, headers=headers)
+        assert resp.status_code == 409
+        assert "currently being processed" in resp.json()["detail"]
+
+    def test_actual_async_redis_store_in_sync_fastapi_raises_config_error(self) -> None:
+        from unittest.mock import MagicMock
+
+        from didit.dedup import AsyncRedisWebhookReservationStore
+        from didit.errors import DiditConfigurationError
+
+        store = AsyncRedisWebhookReservationStore(client=MagicMock())
+
+        with pytest.raises(
+            DiditConfigurationError,
+            match="AsyncWebhookReservationStore cannot be used with synchronous view functions",
+        ):
+
+            @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
+            def sync_endpoint(payload: WebhookPayload, request: Request) -> dict[str, str]:
+                return {"status": "ok"}
+
+    def test_decorator_validation_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from didit.errors import DiditConfigurationError
+
+        monkeypatch.delenv("DIDIT_WEBHOOK_SECRET", raising=False)
+        with pytest.raises(DiditConfigurationError, match="Missing webhook secret"):
+            didit_webhook()
+
+        with pytest.raises(ValueError, match="Invalid duplicate_action"):
+            didit_webhook(secret="sec", duplicate_action="invalid")  # type: ignore[arg-type]
+
+        with pytest.raises(ValueError, match="Invalid processing_action"):
+            didit_webhook(secret="sec", processing_action="invalid")  # type: ignore[arg-type]
+
+    def test_didit_webhook_view_alias(self) -> None:
+        assert didit_webhook_view is didit_webhook
 
 
 class TestIntegrationsLazyLoading:

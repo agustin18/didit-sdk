@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import django
 from django.conf import settings
@@ -24,6 +24,8 @@ from didit.dedup import (
     AsyncWebhookDedupStore,
     InMemoryWebhookDedupStore,
     InMemoryWebhookReservationStore,
+    ReservationAttempt,
+    ReservationState,
 )
 from didit.errors import DiditConfigurationError
 from didit.integrations.django import didit_webhook_view, parse_django_webhook
@@ -573,3 +575,65 @@ class TestDjangoWebhookReservation:
         resp_dup = await view(req)
         assert resp_dup.status_code == 200
         assert b"Duplicate webhook event acknowledged" in resp_dup.content
+
+    def test_default_adapter_lease_ttl_is_30_seconds(self) -> None:
+        mock_store = MagicMock()
+        mock_store.reserve.return_value = ReservationAttempt(state=ReservationState.ACQUIRED)
+
+        @didit_webhook_view(secret=SECRET, dedup_store=mock_store)
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        view(req)
+
+        mock_store.reserve.assert_called_once()
+        _, kwargs = mock_store.reserve.call_args
+        assert kwargs.get("ttl_seconds") == 30
+
+    def test_actual_async_redis_store_in_sync_django_raises_config_error(self) -> None:
+        from didit.dedup import AsyncRedisWebhookReservationStore
+
+        store = AsyncRedisWebhookReservationStore(client=MagicMock())
+
+        with pytest.raises(
+            DiditConfigurationError,
+            match="AsyncWebhookReservationStore cannot be used with synchronous",
+        ):
+
+            @didit_webhook_view(secret=SECRET, dedup_store=store)
+            def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+                return HttpResponse("ok", status=200)
+
+    def test_django_404_releases_reservation(self) -> None:
+        store = InMemoryWebhookReservationStore()
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store)
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("not found", status=404)
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        resp = view(req)
+        assert resp.status_code == 404
+
+        # Since 404 is a non-2xx status, reservation MUST be released so Didit retries work
+        retry_attempt = store.reserve(list(store._entries.keys())[0] if store._entries else "dummy")
+        assert retry_attempt.state == ReservationState.ACQUIRED
+
+    def test_django_processing_action_conflict(self) -> None:
+        store = InMemoryWebhookReservationStore()
+        payload_data = {**SAMPLE_PAYLOAD, "event_id": "evt_conflict"}
+        store.reserve("evt_conflict", token="other_worker", ttl_seconds=60)
+
+        @didit_webhook_view(
+            secret=SECRET,
+            dedup_store=store,
+            processing_action="conflict",
+        )
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(payload_data)
+        resp = view(req)
+        assert resp.status_code == 409
+        assert b"currently being processed" in resp.content

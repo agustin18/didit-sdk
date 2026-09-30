@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from flask import Flask, Response, g, jsonify
@@ -12,6 +13,8 @@ from flask import Flask, Response, g, jsonify
 from didit.dedup import (
     InMemoryWebhookDedupStore,
     InMemoryWebhookReservationStore,
+    ReservationAttempt,
+    ReservationState,
 )
 from didit.errors import DiditConfigurationError, DiditSignatureError
 from didit.integrations.flask import didit_webhook, parse_flask_webhook
@@ -697,3 +700,70 @@ class TestFlaskWebhookReservation:
         assert res_dup.status_code == 200
         assert b"Duplicate webhook event acknowledged" in res_dup.data
         assert call_count == 3
+
+    def test_default_adapter_lease_ttl_is_30_seconds(self) -> None:
+        app = Flask(__name__)
+        mock_store = MagicMock()
+        mock_store.reserve.return_value = ReservationAttempt(state=ReservationState.ACQUIRED)
+
+        @app.route("/res-default-ttl", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=mock_store)
+        def handle(payload: WebhookPayload):
+            return "ok", 200
+
+        create_signed_flask_client(app, "/res-default-ttl", SAMPLE_PAYLOAD)
+
+        mock_store.reserve.assert_called_once()
+        _, kwargs = mock_store.reserve.call_args
+        assert kwargs.get("ttl_seconds") == 30
+
+    def test_actual_async_redis_store_in_sync_flask_raises_config_error(self) -> None:
+        from didit.dedup import AsyncRedisWebhookReservationStore
+
+        app = Flask(__name__)
+        store = AsyncRedisWebhookReservationStore(client=MagicMock())
+
+        with pytest.raises(
+            DiditConfigurationError,
+            match="AsyncWebhookReservationStore cannot be used with synchronous",
+        ):
+
+            @app.route("/res-async-invalid", methods=["POST"])
+            @didit_webhook(secret=SECRET, dedup_store=store)
+            def handle(payload: WebhookPayload):
+                return "ok", 200
+
+    def test_flask_404_releases_reservation(self) -> None:
+        app = Flask(__name__)
+        store = InMemoryWebhookReservationStore()
+
+        @app.route("/res-404", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=store)
+        def handle(payload: WebhookPayload):
+            return "not found", 404
+
+        res = create_signed_flask_client(app, "/res-404", SAMPLE_PAYLOAD)
+        assert res.status_code == 404
+
+        # Non-2xx response must release reservation so retries work
+        retry_attempt = store.reserve(list(store._entries.keys())[0] if store._entries else "dummy")
+        assert retry_attempt.state == ReservationState.ACQUIRED
+
+    def test_flask_processing_action_conflict(self) -> None:
+        app = Flask(__name__)
+        store = InMemoryWebhookReservationStore()
+        payload_data = {**SAMPLE_PAYLOAD, "event_id": "evt_flask_conflict"}
+        store.reserve("evt_flask_conflict", token="other_worker", ttl_seconds=60)
+
+        @app.route("/res-conflict", methods=["POST"])
+        @didit_webhook(
+            secret=SECRET,
+            dedup_store=store,
+            processing_action="conflict",
+        )
+        def handle(payload: WebhookPayload):
+            return jsonify({"duplicate": payload.is_duplicate})
+
+        res = create_signed_flask_client(app, "/res-conflict", payload_data)
+        assert res.status_code == 409
+        assert b"currently being processed" in res.data
