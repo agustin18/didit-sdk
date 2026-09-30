@@ -31,6 +31,7 @@ class Didit:
         timeout: float | None = None,
         max_retries: int | None = None,
         webhook_secret: str | None = None,
+        capture_sensitive_response: bool | None = None,
         config: DiditConfig | None = None,
         http_client: httpx.Client | None = None,
         retry_policy: RetryPolicy | None = None,
@@ -45,6 +46,7 @@ class Didit:
                 timeout=timeout,
                 max_retries=max_retries,
                 webhook_secret=webhook_secret,
+                capture_sensitive_response=capture_sensitive_response,
             )
 
         self._manage_http = http_client is None
@@ -67,6 +69,7 @@ class Didit:
             retry_policy=self._retry_policy,
             default_timeout=self._config.timeout,
             default_options=self._default_options,
+            capture_sensitive_response=self._config.capture_sensitive_response,
         )
 
         self.sessions = SessionsResource(self._requestor)
@@ -159,6 +162,7 @@ class AsyncDidit:
         timeout: float | None = None,
         max_retries: int | None = None,
         webhook_secret: str | None = None,
+        capture_sensitive_response: bool | None = None,
         config: DiditConfig | None = None,
         http_client: httpx.AsyncClient | None = None,
         retry_policy: RetryPolicy | None = None,
@@ -173,6 +177,7 @@ class AsyncDidit:
                 timeout=timeout,
                 max_retries=max_retries,
                 webhook_secret=webhook_secret,
+                capture_sensitive_response=capture_sensitive_response,
             )
 
         self._manage_http = http_client is None
@@ -195,6 +200,7 @@ class AsyncDidit:
             retry_policy=self._retry_policy,
             default_timeout=self._config.timeout,
             default_options=self._default_options,
+            capture_sensitive_response=self._config.capture_sensitive_response,
         )
 
         self.sessions = AsyncSessionsResource(self._requestor)

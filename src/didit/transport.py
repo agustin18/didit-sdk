@@ -177,6 +177,7 @@ class _SyncRequestor:
         retry_policy: RetryPolicy | None = None,
         default_timeout: float | None = None,
         default_options: RequestOptions | None = None,
+        capture_sensitive_response: bool = False,
     ) -> None:
         self._client = client
         self._base_url = base_url
@@ -184,6 +185,7 @@ class _SyncRequestor:
         self._retry_policy = retry_policy or RetryPolicy()
         self._default_timeout = default_timeout
         self._default_options = default_options
+        self._capture_sensitive_response = capture_sensitive_response
 
     def request(
         self,
@@ -251,7 +253,10 @@ class _SyncRequestor:
                     )
                     if retry_after is not None and retry_after > self._retry_policy.max_retry_after:
                         # Exceeds max allowable wait; abort immediately
-                        handle_http_error(response)
+                        handle_http_error(
+                            response,
+                            capture_sensitive_response=self._capture_sensitive_response,
+                        )
 
                     delay = (
                         retry_after
@@ -269,7 +274,10 @@ class _SyncRequestor:
                     attempt += 1
                     continue
 
-                handle_http_error(response)
+                handle_http_error(
+                    response,
+                    capture_sensitive_response=self._capture_sensitive_response,
+                )
 
             except httpx.PoolTimeout as exc:
                 raise DiditPoolTimeoutError(
@@ -357,6 +365,7 @@ class _AsyncRequestor:
         retry_policy: RetryPolicy | None = None,
         default_timeout: float | None = None,
         default_options: RequestOptions | None = None,
+        capture_sensitive_response: bool = False,
     ) -> None:
         self._client = client
         self._base_url = base_url
@@ -364,6 +373,7 @@ class _AsyncRequestor:
         self._retry_policy = retry_policy or RetryPolicy()
         self._default_timeout = default_timeout
         self._default_options = default_options
+        self._capture_sensitive_response = capture_sensitive_response
 
     async def request(
         self,
@@ -443,7 +453,10 @@ class _AsyncRequestor:
                         response.headers.get("retry-after")
                     )
                     if retry_after is not None and retry_after > self._retry_policy.max_retry_after:
-                        handle_http_error(response)
+                        handle_http_error(
+                            response,
+                            capture_sensitive_response=self._capture_sensitive_response,
+                        )
 
                     delay = (
                         retry_after
@@ -461,7 +474,10 @@ class _AsyncRequestor:
                     attempt += 1
                     continue
 
-                handle_http_error(response)
+                handle_http_error(
+                    response,
+                    capture_sensitive_response=self._capture_sensitive_response,
+                )
 
             except httpx.PoolTimeout as exc:
                 raise DiditPoolTimeoutError(

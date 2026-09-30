@@ -20,6 +20,7 @@ class DiditConfig:
     timeout: float = DEFAULT_TIMEOUT
     max_retries: int = DEFAULT_MAX_RETRIES
     webhook_secret: str | None = None
+    capture_sensitive_response: bool = False
 
     @classmethod
     def from_env(
@@ -30,6 +31,7 @@ class DiditConfig:
         timeout: float | None = None,
         max_retries: int | None = None,
         webhook_secret: str | None = None,
+        capture_sensitive_response: bool | None = None,
     ) -> DiditConfig:
         """Resolve configuration falling back to environment variables."""
         resolved_key = api_key or os.environ.get("DIDIT_API_KEY")
@@ -59,10 +61,17 @@ class DiditConfig:
 
         resolved_secret = webhook_secret or os.environ.get("DIDIT_WEBHOOK_SECRET")
 
+        if capture_sensitive_response is not None:
+            resolved_capture = capture_sensitive_response
+        else:
+            env_val = os.environ.get("DIDIT_CAPTURE_SENSITIVE_RESPONSE", "").strip().lower()
+            resolved_capture = env_val in ("1", "true", "yes")
+
         return cls(
             api_key=resolved_key,
             base_url=resolved_base_url,
             timeout=resolved_timeout,
             max_retries=resolved_retries,
             webhook_secret=resolved_secret,
+            capture_sensitive_response=resolved_capture,
         )

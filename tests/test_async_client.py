@@ -322,6 +322,35 @@ class TestAsyncDiditClient:
         await async_client.aclose()
 
     @respx.mock
+    async def test_http_error_capture_sensitive_response_default_and_explicit(
+        self, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/s_leak_async/").mock(
+            return_value=Response(
+                400,
+                text='{"detail": "Sensitive Biometric Payload Async"}',
+                headers={"X-Request-Id": "req_leak_async_123"},
+            )
+        )
+        # Default: capture_sensitive_response=False -> response_body is None
+        client_safe = AsyncDidit(api_key="key", base_url=base_url)
+        with pytest.raises(DiditAPIError) as exc_safe:
+            await client_safe.sessions.get("s_leak_async")
+        assert exc_safe.value.response_body is None
+        assert exc_safe.value.status_code == 400
+        assert exc_safe.value.request_id == "req_leak_async_123"
+        await client_safe.aclose()
+
+        # Explicit: capture_sensitive_response=True -> response_body retained
+        client_sensitive = AsyncDidit(
+            api_key="key", base_url=base_url, capture_sensitive_response=True
+        )
+        with pytest.raises(DiditAPIError) as exc_sens:
+            await client_sensitive.sessions.get("s_leak_async")
+        assert exc_sens.value.response_body == '{"detail": "Sensitive Biometric Payload Async"}'
+        await client_sensitive.aclose()
+
+    @respx.mock
     async def test_rate_limit_error_retry_after(
         self, async_client: AsyncDidit, base_url: str
     ) -> None:

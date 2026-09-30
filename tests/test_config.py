@@ -67,3 +67,31 @@ class TestDiditConfig:
             cfg = DiditConfig.from_env(api_key="override_key", timeout=25.0)
             assert cfg.api_key == "override_key"
             assert cfg.timeout == 25.0
+
+    @pytest.mark.parametrize(
+        ("env_val", "expected"),
+        [
+            ("true", True),
+            ("True", True),
+            ("1", True),
+            ("yes", True),
+            ("false", False),
+            ("0", False),
+            ("no", False),
+            ("", False),
+        ],
+    )
+    def test_from_env_capture_sensitive_response(self, env_val: str, expected: bool) -> None:
+        env = {
+            "DIDIT_API_KEY": "env_key",
+            "DIDIT_CAPTURE_SENSITIVE_RESPONSE": env_val,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            cfg = DiditConfig.from_env()
+            assert cfg.capture_sensitive_response is expected
+
+    def test_from_env_capture_sensitive_response_explicit_kwarg(self) -> None:
+        env = {"DIDIT_API_KEY": "env_key", "DIDIT_CAPTURE_SENSITIVE_RESPONSE": "false"}
+        with patch.dict(os.environ, env, clear=True):
+            cfg = DiditConfig.from_env(capture_sensitive_response=True)
+            assert cfg.capture_sensitive_response is True

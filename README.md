@@ -7,7 +7,10 @@
 [![Checked with mypy](https://img.shields.io/badge/mypy-strict-blue)](https://mypy-lang.org/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-Unofficial, community-maintained Python client for the [Didit](https://didit.me) Identity Verification API.
+Unofficial, community-maintained Python client for the [Didit](https://didit.me) Identity Verification & KYC API.
+
+> [!NOTE]
+> **Supported Scope**: `didit-sdk` strictly targets **Verification Sessions, Decision Extraction, and KYC Webhook Ingestion**. For detailed architectural boundaries, excluded APIs (KYB, Travel Rule, etc.), and stability guarantees, see [SUPPORTED_SCOPE.md](SUPPORTED_SCOPE.md).
 
 > [!IMPORTANT]
 > **Legal Notice**: This is an independent, community-driven open-source project and is **not** officially affiliated with, endorsed by, or sponsored by Didit Protocol Inc. All trademarks, service marks, and company names are the property of their respective owners. See [NOTICE](NOTICE) for details.
@@ -236,6 +239,9 @@ except DiditServerError as exc:
     print(f"Didit server error ({exc.status_code}): {exc.response_body}")
 ```
 
+> [!NOTE]
+> **Zero-PII Exception Handling**: By default, `DiditAPIError` purges raw `response_body` and error detail dictionaries to protect user PII and biometrics from leaking into logs or APM dashboards (e.g. Sentry, Datadog). To retain raw response bodies in development or sandboxes, initialize `Didit(..., capture_sensitive_response=True)` or set `DIDIT_CAPTURE_SENSITIVE_RESPONSE=1`.
+
 ---
 
 ## Environment Variables
@@ -247,6 +253,7 @@ except DiditServerError as exc:
 | `DIDIT_WEBHOOK_SECRET` | *None* | Shared webhook HMAC secret |
 | `DIDIT_TIMEOUT` | `30.0` | HTTP request timeout in seconds |
 | `DIDIT_MAX_RETRIES` | `2` | Maximum retry attempts for transient errors |
+| `DIDIT_CAPTURE_SENSITIVE_RESPONSE` | `0` (False) | When `0`/false, error exceptions purge response bodies to prevent PII leakage to APMs/logs |
 
 ---
 

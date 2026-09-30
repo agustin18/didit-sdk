@@ -35,14 +35,28 @@ def parse_retry_after(retry_after_header: str | None) -> float | None:
         return None
 
 
-def handle_http_error(response: httpx.Response) -> None:
-    """Inspect HTTP response and raise appropriate typed exception on non-2xx status."""
+SENSITIVE_HEADER_NAMES: frozenset[str] = frozenset(
+    {"authorization", "x-api-key", "set-cookie", "cookie"}
+)
+
+
+def handle_http_error(
+    response: httpx.Response,
+    *,
+    capture_sensitive_response: bool = False,
+) -> None:
+    """Inspect HTTP response and raise appropriate typed exception on non-2xx status.
+
+    When capture_sensitive_response is False (default), response_body and details
+    are set to None and sensitive headers are stripped to prevent PII and secret leaks
+    into telemetry or APMs.
+    """
     if response.is_success:
         return
 
     status = response.status_code
-    body = response.text
-    headers = dict(response.headers)
+    body = response.text if capture_sensitive_response else None
+    headers = {k: v for k, v in response.headers.items() if k.lower() not in SENSITIVE_HEADER_NAMES}
 
     error_code = None
     details = None
@@ -50,7 +64,8 @@ def handle_http_error(response: httpx.Response) -> None:
         json_data = response.json()
         if isinstance(json_data, dict):
             error_code = json_data.get("error_code") or json_data.get("code")
-            details = json_data.get("details") or json_data.get("detail")
+            if capture_sensitive_response:
+                details = json_data.get("details") or json_data.get("detail")
     except Exception:
         pass
 

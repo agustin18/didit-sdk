@@ -1,3 +1,5 @@
+import pytest
+
 from didit.errors import (
     DiditAPIError,
     DiditAuthenticationError,
@@ -75,7 +77,8 @@ class TestErrors:
         assert err.error_code == "RATE_LIMIT_EXCEEDED"
         assert err.request_id == "req_rl"
 
-    def test_handle_http_error_pii_safe_and_403_separation(self) -> None:
+    @pytest.mark.parametrize("capture_sensitive", [False, True])
+    def test_handle_http_error_pii_safe_and_403_separation(self, capture_sensitive: bool) -> None:
         import httpx
         import pytest
 
@@ -83,14 +86,30 @@ class TestErrors:
         res_403 = httpx.Response(
             403,
             json={"error_code": "KEY_EXPIRED", "detail": "Sensitive PII user data"},
-            headers={"X-Request-Id": "req_secret_403"},
+            headers={
+                "X-Request-Id": "req_secret_403",
+                "Authorization": "Bearer secret_token_123",
+                "x-api-key": "secret_key_456",
+                "Set-Cookie": "session_id=secret_cookie_789",
+                "Content-Type": "application/json",
+            },
             request=httpx.Request("GET", "https://api.didit.me/v1/session/"),
         )
         with pytest.raises(DiditPermissionError) as exc_info:
-            handle_http_error(res_403)
+            handle_http_error(res_403, capture_sensitive_response=capture_sensitive)
         assert "Sensitive PII" not in str(exc_info.value)
         assert "status=403" in str(exc_info.value)
         assert "code=KEY_EXPIRED" in str(exc_info.value)
         assert "request_id=req_secret_403" in str(exc_info.value)
-        assert exc_info.value.response_body is not None
-        assert "Sensitive PII" in exc_info.value.response_body
+
+        # Sensitive headers must always be stripped from exc.headers
+        assert "authorization" not in exc_info.value.headers
+        assert "x-api-key" not in exc_info.value.headers
+        assert "set-cookie" not in exc_info.value.headers
+        assert exc_info.value.headers.get("content-type") == "application/json"
+
+        if capture_sensitive:
+            assert exc_info.value.response_body is not None
+            assert "Sensitive PII" in exc_info.value.response_body
+        else:
+            assert exc_info.value.response_body is None

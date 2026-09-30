@@ -290,6 +290,33 @@ class TestDiditSyncClient:
         assert exc_info.value.status_code == status_code
 
     @respx.mock
+    def test_http_error_capture_sensitive_response_default_and_explicit(
+        self, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/s_leak/").mock(
+            return_value=Response(
+                400,
+                text='{"detail": "Sensitive Biometric Payload"}',
+                headers={"X-Request-Id": "req_leak_123"},
+            )
+        )
+        # Default: capture_sensitive_response=False -> response_body is None
+        client_safe = Didit(api_key="key", base_url=base_url)
+        with pytest.raises(DiditAPIError) as exc_safe:
+            client_safe.sessions.get("s_leak")
+        assert exc_safe.value.response_body is None
+        assert exc_safe.value.status_code == 400
+        assert exc_safe.value.request_id == "req_leak_123"
+        client_safe.close()
+
+        # Explicit: capture_sensitive_response=True -> response_body retained
+        client_sensitive = Didit(api_key="key", base_url=base_url, capture_sensitive_response=True)
+        with pytest.raises(DiditAPIError) as exc_sens:
+            client_sensitive.sessions.get("s_leak")
+        assert exc_sens.value.response_body == '{"detail": "Sensitive Biometric Payload"}'
+        client_sensitive.close()
+
+    @respx.mock
     def test_rate_limit_error_retry_after(self, client: Didit, base_url: str) -> None:
         respx.get(f"{base_url}/session/s_rate/").mock(
             return_value=Response(
