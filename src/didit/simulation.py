@@ -8,7 +8,7 @@ import json
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from didit.errors import (
     DiditAPIError,
@@ -538,7 +538,7 @@ class SimulatedSessionsResource:
         self,
         *,
         status: SessionStatus | str | None = None,
-        session_kind: str | None = "user",
+        session_kind: Literal["user"] = "user",
         vendor_data: str | None = None,
         country: str | None = None,
         workflow_id: str | None = None,
@@ -681,7 +681,8 @@ class SimulatedSessionsResource:
                 limit=current_limit,
                 offset=offset,
             )
-            remote_count = page.count
+            if remote_count is None:
+                remote_count = page.count
 
             if not page.results:
                 if page.next is not None:
@@ -789,7 +790,7 @@ class SimulatedAsyncSessionsResource:
         self,
         *,
         status: SessionStatus | str | None = None,
-        session_kind: str | None = "user",
+        session_kind: Literal["user"] = "user",
         vendor_data: str | None = None,
         country: str | None = None,
         workflow_id: str | None = None,
@@ -932,7 +933,8 @@ class SimulatedAsyncSessionsResource:
                 limit=current_limit,
                 offset=offset,
             )
-            remote_count = page.count
+            if remote_count is None:
+                remote_count = page.count
 
             if not page.results:
                 if page.next is not None:

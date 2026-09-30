@@ -386,7 +386,8 @@ class SessionsResource:
                 offset=offset,
                 options=options,
             )
-            remote_count = page.count
+            if remote_count is None:
+                remote_count = page.count
 
             if not page.results:
                 if page.next is not None:
@@ -785,7 +786,8 @@ class AsyncSessionsResource:
                 offset=offset,
                 options=options,
             )
-            remote_count = page.count
+            if remote_count is None:
+                remote_count = page.count
 
             if not page.results:
                 if page.next is not None:

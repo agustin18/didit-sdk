@@ -1319,41 +1319,72 @@ class TestReservationDispatchHelpers:
     async def test_release_webhook_event_uninspectable_callables(self) -> None:
         from didit.dedup import arelease_webhook_event, release_webhook_event
 
-        # 1. Sync release with 2-arg and 1-arg uninspectable signatures
+        # 1. Sync release with 2-arg (with reserve capability) and 1-arg uninspectable signatures
         class UninspectableSync2Arg:
+            def __init__(self) -> None:
+                self.received_token: str | None = None
+
+            def reserve(self, key: str, token: str, ttl: int = 30) -> bool:
+                return True
+
             def release(self, event_id: str, token: str | None = None) -> bool:
+                self.received_token = token
                 return True
 
             release.__signature__ = "invalid"
 
-        assert release_webhook_event(UninspectableSync2Arg(), "e", token="t") is True
+        sync_store = UninspectableSync2Arg()
+        assert release_webhook_event(sync_store, "e", token="t") is True
+        assert sync_store.received_token == "t"
 
         class UninspectableSync1Arg:
+            def __init__(self) -> None:
+                self.called = False
+
             def release(self, event_id: str) -> bool:
+                self.called = True
                 return True
 
             release.__signature__ = "invalid"
 
-        assert release_webhook_event(UninspectableSync1Arg(), "e", token="t") is True
+        sync_1arg_store = UninspectableSync1Arg()
+        assert release_webhook_event(sync_1arg_store, "e", token="t") is True
+        assert sync_1arg_store.called is True
 
-        # 2. Async arelease with 2-arg and 1-arg uninspectable signatures
+        # 2. Async arelease with 2-arg (with areserve capability) and 1-arg uninspectable signatures
         class UninspectableAsync2Arg:
+            def __init__(self) -> None:
+                self.received_token: str | None = None
+
+            async def areserve(self, key: str, token: str, ttl: int = 30) -> bool:
+                return True
+
             async def arelease(self, event_id: str, token: str | None = None) -> bool:
+                self.received_token = token
                 return True
 
             arelease.__signature__ = "invalid"
 
-        assert await arelease_webhook_event(UninspectableAsync2Arg(), "e", token="t") is True
+        async_store = UninspectableAsync2Arg()
+        assert await arelease_webhook_event(async_store, "e", token="t") is True
+        assert async_store.received_token == "t"
 
         class UninspectableAsync1Arg:
+            def __init__(self) -> None:
+                self.called = False
+
             async def arelease(self, event_id: str) -> bool:
+                self.called = True
                 return True
 
             arelease.__signature__ = "invalid"
 
-        assert await arelease_webhook_event(UninspectableAsync1Arg(), "e", token="t") is True
+        async_1arg_store = UninspectableAsync1Arg()
+        assert await arelease_webhook_event(async_1arg_store, "e", token="t") is True
+        assert async_1arg_store.called is True
 
         # 3. Fallback sync release via arelease_webhook_event
+        # (both legacy 1-arg and reservation 2-arg)
         class UninspectableSyncFallback:
             def release(self, event_id: str) -> bool:
                 return True
@@ -1362,7 +1393,25 @@ class TestReservationDispatchHelpers:
 
         assert await arelease_webhook_event(UninspectableSyncFallback(), "e", token="t") is True
 
+        class UninspectableSyncFallbackWithToken:
+            def __init__(self) -> None:
+                self.received_token: str | None = None
+
+            def reserve(self, key: str, token: str, ttl: int = 30) -> bool:
+                return True
+
+            def release(self, event_id: str, token: str | None = None) -> bool:
+                self.received_token = token
+                return True
+
+            release.__signature__ = "invalid"
+
+        fallback_sync_tok = UninspectableSyncFallbackWithToken()
+        assert await arelease_webhook_event(fallback_sync_tok, "e", token="t") is True
+        assert fallback_sync_tok.received_token == "t"
+
         # 4. Fallback coroutine release via arelease_webhook_event
+        # (both legacy 1-arg and reservation 2-arg)
         class UninspectableCoroFallback:
             async def release(self, event_id: str) -> bool:
                 return True
@@ -1370,3 +1419,111 @@ class TestReservationDispatchHelpers:
             release.__signature__ = "invalid"
 
         assert await arelease_webhook_event(UninspectableCoroFallback(), "e", token="t") is True
+
+        class UninspectableCoroFallbackWithToken:
+            def __init__(self) -> None:
+                self.received_token: str | None = None
+
+            async def areserve(self, key: str, token: str, ttl: int = 30) -> bool:
+                return True
+
+            async def release(self, event_id: str, token: str | None = None) -> bool:
+                self.received_token = token
+                return True
+
+            release.__signature__ = "invalid"
+
+        fallback_coro_tok = UninspectableCoroFallbackWithToken()
+        assert await arelease_webhook_event(fallback_coro_tok, "e", token="t") is True
+        assert fallback_coro_tok.received_token == "t"
+
+    def test_release_internal_typeerror_is_not_retried_without_token(self) -> None:
+        from didit.dedup import release_webhook_event
+
+        class CustomStore:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.blind_delete = False
+
+            def release(self, event_id: str, token: str | None = None) -> bool:
+                self.calls += 1
+                if token is not None:
+                    raise TypeError("internal store failure")
+                self.blind_delete = True
+                return True
+
+        store = CustomStore()
+        with pytest.raises(TypeError, match="internal store failure"):
+            release_webhook_event(store, "event-1", token="tok-123")
+
+        assert store.calls == 1
+        assert store.blind_delete is False
+
+    @pytest.mark.asyncio
+    async def test_arelease_internal_typeerror_is_not_retried_without_token(self) -> None:
+        from didit.dedup import arelease_webhook_event
+
+        class CustomAsyncStore:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.blind_delete = False
+
+            async def arelease(self, event_id: str, token: str | None = None) -> bool:
+                self.calls += 1
+                if token is not None:
+                    raise TypeError("internal async store failure")
+                self.blind_delete = True
+                return True
+
+        store = CustomAsyncStore()
+        with pytest.raises(TypeError, match="internal async store failure"):
+            await arelease_webhook_event(store, "event-1", token="tok-123")
+
+        assert store.calls == 1
+        assert store.blind_delete is False
+
+    @pytest.mark.asyncio
+    async def test_arelease_coro_fallback_internal_typeerror_is_not_retried(self) -> None:
+        from didit.dedup import arelease_webhook_event
+
+        class CustomCoroStore:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.blind_delete = False
+
+            async def release(self, event_id: str, token: str | None = None) -> bool:
+                self.calls += 1
+                if token is not None:
+                    raise TypeError("internal coro store failure")
+                self.blind_delete = True
+                return True
+
+        store = CustomCoroStore()
+        with pytest.raises(TypeError, match="internal coro store failure"):
+            await arelease_webhook_event(store, "event-1", token="tok-123")
+
+        assert store.calls == 1
+        assert store.blind_delete is False
+
+    @pytest.mark.asyncio
+    async def test_arelease_sync_thread_fallback_internal_typeerror_is_not_retried(self) -> None:
+        from didit.dedup import arelease_webhook_event
+
+        class CustomSyncFallbackStore:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.blind_delete = False
+
+            def release(self, event_id: str, token: str | None = None) -> bool:
+                self.calls += 1
+                if token is not None:
+                    raise TypeError("internal thread store failure")
+                self.blind_delete = True
+                return True
+
+        store = CustomSyncFallbackStore()
+        with pytest.raises(TypeError, match="internal thread store failure"):
+            await arelease_webhook_event(store, "event-1", token="tok-123")
+
+        assert store.calls == 1
+        assert store.blind_delete is False
