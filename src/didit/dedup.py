@@ -923,6 +923,16 @@ async def acomplete_webhook_event(
     return True
 
 
+def _callable_takes_token(fn: Any, token: str | None) -> bool:
+    if token is None:
+        return False
+    try:
+        sig = inspect.signature(fn)
+        return len(sig.parameters) >= 2
+    except (ValueError, TypeError):
+        return True
+
+
 def release_webhook_event(
     store: Any,
     event_id: str,
@@ -939,11 +949,13 @@ def release_webhook_event(
         and callable(release_fn)
         and not inspect.iscoroutinefunction(release_fn)
     ):
-        sig = inspect.signature(release_fn)
-        if len(sig.parameters) >= 2 and token is not None:
-            res = release_fn(event_id, token)
-            return bool(res) if res is not None else True
-        res = release_fn(event_id)
+        if _callable_takes_token(release_fn, token):
+            try:
+                res = release_fn(event_id, token)
+            except TypeError:
+                res = release_fn(event_id)
+        else:
+            res = release_fn(event_id)
         return bool(res) if res is not None else True
     return True
 
@@ -959,9 +971,11 @@ async def arelease_webhook_event(
         bool: True if released or not a reservation store, False if CAS release failed.
     """
     if hasattr(store, "arelease") and callable(store.arelease):
-        sig = inspect.signature(store.arelease)
-        if len(sig.parameters) >= 2 and token is not None:
-            res = await store.arelease(event_id, token)
+        if _callable_takes_token(store.arelease, token):
+            try:
+                res = await store.arelease(event_id, token)
+            except TypeError:
+                res = await store.arelease(event_id)
         else:
             res = await store.arelease(event_id)
         return bool(res) if res is not None else True
@@ -970,17 +984,22 @@ async def arelease_webhook_event(
     if release_fn is None or not callable(release_fn):
         return True
 
-    sig = inspect.signature(release_fn)
-    takes_token = len(sig.parameters) >= 2 and token is not None
+    takes_token = _callable_takes_token(release_fn, token)
 
     if inspect.iscoroutinefunction(release_fn):
         if takes_token:
-            res = await release_fn(event_id, token)
+            try:
+                res = await release_fn(event_id, token)
+            except TypeError:
+                res = await release_fn(event_id)
         else:
             res = await release_fn(event_id)
     else:
         if takes_token:
-            res = await asyncio.to_thread(release_fn, event_id, token)
+            try:
+                res = await asyncio.to_thread(release_fn, event_id, token)
+            except TypeError:
+                res = await asyncio.to_thread(release_fn, event_id)
         else:
             res = await asyncio.to_thread(release_fn, event_id)
     return bool(res) if res is not None else True

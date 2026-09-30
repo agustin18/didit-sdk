@@ -1314,3 +1314,59 @@ class TestReservationDispatchHelpers:
                 return True
 
         assert await aclaim_webhook_event(SyncClaimBranchStore(), "k") is True
+
+    @pytest.mark.asyncio
+    async def test_release_webhook_event_uninspectable_callables(self) -> None:
+        from didit.dedup import arelease_webhook_event, release_webhook_event
+
+        # 1. Sync release with 2-arg and 1-arg uninspectable signatures
+        class UninspectableSync2Arg:
+            def release(self, event_id: str, token: str | None = None) -> bool:
+                return True
+
+            release.__signature__ = "invalid"
+
+        assert release_webhook_event(UninspectableSync2Arg(), "e", token="t") is True
+
+        class UninspectableSync1Arg:
+            def release(self, event_id: str) -> bool:
+                return True
+
+            release.__signature__ = "invalid"
+
+        assert release_webhook_event(UninspectableSync1Arg(), "e", token="t") is True
+
+        # 2. Async arelease with 2-arg and 1-arg uninspectable signatures
+        class UninspectableAsync2Arg:
+            async def arelease(self, event_id: str, token: str | None = None) -> bool:
+                return True
+
+            arelease.__signature__ = "invalid"
+
+        assert await arelease_webhook_event(UninspectableAsync2Arg(), "e", token="t") is True
+
+        class UninspectableAsync1Arg:
+            async def arelease(self, event_id: str) -> bool:
+                return True
+
+            arelease.__signature__ = "invalid"
+
+        assert await arelease_webhook_event(UninspectableAsync1Arg(), "e", token="t") is True
+
+        # 3. Fallback sync release via arelease_webhook_event
+        class UninspectableSyncFallback:
+            def release(self, event_id: str) -> bool:
+                return True
+
+            release.__signature__ = "invalid"
+
+        assert await arelease_webhook_event(UninspectableSyncFallback(), "e", token="t") is True
+
+        # 4. Fallback coroutine release via arelease_webhook_event
+        class UninspectableCoroFallback:
+            async def release(self, event_id: str) -> bool:
+                return True
+
+            release.__signature__ = "invalid"
+
+        assert await arelease_webhook_event(UninspectableCoroFallback(), "e", token="t") is True
