@@ -120,15 +120,16 @@ Didit dispatches signed HTTP POST events upon verification completion. `didit-sd
 ### FastAPI
 
 ```python
-from fastapi import FastAPI
+from fastapi import FastAPI, APIRouter
 from didit import WebhookPayload, SessionStatus, RedisWebhookReservationStore
-from didit.integrations.fastapi import didit_webhook
+from didit.integrations.fastapi import didit_webhook, DiditWebhookRoute
 
 app = FastAPI()
 store = RedisWebhookReservationStore.from_url("redis://localhost:6379/0")
+router = APIRouter(route_class=DiditWebhookRoute)
 
 
-@app.post("/webhooks/didit")
+@router.post("/webhooks/didit")
 @didit_webhook(
     secret="whsec_...",
     dedup_store=store,
@@ -148,6 +149,9 @@ async def handle_webhook(payload: WebhookPayload):
             await mark_user_verified(payload.session_id)
 
     return {"status": "ok"}
+
+
+app.include_router(router)
 ```
 
 Alternatively, use `DiditWebhookGuard` as a FastAPI `Depends(...)` dependency. When using `DiditWebhookGuard` with a reservation store, the application is responsible for explicitly completing or releasing the reservation, or configuring `route_class=DiditWebhookRoute` on your router for automated lifecycle management:

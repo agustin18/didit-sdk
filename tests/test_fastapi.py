@@ -3,11 +3,12 @@ import time
 from typing import Any
 
 import pytest
-from fastapi import Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 
 from didit.integrations.fastapi import (
     DiditWebhookGuard,
+    DiditWebhookRoute,
     didit_webhook,
     didit_webhook_view,
 )
@@ -623,11 +624,14 @@ class TestFastAPIRouteDecoratorLifecycle:
         mock_store.areserve.return_value = ReservationAttempt(state=ReservationState.ACQUIRED)
 
         app_ttl = FastAPI()
+        router_ttl = APIRouter(route_class=DiditWebhookRoute)
 
-        @app_ttl.post("/res-ttl")
+        @router_ttl.post("/res-ttl")
         @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=mock_store)
         async def endpoint(payload: WebhookPayload, request: Request) -> dict[str, str]:
             return {"status": "ok"}
+
+        app_ttl.include_router(router_ttl)
 
         client = TestClient(app_ttl)
         data = {
@@ -649,12 +653,15 @@ class TestFastAPIRouteDecoratorLifecycle:
 
         store = InMemoryWebhookReservationStore()
         app_ac = FastAPI()
+        router_ac = APIRouter(route_class=DiditWebhookRoute)
 
-        @app_ac.post("/res-auto-complete")
+        @router_ac.post("/res-auto-complete")
         @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store, duplicate_action="respond_ok")
         async def endpoint(payload: WebhookPayload, request: Request) -> dict[str, str]:
             # Handler does NOT call complete_reservation manually!
             return {"status": "ok"}
+
+        app_ac.include_router(router_ac)
 
         client = TestClient(app_ac)
         data = {
@@ -682,14 +689,17 @@ class TestFastAPIRouteDecoratorLifecycle:
 
         store = InMemoryWebhookReservationStore()
         app_ar = FastAPI()
+        router_ar = APIRouter(route_class=DiditWebhookRoute)
         should_crash = True
 
-        @app_ar.post("/res-auto-release")
+        @router_ar.post("/res-auto-release")
         @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
         async def endpoint(payload: WebhookPayload, request: Request) -> dict[str, str]:
             if should_crash:
                 raise ValueError("Database failure")
             return {"status": "ok"}
+
+        app_ar.include_router(router_ar)
 
         client = TestClient(app_ar, raise_server_exceptions=False)
         data = {
@@ -719,14 +729,17 @@ class TestFastAPIRouteDecoratorLifecycle:
 
         store = InMemoryWebhookReservationStore()
         app_404 = FastAPI()
+        router_404 = APIRouter(route_class=DiditWebhookRoute)
         return_404 = True
 
-        @app_404.post("/res-404")
+        @router_404.post("/res-404")
         @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
         async def endpoint(payload: WebhookPayload, request: Request) -> Any:
             if return_404:
                 return StarletteResponse(content="not found", status_code=404)
             return {"status": "recovered"}
+
+        app_404.include_router(router_404)
 
         client = TestClient(app_404)
         data = {
@@ -755,8 +768,9 @@ class TestFastAPIRouteDecoratorLifecycle:
         store = InMemoryWebhookReservationStore()
         store.reserve("evt_fastapi_conflict", token="other_worker", ttl_seconds=60)
         app_conf = FastAPI()
+        router_conf = APIRouter(route_class=DiditWebhookRoute)
 
-        @app_conf.post("/res-conflict")
+        @router_conf.post("/res-conflict")
         @didit_webhook(
             secret=WEBHOOK_SECRET,
             dedup_store=store,
@@ -764,6 +778,8 @@ class TestFastAPIRouteDecoratorLifecycle:
         )
         async def endpoint(payload: WebhookPayload, request: Request) -> dict[str, str]:
             return {"status": "ok"}
+
+        app_conf.include_router(router_conf)
 
         client = TestClient(app_conf)
         data = {
@@ -865,9 +881,10 @@ class TestFastAPIRouteDecoratorLifecycle:
 
         store = InMemoryWebhookReservationStore()
         app_tp = FastAPI()
+        router_tp = APIRouter(route_class=DiditWebhookRoute)
         recorded_threads: dict[str, int] = {}
 
-        @app_tp.post("/sync-tp")
+        @router_tp.post("/sync-tp")
         @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
         def sync_view(payload: WebhookPayload, request: Request) -> dict[str, str]:
             recorded_threads["handler"] = threading.get_ident()
@@ -877,6 +894,8 @@ class TestFastAPIRouteDecoratorLifecycle:
         async def async_view(request: Request) -> dict[str, str]:
             recorded_threads["loop"] = threading.get_ident()
             return {"status": "ok"}
+
+        app_tp.include_router(router_tp)
 
         client = TestClient(app_tp)
         client.post("/async-tp")
@@ -903,11 +922,14 @@ class TestFastAPIRouteDecoratorLifecycle:
 
         store = InMemoryWebhookReservationStore()
         app_404 = FastAPI()
+        router_404 = APIRouter(route_class=DiditWebhookRoute)
 
-        @app_404.post("/webhook-route-404", status_code=404)
+        @router_404.post("/webhook-route-404", status_code=404)
         @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
         def route_404_view(payload: WebhookPayload, request: Request) -> dict[str, str]:
             return {"detail": "resource not found"}
+
+        app_404.include_router(router_404)
 
         client = TestClient(app_404)
         data = {
@@ -937,12 +959,15 @@ class TestFastAPIRouteDecoratorLifecycle:
 
         store = InMemoryWebhookReservationStore()
         app_model = FastAPI()
+        router_model = APIRouter(route_class=DiditWebhookRoute)
 
-        @app_model.post("/webhook-model-fail", response_model=StrictResponse)
+        @router_model.post("/webhook-model-fail", response_model=StrictResponse)
         @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
         def model_fail_view(payload: WebhookPayload, request: Request) -> dict[str, str]:
             # Invalid output schema triggers ResponseValidationError -> HTTP 500
             return {"unrelated_field": "invalid_shape"}
+
+        app_model.include_router(router_model)
 
         client = TestClient(app_model, raise_server_exceptions=False)
         data = {
@@ -969,14 +994,17 @@ class TestFastAPIRouteDecoratorLifecycle:
 
         store = InMemoryWebhookReservationStore()
         app_resp = FastAPI()
+        router_resp = APIRouter(route_class=DiditWebhookRoute)
 
-        @app_resp.post("/webhook-resp-status")
+        @router_resp.post("/webhook-resp-status")
         @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
         def resp_status_view(
             payload: WebhookPayload, request: Request, response: Response
         ) -> dict[str, str]:
             response.status_code = 404
             return {"error": "custom not found"}
+
+        app_resp.include_router(router_resp)
 
         client = TestClient(app_resp)
         data = {
@@ -1005,8 +1033,9 @@ class TestFastAPIRouteDecoratorLifecycle:
 
         store = InMemoryWebhookReservationStore()
         app_nan = FastAPI()
+        router_nan = APIRouter(route_class=DiditWebhookRoute)
 
-        @app_nan.post("/webhook-nan")
+        @router_nan.post("/webhook-nan")
         @didit_webhook(
             secret=WEBHOOK_SECRET,
             dedup_store=store,
@@ -1014,6 +1043,8 @@ class TestFastAPIRouteDecoratorLifecycle:
         )
         async def webhook_nan(payload: WebhookPayload):
             return {"value": float("nan")}
+
+        app_nan.include_router(router_nan)
 
         client = TestClient(app_nan, raise_server_exceptions=False)
         data = {
@@ -1361,6 +1392,63 @@ class TestDiditWebhookRoute:
         scope = {"type": "websocket", "method": "GET"}
         await route.handle(scope, AsyncMock(), AsyncMock())
         assert route.app.called
+
+    def test_fastapi_reservation_store_without_didit_webhook_route_raises_configuration_error(
+        self,
+    ) -> None:
+        from didit.dedup import InMemoryWebhookReservationStore
+        from didit.errors import DiditConfigurationError
+
+        store = InMemoryWebhookReservationStore()
+        app_plain = FastAPI()
+
+        @app_plain.post("/plain-route")
+        @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
+        async def endpoint(payload: WebhookPayload, request: Request) -> dict[str, str]:
+            return {"status": "ok"}
+
+        client = TestClient(app_plain, raise_server_exceptions=True)
+        data = {
+            "event_id": "evt_plain_err",
+            "session_id": "sess_plain",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        with pytest.raises(
+            DiditConfigurationError,
+            match="Tokenized reservation auto-lifecycle on FastAPI requires DiditWebhookRoute",
+        ):
+            client.post("/plain-route", content=raw_body, headers=headers)
+
+    def test_didit_webhook_route_non_claimed_streaming_passthrough(self) -> None:
+        from collections.abc import AsyncIterator
+
+        from fastapi import APIRouter
+        from starlette.responses import StreamingResponse
+
+        from didit.integrations.fastapi import DiditWebhookRoute
+
+        router = APIRouter(route_class=DiditWebhookRoute)
+
+        async def stream_gen() -> AsyncIterator[bytes]:
+            yield b"stream_part1"
+            yield b"_part2"
+
+        @router.get("/stream-endpoint")
+        async def stream_view() -> StreamingResponse:
+            return StreamingResponse(stream_gen(), media_type="text/plain")
+
+        app_st = FastAPI()
+        app_st.include_router(router)
+
+        client = TestClient(app_st)
+        resp = client.get("/stream-endpoint")
+        assert resp.status_code == 200
+        assert resp.text == "stream_part1_part2"
 
 
 class TestIntegrationsLazyLoading:

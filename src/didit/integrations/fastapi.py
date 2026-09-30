@@ -283,19 +283,27 @@ async def complete_didit_reservation(request: Request, completed_ttl: int = 8640
 class _ResponseCapture:
     """ASGI Send capture buffer to inspect HTTP status code before committing reservation."""
 
-    def __init__(self, send: Send) -> None:
+    def __init__(self, send: Send, request: Request) -> None:
         self.send = send
+        self.request = request
+        self.pass_through = False
         self.status_code: int = 500
         self.messages: list[Message] = []
 
     async def capture_send(self, message: Message) -> None:
         if message["type"] == "http.response.start":
             self.status_code = message.get("status", 500)
-        self.messages.append(message)
+            if not getattr(self.request.state, "didit_claimed", False):
+                self.pass_through = True
+        if self.pass_through:
+            await self.send(message)
+        else:
+            self.messages.append(message)
 
     async def flush(self) -> None:
-        for msg in self.messages:
-            await self.send(msg)
+        if not self.pass_through:
+            for msg in self.messages:
+                await self.send(msg)
 
 
 try:
@@ -326,15 +334,14 @@ class DiditWebhookRoute(APIRoute):
             await super().handle(scope, receive, send)
             return
 
-        capture = _ResponseCapture(send)
+        request = Request(scope, receive=receive)
+        capture = _ResponseCapture(send, request)
         try:
             await super().handle(scope, receive, capture.capture_send)
         except Exception:
-            request = Request(scope, receive=receive)
             await release_didit_claim(request)
             raise
 
-        request = Request(scope, receive=receive)
         if 200 <= capture.status_code < 300:
             await complete_didit_reservation(request)
         else:
@@ -430,6 +437,23 @@ def didit_webhook(
             if request is None:
                 raise DiditConfigurationError(
                     "FastAPI request object not found in endpoint arguments."
+                )
+
+            route = (
+                request.scope.get("route") if hasattr(request, "scope") and request.scope else None
+            )
+
+            is_reservation_store = dedup_store is not None and (
+                isinstance(dedup_store, (WebhookReservationStore, AsyncWebhookReservationStore))
+                or hasattr(dedup_store, "reserve")
+                or hasattr(dedup_store, "areserve")
+            )
+
+            if is_reservation_store and not isinstance(route, DiditWebhookRoute):
+                raise DiditConfigurationError(
+                    "Tokenized reservation auto-lifecycle on FastAPI requires DiditWebhookRoute. "
+                    "Mount your webhook endpoint on an APIRouter configured with "
+                    "'route_class=DiditWebhookRoute'."
                 )
 
             content_length = request.headers.get("content-length")
