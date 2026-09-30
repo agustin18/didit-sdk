@@ -9,6 +9,7 @@ from didit.dedup import (
     AsyncWebhookDedupStore,
     WebhookDedupStore,
     aclaim_webhook_event,
+    arelease_webhook_event,
     compute_dedup_key,
 )
 from didit.errors import DiditConfigurationError, DiditSignatureError
@@ -136,6 +137,9 @@ class DiditWebhookGuard:
             is_new = await aclaim_webhook_event(
                 self.dedup_store, dedup_key, ttl_seconds=self.dedup_ttl_seconds
             )
+            request.state.didit_dedup_key = dedup_key
+            request.state.didit_dedup_store = self.dedup_store
+            request.state.didit_claimed = is_new
 
             if not is_new:
                 if self.duplicate_action == "respond_ok":
@@ -153,3 +157,22 @@ class DiditWebhookGuard:
                 request.state.is_duplicate = True
 
         return payload
+
+    async def release_claim(self, request: Request) -> None:
+        """Release dedup claim associated with this request if processing failed."""
+        if self.dedup_store is not None:
+            key = getattr(request.state, "didit_dedup_key", None)
+            claimed = getattr(request.state, "didit_claimed", False)
+            if key and claimed:
+                await arelease_webhook_event(self.dedup_store, key)
+                request.state.didit_claimed = False
+
+
+async def release_didit_claim(request: Request) -> None:
+    """Helper to release dedup claim recorded on request.state if processing failed."""
+    store = getattr(request.state, "didit_dedup_store", None)
+    key = getattr(request.state, "didit_dedup_key", None)
+    claimed = getattr(request.state, "didit_claimed", False)
+    if store and key and claimed:
+        await arelease_webhook_event(store, key)
+        request.state.didit_claimed = False

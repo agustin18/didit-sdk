@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import functools
 import inspect
 import os
@@ -23,7 +22,9 @@ from didit.dedup import (
     AsyncWebhookDedupStore,
     WebhookDedupStore,
     aclaim_webhook_event,
+    arelease_webhook_event,
     compute_dedup_key,
+    release_webhook_event,
 )
 from didit.errors import DiditConfigurationError, DiditSignatureError
 from didit.models.webhook import WebhookPayload
@@ -76,11 +77,21 @@ def parse_flask_webhook(
     if content_length is not None and content_length > max_body_bytes:
         raise ValueError(f"Webhook payload exceeds maximum size limit of {max_body_bytes} bytes")
 
-    with contextlib.suppress(Exception):
-        req.max_content_length = max_body_bytes
+    req.max_content_length = max_body_bytes
 
     try:
         raw_body = req.get_data(cache=False, as_text=False)
+        if len(raw_body) > max_body_bytes:
+            raise ValueError(
+                f"Webhook payload exceeds maximum size limit of {max_body_bytes} bytes"
+            )
+        if len(raw_body) == max_body_bytes:
+            stream_obj = getattr(req, "stream", None)
+            underlying = getattr(stream_obj, "_stream", None) or stream_obj
+            if underlying is not None and hasattr(underlying, "read") and underlying.read(1):
+                raise ValueError(
+                    f"Webhook payload exceeds maximum size limit of {max_body_bytes} bytes"
+                )
     except Exception as exc:
         if exc.__class__.__name__ == "RequestEntityTooLarge" or getattr(exc, "code", None) == 413:
             raise ValueError(
@@ -88,15 +99,21 @@ def parse_flask_webhook(
             ) from exc
         raise
 
-    if len(raw_body) > max_body_bytes:
-        raise ValueError(f"Webhook payload exceeds maximum size limit of {max_body_bytes} bytes")
-
     return parse_webhook_payload(
         raw_body,
         dict(req.headers),
         resolved_secret,
         max_age_seconds=max_age_seconds,
     )
+
+
+def _is_server_error(res: Any) -> bool:
+    """Determine if a Flask view result represents an HTTP 5xx error."""
+    if isinstance(res, tuple) and len(res) >= 2 and isinstance(res[1], int):
+        return res[1] >= 500
+    if hasattr(res, "status_code") and isinstance(res.status_code, int):
+        return res.status_code >= 500
+    return False
 
 
 def didit_webhook(
@@ -185,6 +202,8 @@ def didit_webhook(
 
                 g.didit_payload = payload
 
+                is_new = False
+                dedup_key = ""
                 if dedup_store is not None:
                     if dedup_key_builder is not None:
                         dedup_key = dedup_key_builder(payload, request)
@@ -213,11 +232,19 @@ def didit_webhook(
                             )
                         payload.is_duplicate = True
 
-                sig_params = inspect.signature(view_func).parameters
-                if "payload" in sig_params or len(sig_params) > len(args):
-                    result = await view_func(payload, *args, **kwargs)
-                else:
-                    result = await view_func(*args, **kwargs)
+                try:
+                    sig_params = inspect.signature(view_func).parameters
+                    if "payload" in sig_params or len(sig_params) > len(args):
+                        result = await view_func(payload, *args, **kwargs)
+                    else:
+                        result = await view_func(*args, **kwargs)
+                except Exception:
+                    if dedup_store is not None and is_new:
+                        await arelease_webhook_event(dedup_store, dedup_key)
+                    raise
+
+                if dedup_store is not None and is_new and _is_server_error(result):
+                    await arelease_webhook_event(dedup_store, dedup_key)
 
                 if result is None:
                     return Response(status=200)
@@ -257,6 +284,8 @@ def didit_webhook(
 
             g.didit_payload = payload
 
+            is_new = False
+            dedup_key = ""
             if dedup_store is not None:
                 if dedup_key_builder is not None:
                     dedup_key = dedup_key_builder(payload, request)
@@ -296,11 +325,19 @@ def didit_webhook(
                         )
                     payload.is_duplicate = True
 
-            sig_params = inspect.signature(view_func).parameters
-            if "payload" in sig_params or len(sig_params) > len(args):
-                result = view_func(payload, *args, **kwargs)
-            else:
-                result = view_func(*args, **kwargs)
+            try:
+                sig_params = inspect.signature(view_func).parameters
+                if "payload" in sig_params or len(sig_params) > len(args):
+                    result = view_func(payload, *args, **kwargs)
+                else:
+                    result = view_func(*args, **kwargs)
+            except Exception:
+                if dedup_store is not None and is_new:
+                    release_webhook_event(dedup_store, dedup_key)
+                raise
+
+            if dedup_store is not None and is_new and _is_server_error(result):
+                release_webhook_event(dedup_store, dedup_key)
 
             if result is None:
                 return Response(status=200)

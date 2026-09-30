@@ -117,7 +117,7 @@ class _SimulatedStorage:
             session.status = SessionStatus.DECLINED
             decision.status = SessionStatus.DECLINED
             warn = VerificationWarning(
-                code="UNRECOGNIZED_DOCUMENT",
+                code="COULD_NOT_RECOGNIZE_DOCUMENT",
                 message="Document could not be recognized",
                 severity="high",
             )
@@ -127,7 +127,7 @@ class _SimulatedStorage:
             session.status = SessionStatus.DECLINED
             decision.status = SessionStatus.DECLINED
             warn = VerificationWarning(
-                code="MRZ_CHECKSUM_FAILED",
+                code="MRZ_VALIDATION_FAILED",
                 message="MRZ checksum validation failed",
                 severity="high",
             )
@@ -162,7 +162,7 @@ class _SimulatedStorage:
             session.status = SessionStatus.DECLINED
             decision.status = SessionStatus.DECLINED
             warn = VerificationWarning(
-                code="SPOOF_DETECTED",
+                code="LIVENESS_FACE_ATTACK",
                 message="Liveness spoof presentation attack detected",
                 severity="critical",
             )
@@ -194,7 +194,7 @@ class _SimulatedStorage:
             session.status = SessionStatus.DECLINED
             decision.status = SessionStatus.DECLINED
             warn = VerificationWarning(
-                code="IP_RISK_HIGH",
+                code="IP_ADDRESS_IN_BLOCKLIST",
                 message="Client IP address flagged on security blocklist",
                 severity="high",
             )

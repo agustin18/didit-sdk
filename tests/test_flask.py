@@ -257,6 +257,79 @@ class TestFlaskWebhookIntegration:
         assert res.status_code == 200
         assert store.claim("flask:ses_flask_123", ttl_seconds=60) is False
 
+    def test_dedup_release_on_handler_exception(self) -> None:
+        app = Flask(__name__)
+        app.testing = True
+        store = InMemoryWebhookDedupStore()
+        call_count = 0
+
+        @app.route("/webhook", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=store, duplicate_action="respond_ok")
+        def handle(payload: WebhookPayload):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("Database connection lost")
+            return "success", 200
+
+        with pytest.raises(RuntimeError, match="Database connection lost"):
+            create_signed_flask_client(app, "/webhook", SAMPLE_PAYLOAD)
+
+        res = create_signed_flask_client(app, "/webhook", SAMPLE_PAYLOAD)
+        assert res.status_code == 200
+        assert res.data == b"success"
+        assert call_count == 2
+
+    def test_dedup_release_on_handler_server_error_response(self) -> None:
+        app = Flask(__name__)
+        store = InMemoryWebhookDedupStore()
+        call_count = 0
+
+        @app.route("/webhook", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=store, duplicate_action="respond_ok")
+        def handle(payload: WebhookPayload):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return "temporary failure", 503
+            return "success", 200
+
+        res1 = create_signed_flask_client(app, "/webhook", SAMPLE_PAYLOAD)
+        assert res1.status_code == 503
+
+        res2 = create_signed_flask_client(app, "/webhook", SAMPLE_PAYLOAD)
+        assert res2.status_code == 200
+        assert res2.data == b"success"
+        assert call_count == 2
+
+    def test_async_dedup_release_on_exception_and_error(self) -> None:
+        app = Flask(__name__)
+        app.testing = True
+        store = InMemoryWebhookDedupStore()
+        call_count = 0
+
+        @app.route("/webhook", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=store, duplicate_action="respond_ok")
+        async def handle(payload: WebhookPayload):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ValueError("Async processing failed")
+            if call_count == 2:
+                return Response("Internal error", status=500)
+            return "async success", 200
+
+        with pytest.raises(ValueError, match="Async processing failed"):
+            create_signed_flask_client(app, "/webhook", SAMPLE_PAYLOAD)
+
+        res1 = create_signed_flask_client(app, "/webhook", SAMPLE_PAYLOAD)
+        assert res1.status_code == 500
+
+        res2 = create_signed_flask_client(app, "/webhook", SAMPLE_PAYLOAD)
+        assert res2.status_code == 200
+        assert res2.data == b"async success"
+        assert call_count == 3
+
 
 class TestParseFlaskWebhook:
     def test_successful_parsing_within_request_context(self) -> None:
@@ -343,21 +416,60 @@ class TestParseFlaskWebhook:
         payload = parse_flask_webhook(request_obj=mock_req, secret=SECRET)
         assert payload.session_id == "ses_flask_123"
 
-    def test_flask_max_content_length_setter_exception(self) -> None:
-        class ReqWithFailingSetter:
-            headers = {}
+    def test_flask_bounded_stream_without_content_length(self) -> None:
+        import io
 
-            def __setattr__(self, name: str, val: Any) -> None:
-                if name == "max_content_length":
-                    raise AttributeError("Cannot set")
-                super().__setattr__(name, val)
+        from werkzeug.test import EnvironBuilder
 
-            def get_data(self, **kwargs: Any) -> bytes:
-                return b'{"ok": true}'
+        app = Flask(__name__)
 
-        req = ReqWithFailingSetter()
+        @app.route("/webhook", methods=["POST"])
+        @didit_webhook(secret=SECRET, max_body_bytes=50)
+        def handle(payload: WebhookPayload):
+            return "ok"
+
+        client = app.test_client()
+        stream = io.BytesIO(b'{"session_id": "ses_stream", "padding": "' + b"x" * 100 + b'"}')
+        b = EnvironBuilder(
+            path="/webhook", method="POST", input_stream=stream, content_type="application/json"
+        )
+        env = b.get_environ()
+        env.pop("CONTENT_LENGTH", None)
+        env["wsgi.input_terminated"] = True
+
+        res = client.open(environ_overrides=env)
+        assert res.status_code == 413
+        assert b"exceeds maximum size limit" in res.data
+
+    def test_flask_bounded_stream_exact_limit_accepted(self) -> None:
+        import io
+
+        from werkzeug.test import EnvironBuilder
+
+        app = Flask(__name__)
+        exact_body = b'{"a": 1}'
+
+        stream = io.BytesIO(exact_body)
+        b = EnvironBuilder(
+            path="/webhook", method="POST", input_stream=stream, content_type="application/json"
+        )
+        env = b.get_environ()
+        env.pop("CONTENT_LENGTH", None)
+        env["wsgi.input_terminated"] = True
+
+        with app.test_request_context(environ_overrides=env), pytest.raises(DiditSignatureError):
+            parse_flask_webhook(secret=SECRET, max_body_bytes=len(exact_body))
+
+    def test_flask_exact_limit_no_stream_obj(self) -> None:
+        from unittest.mock import MagicMock
+
+        mock_req = MagicMock()
+        mock_req.content_length = None
+        mock_req.stream = None
+        mock_req.headers = {}
+        mock_req.get_data.return_value = b"12345"
         with pytest.raises(DiditSignatureError):
-            parse_flask_webhook(request_obj=req, secret="sec", max_body_bytes=100)
+            parse_flask_webhook(request_obj=mock_req, secret=SECRET, max_body_bytes=5)
 
     def test_flask_get_data_entity_too_large_exception(self) -> None:
         from unittest.mock import MagicMock

@@ -385,12 +385,83 @@ class TestFastAPIWebhookGuard:
         assert resp2.status_code == 200
         assert resp2.json()["detail"] == "Duplicate webhook event acknowledged"
 
+    def test_guard_release_claim_allows_retry(self) -> None:
+        from starlette.requests import Request
+        from starlette.responses import Response
+
+        from didit.dedup import InMemoryWebhookDedupStore
+        from didit.integrations.fastapi import release_didit_claim
+
+        store = InMemoryWebhookDedupStore()
+        guard = DiditWebhookGuard(
+            secret=WEBHOOK_SECRET,
+            dedup_store=store,
+            duplicate_action="respond_ok",
+        )
+        app = FastAPI()
+        call_count = 0
+
+        @app.post("/test-claim-release")
+        async def endpoint(request: Request, payload: WebhookPayload = Depends(guard)) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                await guard.release_claim(request)
+                return Response("Failed first time", status_code=500)
+            if call_count == 2:
+                await release_didit_claim(request)
+                return Response("Failed second time", status_code=500)
+            return {"status": "ok"}
+
+        test_client = TestClient(app)
+        data = {
+            "event_id": "evt_fastapi_release",
+            "session_id": "sess_rel",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp1 = test_client.post("/test-claim-release", content=raw_body, headers=headers)
+        assert resp1.status_code == 500
+
+        resp2 = test_client.post("/test-claim-release", content=raw_body, headers=headers)
+        assert resp2.status_code == 500
+
+        resp3 = test_client.post("/test-claim-release", content=raw_body, headers=headers)
+        assert resp3.status_code == 200
+        assert resp3.json() == {"status": "ok"}
+        assert call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_guard_release_claim_no_op_branches(self) -> None:
+        from starlette.requests import Request
+
+        from didit.dedup import InMemoryWebhookDedupStore
+        from didit.integrations.fastapi import release_didit_claim
+
+        # Guard without dedup_store
+        guard_none = DiditWebhookGuard(secret=WEBHOOK_SECRET, dedup_store=None)
+        req = Request({"type": "http"})
+        await guard_none.release_claim(req)
+
+        # Guard with dedup_store but request without claim
+        store = InMemoryWebhookDedupStore()
+        guard_with_store = DiditWebhookGuard(secret=WEBHOOK_SECRET, dedup_store=store)
+        await guard_with_store.release_claim(req)
+
+        # release_didit_claim on uninitialized request
+        await release_didit_claim(req)
+
 
 class TestIntegrationsLazyLoading:
     def test_lazy_attribute_access_success(self) -> None:
         import didit.integrations as pkg
 
         assert pkg.DiditWebhookGuard is not None
+        assert pkg.release_didit_claim is not None
         assert pkg.didit_webhook_view is not None
         assert pkg.parse_django_webhook is not None
         assert pkg.didit_webhook is not None
