@@ -46,7 +46,7 @@ class VerificationWarning(BaseModel):
     @property
     def warning_code(self) -> str | None:
         """Normalized warning code identifier."""
-        return self.code or getattr(self, "log_type", None) or self.short_description
+        return self.code or self.risk or self.short_description or getattr(self, "log_type", None)
 
     def __repr__(self) -> str:
         return (
@@ -386,8 +386,7 @@ class DecisionResponse(BaseModel):
                 for a in self.aml_screenings
             ],
             "reviews": [
-                {"reviewed_by": r.reviewed_by, "has_reason": bool(r.decision_reason)}
-                for r in self.reviews
+                {"has_review": True, "has_reason": bool(r.decision_reason)} for r in self.reviews
             ],
             "warnings": [
                 {
@@ -425,6 +424,7 @@ class DecisionResponse(BaseModel):
         return any(
             (
                 w.code == code
+                or w.risk == code
                 or w.warning_code == code
                 or w.short_description == code
                 or getattr(w, "log_type", None) == code

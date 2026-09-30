@@ -970,3 +970,110 @@ class TestAsyncRequestor:
         resp = await requestor.request("GET", "/test", options=opts)
         assert resp.status_code == 200
         await client.aclose()
+
+    @respx.mock
+    def test_sync_external_client_with_follow_redirects_does_not_leak_api_key(self) -> None:
+        from didit.errors import DiditAPIError
+
+        respx.get("https://api.didit.me/v3/redirect-target").mock(
+            return_value=httpx.Response(302, headers={"Location": "https://evil.attacker.com/leak"})
+        )
+        evil_route = respx.get("https://evil.attacker.com/leak").mock(
+            return_value=httpx.Response(200, json={"stolen": True})
+        )
+
+        client = httpx.Client(follow_redirects=True)
+        requestor = _SyncRequestor(client, base_url="https://api.didit.me/v3", api_key="secret-key")
+
+        with pytest.raises(DiditAPIError) as exc_info:
+            requestor.request("GET", "/redirect-target")
+
+        assert exc_info.value.status_code == 302
+        assert evil_route.call_count == 0
+        client.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_external_client_with_follow_redirects_does_not_leak_api_key(self) -> None:
+        from didit.errors import DiditAPIError
+
+        respx.get("https://api.didit.me/v3/async-redirect").mock(
+            return_value=httpx.Response(
+                307, headers={"Location": "https://evil.attacker.com/steal"}
+            )
+        )
+        evil_route = respx.get("https://evil.attacker.com/steal").mock(
+            return_value=httpx.Response(200, json={"stolen": True})
+        )
+
+        client = httpx.AsyncClient(follow_redirects=True)
+        requestor = _AsyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="secret-key"
+        )
+
+        with pytest.raises(DiditAPIError) as exc_info:
+            await requestor.request("GET", "/async-redirect")
+
+        assert exc_info.value.status_code == 307
+        assert evil_route.call_count == 0
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_slow_drip_outer_wall_clock_timeout(self) -> None:
+        import asyncio
+
+        class SlowDripTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                await asyncio.sleep(0.3)
+                return httpx.Response(200, json={"ok": True})
+
+        client = httpx.AsyncClient(transport=SlowDripTransport())
+        requestor = _AsyncRequestor(
+            client,
+            base_url="https://api.didit.me/v3",
+            api_key="k",
+            retry_policy=RetryPolicy(max_retries=0),
+            default_timeout=0.05,
+        )
+
+        with pytest.raises(DiditTimeoutError, match="Request timed out during transmission"):
+            await requestor.request("GET", "/slow")
+
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_request_without_wall_clock_timeout(self) -> None:
+        class FastTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                return httpx.Response(200, json={"ok": True})
+
+        client = httpx.AsyncClient(transport=FastTransport())
+        requestor = _AsyncRequestor(
+            client,
+            base_url="https://api.didit.me/v3",
+            api_key="k",
+            default_timeout=None,
+        )
+
+        resp = await requestor.request("GET", "/fast")
+        assert resp.status_code == 200
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_request_with_httpx_timeout_read(self) -> None:
+        class FastTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                return httpx.Response(200, json={"ok": True})
+
+        client = httpx.AsyncClient(transport=FastTransport())
+        requestor = _AsyncRequestor(
+            client,
+            base_url="https://api.didit.me/v3",
+            api_key="k",
+            default_timeout=None,
+        )
+
+        opts = RequestOptions(timeout=httpx.Timeout(10.0, read=5.0))
+        resp = await requestor.request("GET", "/fast", options=opts)
+        assert resp.status_code == 200
+        await client.aclose()

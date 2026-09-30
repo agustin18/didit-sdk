@@ -26,7 +26,9 @@ from didit.dedup import (
     AsyncWebhookDedupStore,
     WebhookDedupStore,
     aclaim_webhook_event,
+    arelease_webhook_event,
     compute_dedup_key,
+    release_webhook_event,
 )
 from didit.errors import DiditConfigurationError, DiditSignatureError
 from didit.models.webhook import WebhookPayload
@@ -194,6 +196,8 @@ def didit_webhook_view(
                         content_type="text/plain",
                     )
 
+                is_new = False
+                dedup_key = ""
                 if dedup_store is not None:
                     if dedup_key_builder is not None:
                         dedup_key = dedup_key_builder(payload, request)
@@ -222,12 +226,22 @@ def didit_webhook_view(
                             )
                         payload.is_duplicate = True
 
-                # Call view function
-                sig_params = inspect.signature(view_func).parameters
-                if len(sig_params) >= 2 or "payload" in sig_params:
-                    result = await view_func(request, payload, *args, **kwargs)
-                else:  # pragma: no cover
-                    result = await view_func(request, *args, **kwargs)
+                try:
+                    # Call view function
+                    sig_params = inspect.signature(view_func).parameters
+                    if len(sig_params) >= 2 or "payload" in sig_params:
+                        result = await view_func(request, payload, *args, **kwargs)
+                    else:  # pragma: no cover
+                        result = await view_func(request, *args, **kwargs)
+                except Exception:
+                    if dedup_store is not None and is_new:
+                        await arelease_webhook_event(dedup_store, dedup_key)
+                    raise
+
+                if dedup_store is not None and is_new:
+                    status_code = getattr(result, "status_code", None)
+                    if isinstance(status_code, int) and status_code >= 500:
+                        await arelease_webhook_event(dedup_store, dedup_key)
 
                 if result is None:
                     return HttpResponse(status=200)
@@ -264,6 +278,8 @@ def didit_webhook_view(
                     content_type="text/plain",
                 )
 
+            is_new = False
+            dedup_key = ""
             if dedup_store is not None:
                 if dedup_key_builder is not None:
                     dedup_key = dedup_key_builder(payload, request)
@@ -303,12 +319,22 @@ def didit_webhook_view(
                         )
                     payload.is_duplicate = True
 
-            # Call view function
-            sig_params = inspect.signature(view_func).parameters
-            if len(sig_params) >= 2 or "payload" in sig_params:
-                result = view_func(request, payload, *args, **kwargs)
-            else:  # pragma: no cover
-                result = view_func(request, *args, **kwargs)
+            try:
+                # Call view function
+                sig_params = inspect.signature(view_func).parameters
+                if len(sig_params) >= 2 or "payload" in sig_params:
+                    result = view_func(request, payload, *args, **kwargs)
+                else:  # pragma: no cover
+                    result = view_func(request, *args, **kwargs)
+            except Exception:
+                if dedup_store is not None and is_new:
+                    release_webhook_event(dedup_store, dedup_key)
+                raise
+
+            if dedup_store is not None and is_new:
+                status_code = getattr(result, "status_code", None)
+                if isinstance(status_code, int) and status_code >= 500:
+                    release_webhook_event(dedup_store, dedup_key)
 
             if result is None:
                 return HttpResponse(status=200)

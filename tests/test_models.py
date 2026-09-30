@@ -496,6 +496,9 @@ class TestWebhookPayload:
         assert "first_name" not in redacted["id_verifications"][0]
         assert "document_number" not in redacted["id_verifications"][0]
         assert redacted["id_verifications"][0]["document_type"] == "passport"
+        assert "reviewed_by" not in redacted["reviews"][0]
+        assert redacted["reviews"][0]["has_review"] is True
+        assert redacted["reviews"][0]["has_reason"] is True
 
         # WebhookPayload safe repr
         wh = WebhookPayload(
@@ -621,6 +624,23 @@ class TestWebhookPayload:
         assert "warnings" in dump
         assert len(dump["warnings"]) == 1
         assert dump["warnings"][0]["code"] == "DOC_EXPIRING_SOON"
+
+        # Didit V3 schema with 'risk' field
+        v3_warning = VerificationWarning(
+            risk="LOW_LIVENESS_SCORE",
+            log_type="information",
+            short_description="Liveness confidence below recommended threshold",
+        )
+        assert v3_warning.warning_code == "LOW_LIVENESS_SCORE"
+        v3_decision = DecisionResponse(
+            session_id="sess_v3_warn",
+            status=SessionStatus.DECLINED,
+            warnings=[v3_warning],
+        )
+        assert v3_decision.has_warning("LOW_LIVENESS_SCORE") is True
+        assert v3_decision.has_warning("information") is True
+        assert v3_decision.has_warning("Liveness confidence below recommended threshold") is True
+        assert "LOW_LIVENESS_SCORE" in v3_decision.warning_codes
 
     def test_create_session_request_sandbox_scenario(self) -> None:
         req = CreateSessionRequest(

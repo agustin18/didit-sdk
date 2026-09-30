@@ -193,7 +193,7 @@ class TestComputeDedupKey:
                     "timestamp": 1727640000,
                 },
                 None,
-                "didit:event:sess_2:session.updated:Declined",
+                "didit:event:sess_2:unknown:Declined",
             ),
             (
                 {
@@ -214,7 +214,7 @@ class TestComputeDedupKey:
                     "timestamp": None,
                 },
                 None,
-                "didit:event:sess_4:session.updated:Expired",
+                "didit:event:sess_4:unknown:Expired",
             ),
         ],
     )
@@ -223,6 +223,121 @@ class TestComputeDedupKey:
     ) -> None:
         payload = WebhookPayload(**kwargs)
         assert compute_dedup_key(payload, signature=signature) == expected
+
+
+class TestReleaseWebhookEvent:
+    def test_in_memory_release(self) -> None:
+        store = InMemoryWebhookDedupStore()
+        assert store.claim("k1", ttl_seconds=60) is True
+        assert store.claim("k1", ttl_seconds=60) is False
+        store.release("k1")
+        assert store.claim("k1", ttl_seconds=60) is True
+
+    @pytest.mark.asyncio
+    async def test_in_memory_arelease(self) -> None:
+        store = InMemoryWebhookDedupStore()
+        assert await store.aclaim("k2", ttl_seconds=60) is True
+        assert await store.aclaim("k2", ttl_seconds=60) is False
+        await store.arelease("k2")
+        assert await store.aclaim("k2", ttl_seconds=60) is True
+
+    def test_redis_release(self) -> None:
+        mock_client = MagicMock()
+        store = RedisWebhookDedupStore(client=mock_client, prefix="didit:test:")
+        store.release("key_1")
+        mock_client.delete.assert_called_once_with("didit:test:key_1")
+
+    @pytest.mark.parametrize(
+        ("failure_mode", "expect_error"),
+        [
+            (DedupFailureMode.RAISE, True),
+            (DedupFailureMode.FAIL_OPEN, False),
+        ],
+    )
+    def test_redis_release_error_handling(
+        self, failure_mode: DedupFailureMode, expect_error: bool
+    ) -> None:
+        mock_client = MagicMock()
+        mock_client.delete.side_effect = ConnectionError("Redis failure")
+        store = RedisWebhookDedupStore(client=mock_client, failure_mode=failure_mode)
+        if expect_error:
+            with pytest.raises(DiditDedupError, match="Redis dedup store release failed"):
+                store.release("key_err")
+        else:
+            store.release("key_err")
+
+    @pytest.mark.asyncio
+    async def test_async_redis_release(self) -> None:
+        mock_client = MagicMock()
+        mock_client.delete = AsyncMock()
+        store = AsyncRedisWebhookDedupStore(client=mock_client, prefix="async:test:")
+        await store.arelease("async_k1")
+        mock_client.delete.assert_called_once_with("async:test:async_k1")
+        await store.release("async_k2")
+        mock_client.delete.assert_called_with("async:test:async_k2")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("failure_mode", "expect_error"),
+        [
+            (DedupFailureMode.RAISE, True),
+            (DedupFailureMode.FAIL_OPEN, False),
+        ],
+    )
+    async def test_async_redis_release_error_handling(
+        self, failure_mode: DedupFailureMode, expect_error: bool
+    ) -> None:
+        mock_client = MagicMock()
+        mock_client.delete = AsyncMock(side_effect=TimeoutError("Async timeout"))
+        store = AsyncRedisWebhookDedupStore(client=mock_client, failure_mode=failure_mode)
+        if expect_error:
+            with pytest.raises(DiditDedupError, match="Async Redis dedup store release failed"):
+                await store.arelease("err_k")
+        else:
+            await store.arelease("err_k")
+
+    @pytest.mark.asyncio
+    async def test_helpers_release_and_arelease(self) -> None:
+        from didit.dedup import arelease_webhook_event, release_webhook_event
+
+        # No release method: graceful no-op
+        release_webhook_event(object(), "noop")  # type: ignore[arg-type]
+        await arelease_webhook_event(object(), "noop")  # type: ignore[arg-type]
+
+        # Sync store
+        sync_store = InMemoryWebhookDedupStore()
+        assert sync_store.claim("test_h", ttl_seconds=60) is True
+        release_webhook_event(sync_store, "test_h")
+        assert sync_store.claim("test_h", ttl_seconds=60) is True
+
+        # Async store via arelease_webhook_event
+        assert sync_store.claim("test_h2", ttl_seconds=60) is True
+        await arelease_webhook_event(sync_store, "test_h2")
+        assert sync_store.claim("test_h2", ttl_seconds=60) is True
+
+        # Store with coroutine release
+        class CoroReleaseStore:
+            def __init__(self) -> None:
+                self.released = False
+
+            async def release(self, key: str) -> None:
+                self.released = True
+
+        coro_store = CoroReleaseStore()
+        await arelease_webhook_event(coro_store, "k")  # type: ignore[arg-type]
+        assert coro_store.released is True
+
+        # Store with only synchronous release (no arelease)
+        class PureSyncReleaseStore:
+            def __init__(self) -> None:
+                self.released = False
+
+            def release(self, key: str) -> None:
+                self.released = True
+
+        sync_only_store = PureSyncReleaseStore()
+        await arelease_webhook_event(sync_only_store, "k_sync")  # type: ignore[arg-type]
+        assert sync_only_store.released is True
 
 
 class TestAclaimWebhookEvent:

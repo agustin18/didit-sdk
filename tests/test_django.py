@@ -263,6 +263,79 @@ class TestDjangoWebhookView:
         assert res2.status_code == 200
         assert b"Duplicate webhook event acknowledged" in res2.content
 
+    def test_dedup_release_on_handler_exception(self) -> None:
+        store = InMemoryWebhookDedupStore()
+        call_count = 0
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store, duplicate_action="respond_ok")
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("Database error")
+            return HttpResponse("success")
+
+        request1 = create_signed_django_request(SAMPLE_PAYLOAD)
+        with pytest.raises(RuntimeError, match="Database error"):
+            view(request1)
+
+        request2 = create_signed_django_request(SAMPLE_PAYLOAD)
+        res = view(request2)
+        assert res.status_code == 200
+        assert res.content == b"success"
+        assert call_count == 2
+
+    def test_dedup_release_on_server_error_response(self) -> None:
+        store = InMemoryWebhookDedupStore()
+        call_count = 0
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store, duplicate_action="respond_ok")
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return HttpResponse("Database down", status=503)
+            return HttpResponse("success")
+
+        request1 = create_signed_django_request(SAMPLE_PAYLOAD)
+        res1 = view(request1)
+        assert res1.status_code == 503
+
+        request2 = create_signed_django_request(SAMPLE_PAYLOAD)
+        res2 = view(request2)
+        assert res2.status_code == 200
+        assert res2.content == b"success"
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_async_dedup_release_on_exception_and_error(self) -> None:
+        store = InMemoryWebhookDedupStore()
+        call_count = 0
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store, duplicate_action="respond_ok")
+        async def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ValueError("Async DB failure")
+            if call_count == 2:
+                return HttpResponse("Server error", status=500)
+            return HttpResponse("async success")
+
+        request1 = create_signed_django_request(SAMPLE_PAYLOAD)
+        with pytest.raises(ValueError, match="Async DB failure"):
+            await view(request1)
+
+        request2 = create_signed_django_request(SAMPLE_PAYLOAD)
+        res2 = await view(request2)
+        assert res2.status_code == 500
+
+        request3 = create_signed_django_request(SAMPLE_PAYLOAD)
+        res3 = await view(request3)
+        assert res3.status_code == 200
+        assert res3.content == b"async success"
+        assert call_count == 3
+
 
 class TestParseDjangoWebhook:
     def test_successful_parsing(self) -> None:

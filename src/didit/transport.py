@@ -88,6 +88,8 @@ def should_retry(
             (
                 httpx.ReadTimeout,
                 httpx.WriteTimeout,
+                asyncio.TimeoutError,
+                TimeoutError,
                 httpx.RemoteProtocolError,
                 httpx.ReadError,
                 httpx.WriteError,
@@ -192,7 +194,11 @@ class _SyncRequestor:
         params: Mapping[str, Any] | None = None,
         options: RequestOptions | None = None,
     ) -> httpx.Response:
-        """Execute HTTP request with safe retries and exponential backoff."""
+        """Execute HTTP request with safe retries and exponential backoff.
+
+        Enforces follow_redirects=False to prevent cross-origin credential leaks.
+        Synchronous timeouts enforce socket-level limits and monotonic deadline budgets.
+        """
         effective_opts = _merge_options(self._default_options, options)
         url = _resolve_url(self._base_url, path)
         headers = _build_headers(self._api_key, effective_opts)
@@ -227,6 +233,7 @@ class _SyncRequestor:
                     params=params,
                     headers=headers,
                     timeout=eff_timeout,
+                    follow_redirects=False,
                 )
                 if response.is_success:
                     return response
@@ -367,7 +374,12 @@ class _AsyncRequestor:
         params: Mapping[str, Any] | None = None,
         options: RequestOptions | None = None,
     ) -> httpx.Response:
-        """Execute asynchronous HTTP request with safe retries and exponential backoff."""
+        """Execute asynchronous HTTP request with safe retries and exponential backoff.
+
+        Enforces follow_redirects=False to prevent cross-origin credential leaks,
+        and applies an outer wall-clock timeout via asyncio.wait_for to prevent slow-drip
+        transmission attacks.
+        """
         effective_opts = _merge_options(self._default_options, options)
         url = _resolve_url(self._base_url, path)
         headers = _build_headers(self._api_key, effective_opts)
@@ -391,18 +403,31 @@ class _AsyncRequestor:
                 eff_timeout: float | httpx.Timeout | None = (
                     min(timeout, remaining) if isinstance(timeout, (int, float)) else remaining
                 )
+                wall_clock_timeout: float | None = remaining
             else:
                 eff_timeout = timeout
+                if isinstance(timeout, (int, float)):
+                    wall_clock_timeout = float(timeout)
+                elif isinstance(timeout, httpx.Timeout) and timeout.read is not None:
+                    wall_clock_timeout = float(timeout.read)
+                else:
+                    wall_clock_timeout = None
 
             try:
-                response = await self._client.request(
+                coro = self._client.request(
                     method=method,
                     url=url,
                     json=json,
                     params=params,
                     headers=headers,
                     timeout=eff_timeout,
+                    follow_redirects=False,
                 )
+                if wall_clock_timeout is not None:
+                    response = await asyncio.wait_for(coro, timeout=wall_clock_timeout)
+                else:
+                    response = await coro
+
                 if response.is_success:
                     return response
 
@@ -464,7 +489,12 @@ class _AsyncRequestor:
                     continue
                 raise DiditConnectionError(f"Failed to connect to Didit API: {exc}") from exc
 
-            except (httpx.ReadTimeout, httpx.WriteTimeout) as exc:
+            except (
+                httpx.ReadTimeout,
+                httpx.WriteTimeout,
+                asyncio.TimeoutError,
+                TimeoutError,
+            ) as exc:
                 if should_retry(
                     method=method,
                     status_code=None,

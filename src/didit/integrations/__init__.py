@@ -10,18 +10,24 @@ __all__ = [
     "didit_webhook_view",
     "parse_django_webhook",
     "parse_flask_webhook",
+    "release_didit_claim",
 ]
 
 
 def __getattr__(name: str) -> Any:
-    if name == "DiditWebhookGuard":
+    if name in ("DiditWebhookGuard", "release_didit_claim"):
         try:
-            from didit.integrations.fastapi import DiditWebhookGuard
+            from didit.integrations.fastapi import (
+                DiditWebhookGuard,
+                release_didit_claim,
+            )
 
-            return DiditWebhookGuard
+            if name == "DiditWebhookGuard":
+                return DiditWebhookGuard
+            return release_didit_claim
         except ImportError as e:
             raise ImportError(
-                "FastAPI is required for DiditWebhookGuard. "
+                "FastAPI is required for FastAPI integrations. "
                 "Install it with 'pip install didit-sdk[fastapi]'."
             ) from e
     if name in ("didit_webhook_view", "parse_django_webhook"):
