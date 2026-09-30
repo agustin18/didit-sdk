@@ -455,14 +455,19 @@ class TestDjangoWebhookReservation:
             return JsonResponse({"duplicate": payload.is_duplicate})
 
         req = create_signed_django_request(payload_data)
-        resp = view(req)
-
         if action == "retry":
+            resp = view(req)
             assert resp.status_code == 503
             assert resp.headers["Retry-After"] == "5"
         elif action == "raise":
-            assert resp.status_code == 409
+            from didit.errors import DiditDuplicateWebhookError
+
+            with pytest.raises(DiditDuplicateWebhookError) as exc_info:
+                view(req)
+            assert exc_info.value.state == "PROCESSING"
+            assert exc_info.value.event_id == "evt_django_res"
         elif action == "pass":
+            resp = view(req)
             assert resp.status_code == 200
             assert json.loads(resp.content)["duplicate"] is True
 
@@ -482,14 +487,19 @@ class TestDjangoWebhookReservation:
             return JsonResponse({"duplicate": payload.is_duplicate})
 
         req = create_signed_django_request(payload_data)
-        resp = await view(req)
-
         if action == "retry":
+            resp = await view(req)
             assert resp.status_code == 503
             assert resp.headers["Retry-After"] == "5"
         elif action == "raise":
-            assert resp.status_code == 409
+            from didit.errors import DiditDuplicateWebhookError
+
+            with pytest.raises(DiditDuplicateWebhookError) as exc_info:
+                await view(req)
+            assert exc_info.value.state == "PROCESSING"
+            assert exc_info.value.event_id == "evt_django_async_res"
         elif action == "pass":
+            resp = await view(req)
             assert resp.status_code == 200
             assert json.loads(resp.content)["duplicate"] is True
 
@@ -607,18 +617,43 @@ class TestDjangoWebhookReservation:
 
     def test_django_404_releases_reservation(self) -> None:
         store = InMemoryWebhookReservationStore()
+        execution_count = 0
 
         @didit_webhook_view(secret=SECRET, dedup_store=store)
         def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
-            return HttpResponse("not found", status=404)
+            nonlocal execution_count
+            execution_count += 1
+            if execution_count == 1:
+                return HttpResponse("not found", status=404)
+            return HttpResponse("recovered", status=200)
+
+        # Request 1: returns 404 -> reservation released
+        req1 = create_signed_django_request(SAMPLE_PAYLOAD)
+        resp1 = view(req1)
+        assert resp1.status_code == 404
+        assert execution_count == 1
+
+        # Request 2 (retry with identical payload): must execute view and return 200
+        req2 = create_signed_django_request(SAMPLE_PAYLOAD)
+        resp2 = view(req2)
+        assert resp2.status_code == 200
+        assert resp2.content == b"recovered"
+        assert execution_count == 2
+
+    def test_django_legacy_store_retains_default_86400_ttl(self) -> None:
+        mock_legacy = MagicMock(spec=["claim", "release"])
+        mock_legacy.claim.return_value = True
+
+        @didit_webhook_view(secret=SECRET, dedup_store=mock_legacy)
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("ok", status=200)
 
         req = create_signed_django_request(SAMPLE_PAYLOAD)
-        resp = view(req)
-        assert resp.status_code == 404
-
-        # Since 404 is a non-2xx status, reservation MUST be released so Didit retries work
-        retry_attempt = store.reserve(list(store._entries.keys())[0] if store._entries else "dummy")
-        assert retry_attempt.state == ReservationState.ACQUIRED
+        view(req)
+        mock_legacy.claim.assert_called_once()
+        call_args = mock_legacy.claim.call_args
+        effective_ttl = call_args.kwargs.get("ttl_seconds") or call_args.args[1]
+        assert effective_ttl == 86400
 
     def test_django_processing_action_conflict(self) -> None:
         store = InMemoryWebhookReservationStore()

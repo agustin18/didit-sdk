@@ -109,29 +109,35 @@ asyncio.run(main())
 
 ---
 
-## Webhook Integrations & Deduplication
+## Webhook Integrations & Tokenized Reservation Protocol
 
-Didit dispatches signed HTTP POST events upon verification completion. `didit-sdk` provides native, production-grade adapters with streaming body limits (HTTP 413) and distributed deduplication:
+Didit dispatches signed HTTP POST events upon verification completion. `didit-sdk` provides native, production-grade adapters with streaming body limits (HTTP 413) and a **crash-recoverable tokenized reservation protocol** using Redis Lua CAS state machines:
+
+- **Active Lease (`PROCESSING`)**: Acquired via a unique cryptographic worker token with a short lease (default `lease_ttl_seconds=30`). If a worker crashes (`SIGKILL`, OOM, reboot), the lease automatically expires so Didit's retries can be recovered by another worker.
+- **Terminal Retention (`COMPLETED`)**: Upon a 2xx response, the reservation atomically transitions to `COMPLETED` with long retention (default `completed_ttl_seconds=86400`).
+- **Concurrent Protection (`processing_action="retry"`)**: If a second delivery arrives while processing is in flight, the adapter returns HTTP 503 with `Retry-After: 5` so Didit retries after the lease expires.
 
 ### FastAPI
 
 ```python
-from fastapi import FastAPI, Depends
-from didit import WebhookPayload, SessionStatus, RedisWebhookDedupStore
-from didit.integrations.fastapi import DiditWebhookGuard
+from fastapi import FastAPI
+from didit import WebhookPayload, SessionStatus, RedisWebhookReservationStore
+from didit.integrations.fastapi import didit_webhook
 
 app = FastAPI()
-guard = DiditWebhookGuard(
-    secret="whsec_...",
-    dedup_store=RedisWebhookDedupStore.from_url("redis://localhost:6379/0"),
-    # duplicate_action defaults to "pass" for at-least-once safe delivery
-)
+store = RedisWebhookReservationStore.from_url("redis://localhost:6379/0")
 
 
 @app.post("/webhooks/didit")
-async def handle_webhook(payload: WebhookPayload = Depends(guard)):
-    # Note: payload.is_duplicate is a hint that this event key was seen before.
-    # It does NOT prove that a previous attempt completed successfully.
+@didit_webhook(
+    secret="whsec_...",
+    dedup_store=store,
+    lease_ttl_seconds=30,  # Lease while processing (auto-recovered on crash)
+    completed_ttl_seconds=86400,  # 24h retention after 2xx completion
+    duplicate_action="pass",  # At-least-once delivery to DB transaction boundary
+    processing_action="retry",  # HTTP 503 with Retry-After: 5 for concurrent in-flight deliveries
+)
+async def handle_webhook(payload: WebhookPayload):
     # Enforce idempotency at the database/transaction boundary:
     async with db.transaction():
         if not await is_event_unprocessed(payload.event_id):
@@ -144,21 +150,41 @@ async def handle_webhook(payload: WebhookPayload = Depends(guard)):
     return {"status": "ok"}
 ```
 
+Alternatively, use `DiditWebhookGuard` as a FastAPI `Depends(...)` dependency:
+
+```python
+from fastapi import Depends
+from didit.integrations.fastapi import DiditWebhookGuard
+
+guard = DiditWebhookGuard(secret="whsec_...", dedup_store=store)
+
+
+@app.post("/webhooks/didit")
+async def handle_webhook_guard(payload: WebhookPayload = Depends(guard)): ...
+```
+
 > [!TIP]
 > **Deduplication Semantics (`duplicate_action`)**:
-> - `"pass"` (**default, recommended**): When an event key has been seen before, it is passed to your handler with `payload.is_duplicate = True`. This guarantees that if a process crashed (OOM, `SIGKILL`, server reboot) during a previous attempt before committing to the database, Didit's delivery retries will still reach your handler, and you can enforce idempotency safely at the database transaction boundary.
-> - `"respond_ok"`: Short-circuits with an immediate HTTP 200 OK without invoking your handler. **Warning**: `"respond_ok"` should NOT be used with the built-in claim-before-handler stores as proof of successful processing. Use it only when your custom ingestion architecture has already durably persisted/enqueued the event (e.g., immediate transactional inbox insertion or durable message broker enqueueing).
+> - `"pass"` (**default, recommended**): When an event has already reached `COMPLETED`, it is passed to your handler with `payload.is_duplicate = True`. This guarantees that if a process crashed during a previous attempt before committing to the database, Didit's delivery retries will still reach your handler, and you can enforce idempotency safely at the database transaction boundary.
+> - `"respond_ok"`: Short-circuits with an immediate HTTP 200 OK without invoking your handler. Use only when downstream ingestion is already durable (e.g. transactional outbox or Kafka enqueueing).
 > - `"raise"`: Raises an HTTP 409 Conflict.
 
 ### Django
 
 ```python
 from django.http import HttpRequest, HttpResponse
-from didit import WebhookPayload, SessionStatus
+from didit import WebhookPayload, SessionStatus, RedisWebhookReservationStore
 from didit.integrations.django import didit_webhook_view
 
+store = RedisWebhookReservationStore.from_url("redis://localhost:6379/0")
 
-@didit_webhook_view(secret="whsec_...")
+
+@didit_webhook_view(
+    secret="whsec_...",
+    dedup_store=store,
+    lease_ttl_seconds=30,
+    completed_ttl_seconds=86400,
+)
 def my_webhook_view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
     if payload.status == SessionStatus.APPROVED:
         ...
@@ -169,14 +195,20 @@ def my_webhook_view(request: HttpRequest, payload: WebhookPayload) -> HttpRespon
 
 ```python
 from flask import Flask
-from didit import WebhookPayload, SessionStatus
+from didit import WebhookPayload, SessionStatus, RedisWebhookReservationStore
 from didit.integrations.flask import didit_webhook
 
 app = Flask(__name__)
+store = RedisWebhookReservationStore.from_url("redis://localhost:6379/0")
 
 
 @app.route("/webhooks/didit", methods=["POST"])
-@didit_webhook(secret="whsec_...")
+@didit_webhook(
+    secret="whsec_...",
+    dedup_store=store,
+    lease_ttl_seconds=30,
+    completed_ttl_seconds=86400,
+)
 def handle_didit(payload: WebhookPayload):
     if payload.status == SessionStatus.APPROVED:
         ...

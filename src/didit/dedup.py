@@ -796,6 +796,7 @@ def reserve_webhook_event(
     event_id: str,
     token: str | None = None,
     ttl_seconds: int = 30,
+    legacy_ttl_seconds: int = 86400,
 ) -> ReservationAttempt:
     """Synchronously reserve a webhook event across reservation stores or legacy stores."""
     reserve_fn = getattr(store, "reserve", None)
@@ -808,13 +809,13 @@ def reserve_webhook_event(
 
     claim_fn = getattr(store, "claim", None)
     if claim_fn is not None and callable(claim_fn) and not inspect.iscoroutinefunction(claim_fn):
-        claimed = bool(claim_fn(event_id, ttl_seconds=ttl_seconds))
+        claimed = bool(claim_fn(event_id, ttl_seconds=legacy_ttl_seconds))
         if claimed:
             tok = token or secrets.token_urlsafe(16)
             return ReservationAttempt(
                 state=ReservationState.ACQUIRED,
                 reservation=WebhookReservation(
-                    event_id=event_id, token=tok, expires_at=time.monotonic() + ttl_seconds
+                    event_id=event_id, token=tok, expires_at=time.monotonic() + legacy_ttl_seconds
                 ),
             )
         return ReservationAttempt(state=ReservationState.COMPLETED)
@@ -827,6 +828,7 @@ async def areserve_webhook_event(
     event_id: str,
     token: str | None = None,
     ttl_seconds: int = 30,
+    legacy_ttl_seconds: int = 86400,
 ) -> ReservationAttempt:
     """Asynchronously reserve a webhook event across stores or legacy stores."""
     if hasattr(store, "areserve") and callable(store.areserve):
@@ -847,9 +849,9 @@ async def areserve_webhook_event(
             await asyncio.to_thread(reserve_fn, event_id, token, ttl_seconds),
         )
 
-    # Fallback to claim / aclaim
+    # Fallback to claim / aclaim using legacy_ttl_seconds (default 86400)
     if hasattr(store, "aclaim") and callable(store.aclaim):
-        claimed = bool(await store.aclaim(event_id, ttl_seconds=ttl_seconds))
+        claimed = bool(await store.aclaim(event_id, ttl_seconds=legacy_ttl_seconds))
     else:
         claim_fn = getattr(store, "claim", None)
         if claim_fn is None or not callable(claim_fn):
@@ -857,16 +859,16 @@ async def areserve_webhook_event(
                 "Store does not implement reserve(), areserve(), claim(), or aclaim()."
             )
         if inspect.iscoroutinefunction(claim_fn):
-            claimed = bool(await claim_fn(event_id, ttl_seconds=ttl_seconds))
+            claimed = bool(await claim_fn(event_id, ttl_seconds=legacy_ttl_seconds))
         else:
-            claimed = bool(await asyncio.to_thread(claim_fn, event_id, ttl_seconds))
+            claimed = bool(await asyncio.to_thread(claim_fn, event_id, legacy_ttl_seconds))
 
     if claimed:
         tok = token or secrets.token_urlsafe(16)
         return ReservationAttempt(
             state=ReservationState.ACQUIRED,
             reservation=WebhookReservation(
-                event_id=event_id, token=tok, expires_at=time.monotonic() + ttl_seconds
+                event_id=event_id, token=tok, expires_at=time.monotonic() + legacy_ttl_seconds
             ),
         )
     return ReservationAttempt(state=ReservationState.COMPLETED)

@@ -499,7 +499,7 @@ class TestFastAPIWebhookGuard:
 
 
 class TestFastAPIWebhookReservation:
-    @pytest.mark.parametrize("action", ["retry", "raise", "pass"])
+    @pytest.mark.parametrize("action", ["retry", "conflict", "raise", "pass"])
     def test_processing_action_outcomes(self, action: str) -> None:
         from fastapi import Request
 
@@ -537,15 +537,24 @@ class TestFastAPIWebhookReservation:
         sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
         headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
 
-        resp = client.post("/test-res", content=raw_body, headers=headers)
         if action == "retry":
+            resp = client.post("/test-res", content=raw_body, headers=headers)
             assert resp.status_code == 503
             assert resp.headers.get("retry-after") == "5"
             assert "currently being processed" in resp.json()["detail"]
-        elif action == "raise":
+        elif action == "conflict":
+            resp = client.post("/test-res", content=raw_body, headers=headers)
             assert resp.status_code == 409
             assert "currently being processed" in resp.json()["detail"]
+        elif action == "raise":
+            from didit.errors import DiditDuplicateWebhookError
+
+            with pytest.raises(DiditDuplicateWebhookError) as exc_info:
+                client.post("/test-res", content=raw_body, headers=headers)
+            assert exc_info.value.state == "PROCESSING"
+            assert exc_info.value.event_id == "evt_res_test"
         elif action == "pass":
+            resp = client.post("/test-res", content=raw_body, headers=headers)
             assert resp.status_code == 200
             assert resp.json() == {"duplicate": True}
 
@@ -800,6 +809,192 @@ class TestFastAPIRouteDecoratorLifecycle:
 
         with pytest.raises(ValueError, match="Invalid processing_action"):
             didit_webhook(secret="sec", processing_action="invalid")  # type: ignore[arg-type]
+
+    def test_legacy_store_retains_default_86400_ttl(self) -> None:
+        from unittest.mock import MagicMock
+
+        from didit.dedup import InMemoryWebhookDedupStore
+
+        # Default initialization: reservation lease is 30s, legacy claim is 86400s
+        store = InMemoryWebhookDedupStore()
+        guard = DiditWebhookGuard(secret=WEBHOOK_SECRET, dedup_store=store)
+        assert guard.effective_lease_ttl == 30
+        assert guard.effective_legacy_ttl == 86400
+
+        # When dedup_ttl_seconds is explicitly provided, legacy TTL reflects it
+        guard_explicit = DiditWebhookGuard(
+            secret=WEBHOOK_SECRET, dedup_store=store, dedup_ttl_seconds=120
+        )
+        assert guard_explicit.effective_legacy_ttl == 120
+        assert guard_explicit.effective_lease_ttl == 30
+
+        # Verify claim receives 86400 in mock legacy store
+        mock_legacy = MagicMock(spec=["claim", "release"])
+        mock_legacy.claim.return_value = True
+        app_legacy = FastAPI()
+
+        leg_guard = DiditWebhookGuard(secret=WEBHOOK_SECRET, dedup_store=mock_legacy)
+
+        @app_legacy.post("/legacy-guard")
+        async def leg_endpoint(
+            payload: WebhookPayload = Depends(leg_guard),
+        ) -> dict[str, str]:
+            return {"ok": "true"}
+
+        client = TestClient(app_legacy)
+        data = {
+            "event_id": "evt_legacy_86400",
+            "session_id": "sess_leg",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        client.post("/legacy-guard", content=raw_body, headers=headers)
+        mock_legacy.claim.assert_called_once()
+        call_args = mock_legacy.claim.call_args
+        effective_ttl = call_args.kwargs.get("ttl_seconds") or call_args.args[1]
+        assert effective_ttl == 86400
+
+    def test_sync_endpoint_runs_in_starlette_threadpool(self) -> None:
+        import threading
+
+        from didit.dedup import InMemoryWebhookReservationStore
+
+        store = InMemoryWebhookReservationStore()
+        app_tp = FastAPI()
+        recorded_threads: dict[str, int] = {}
+
+        @app_tp.post("/sync-tp")
+        @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
+        def sync_view(payload: WebhookPayload, request: Request) -> dict[str, str]:
+            recorded_threads["handler"] = threading.get_ident()
+            return {"status": "ok"}
+
+        @app_tp.post("/async-tp")
+        async def async_view(request: Request) -> dict[str, str]:
+            recorded_threads["loop"] = threading.get_ident()
+            return {"status": "ok"}
+
+        client = TestClient(app_tp)
+        client.post("/async-tp")
+
+        data = {
+            "event_id": "evt_sync_tp",
+            "session_id": "sess_tp",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/sync-tp", content=raw_body, headers=headers)
+        assert resp.status_code == 200
+        assert "handler" in recorded_threads
+        assert "loop" in recorded_threads
+        # Concurrency verification: sync handler must NOT block event loop thread
+        assert recorded_threads["handler"] != recorded_threads["loop"]
+
+    def test_route_status_code_404_releases_reservation(self) -> None:
+        from didit.dedup import InMemoryWebhookReservationStore, ReservationState
+
+        store = InMemoryWebhookReservationStore()
+        app_404 = FastAPI()
+
+        @app_404.post("/webhook-route-404", status_code=404)
+        @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
+        def route_404_view(payload: WebhookPayload, request: Request) -> dict[str, str]:
+            return {"detail": "resource not found"}
+
+        client = TestClient(app_404)
+        data = {
+            "event_id": "evt_route_404_release",
+            "session_id": "sess_404",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/webhook-route-404", content=raw_body, headers=headers)
+        assert resp.status_code == 404
+
+        # Because route returns 404, reservation MUST be released so Didit retry succeeds
+        attempt = store.reserve("evt_route_404_release")
+        assert attempt.state == ReservationState.ACQUIRED
+
+    def test_response_model_validation_failure_releases_reservation(self) -> None:
+        from pydantic import BaseModel
+
+        from didit.dedup import InMemoryWebhookReservationStore, ReservationState
+
+        class StrictResponse(BaseModel):
+            acknowledged: bool
+
+        store = InMemoryWebhookReservationStore()
+        app_model = FastAPI()
+
+        @app_model.post("/webhook-model-fail", response_model=StrictResponse)
+        @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
+        def model_fail_view(payload: WebhookPayload, request: Request) -> dict[str, str]:
+            # Invalid output schema triggers ResponseValidationError -> HTTP 500
+            return {"unrelated_field": "invalid_shape"}
+
+        client = TestClient(app_model, raise_server_exceptions=False)
+        data = {
+            "event_id": "evt_model_fail",
+            "session_id": "sess_model_fail",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/webhook-model-fail", content=raw_body, headers=headers)
+        assert resp.status_code == 500
+
+        # Reservation MUST be released upon 500 response serialization failure
+        attempt = store.reserve("evt_model_fail")
+        assert attempt.state == ReservationState.ACQUIRED
+
+    def test_response_status_code_mutation_releases_reservation(self) -> None:
+        from fastapi import Response
+
+        from didit.dedup import InMemoryWebhookReservationStore, ReservationState
+
+        store = InMemoryWebhookReservationStore()
+        app_resp = FastAPI()
+
+        @app_resp.post("/webhook-resp-status")
+        @didit_webhook(secret=WEBHOOK_SECRET, dedup_store=store)
+        def resp_status_view(
+            payload: WebhookPayload, request: Request, response: Response
+        ) -> dict[str, str]:
+            response.status_code = 404
+            return {"error": "custom not found"}
+
+        client = TestClient(app_resp)
+        data = {
+            "event_id": "evt_resp_status_404",
+            "session_id": "sess_resp_status",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/webhook-resp-status", content=raw_body, headers=headers)
+        assert resp.status_code == 404
+
+        # Reservation MUST be released when response.status_code is non-2xx
+        attempt = store.reserve("evt_resp_status_404")
+        assert attempt.state == ReservationState.ACQUIRED
 
     def test_didit_webhook_view_alias(self) -> None:
         assert didit_webhook_view is didit_webhook

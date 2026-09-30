@@ -34,6 +34,7 @@ from didit.dedup import (
 )
 from didit.errors import (
     DiditConfigurationError,
+    DiditDuplicateWebhookError,
     DiditSignatureError,
 )
 from didit.models.webhook import WebhookPayload
@@ -116,15 +117,6 @@ def parse_flask_webhook(
     )
 
 
-def _extract_status_code(res: Any) -> int:
-    """Extract HTTP status code from a Flask view result (tuple, Response, or default 200)."""
-    if isinstance(res, tuple) and len(res) >= 2 and isinstance(res[1], int):
-        return res[1]
-    if hasattr(res, "status_code") and isinstance(res.status_code, int):
-        return res.status_code
-    return 200
-
-
 def didit_webhook(
     secret: str | None = None,
     *,
@@ -168,7 +160,8 @@ def didit_webhook(
             "Must be 'retry', 'pass', 'raise', or 'conflict'."
         )
 
-    effective_lease_ttl = dedup_ttl_seconds if dedup_ttl_seconds is not None else lease_ttl_seconds
+    effective_lease_ttl = lease_ttl_seconds
+    effective_legacy_ttl = dedup_ttl_seconds if dedup_ttl_seconds is not None else 86400
     effective_completed_ttl = completed_ttl_seconds
 
     def decorator(view_func: Callable[..., Any]) -> Callable[..., Any]:
@@ -244,7 +237,10 @@ def didit_webhook(
                         dedup_key = compute_dedup_key(payload, signature=sig)
 
                     attempt = await areserve_webhook_event(
-                        dedup_store, dedup_key, ttl_seconds=effective_lease_ttl
+                        dedup_store,
+                        dedup_key,
+                        ttl_seconds=effective_lease_ttl,
+                        legacy_ttl_seconds=effective_legacy_ttl,
                     )
                     is_new = attempt.state == ReservationState.ACQUIRED
                     if attempt.reservation is not None:
@@ -275,11 +271,17 @@ def didit_webhook(
                             )
                             resp.headers["Retry-After"] = "5"
                             return resp
-                        if processing_action in ("raise", "conflict"):
+                        if processing_action == "conflict":
                             return Response(
                                 "Webhook event currently being processed",
                                 status=409,
                                 mimetype="text/plain",
+                            )
+                        if processing_action == "raise":
+                            raise DiditDuplicateWebhookError(
+                                "Webhook event currently being processed by another worker",
+                                event_id=payload.event_id,
+                                state="PROCESSING",
                             )
                         payload.is_duplicate = True
 
@@ -294,8 +296,15 @@ def didit_webhook(
                         await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
                     raise
 
+                if result is None:
+                    response = Response(status=200)
+                else:
+                    from flask import current_app
+
+                    response = current_app.make_response(result)
+
                 if dedup_store is not None and is_new:
-                    status_code = _extract_status_code(result)
+                    status_code = response.status_code
                     if 200 <= status_code < 300:
                         if res_token is not None:
                             await acomplete_webhook_event(
@@ -307,9 +316,7 @@ def didit_webhook(
                     else:
                         await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
 
-                if result is None:
-                    return Response(status=200)
-                return result
+                return response
 
             return async_wrapper
 
@@ -402,7 +409,10 @@ def didit_webhook(
                         payload.is_duplicate = True
                 else:
                     attempt = reserve_webhook_event(
-                        dedup_store, dedup_key, ttl_seconds=effective_lease_ttl
+                        dedup_store,
+                        dedup_key,
+                        ttl_seconds=effective_lease_ttl,
+                        legacy_ttl_seconds=effective_legacy_ttl,
                     )
                     is_new = attempt.state == ReservationState.ACQUIRED
                     if attempt.reservation is not None:
@@ -433,11 +443,17 @@ def didit_webhook(
                             )
                             resp.headers["Retry-After"] = "5"
                             return resp
-                        if processing_action in ("raise", "conflict"):
+                        if processing_action == "conflict":
                             return Response(
                                 "Webhook event currently being processed",
                                 status=409,
                                 mimetype="text/plain",
+                            )
+                        if processing_action == "raise":
+                            raise DiditDuplicateWebhookError(
+                                "Webhook event currently being processed by another worker",
+                                event_id=payload.event_id,
+                                state="PROCESSING",
                             )
                         payload.is_duplicate = True
 
@@ -452,8 +468,15 @@ def didit_webhook(
                     release_webhook_event(dedup_store, dedup_key, token=res_token)
                 raise
 
+            if result is None:
+                response = Response(status=200)
+            else:
+                from flask import current_app
+
+                response = current_app.make_response(result)
+
             if dedup_store is not None and is_new:
-                status_code = _extract_status_code(result)
+                status_code = response.status_code
                 if 200 <= status_code < 300:
                     if res_token is not None:
                         complete_webhook_event(
@@ -465,9 +488,7 @@ def didit_webhook(
                 else:
                     release_webhook_event(dedup_store, dedup_key, token=res_token)
 
-            if result is None:
-                return Response(status=200)
-            return result
+            return response
 
         return sync_wrapper
 

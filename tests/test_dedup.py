@@ -429,16 +429,12 @@ class TestReservationProtocols:
         in_memory = InMemoryWebhookReservationStore()
         assert isinstance(in_memory, WebhookReservationStore)
         assert isinstance(in_memory, AsyncWebhookReservationStore)
-        assert isinstance(in_memory, WebhookDedupStore)
-        assert isinstance(in_memory, AsyncWebhookDedupStore)
 
         sync_redis = RedisWebhookReservationStore(client=MagicMock())
         assert isinstance(sync_redis, WebhookReservationStore)
-        assert isinstance(sync_redis, WebhookDedupStore)
 
         async_redis = AsyncRedisWebhookReservationStore(client=MagicMock())
         assert isinstance(async_redis, AsyncWebhookReservationStore)
-        assert isinstance(async_redis, AsyncWebhookDedupStore)
 
 
 class TestInMemoryReservationStore:

@@ -38,6 +38,7 @@ from didit.dedup import (
 )
 from didit.errors import (
     DiditConfigurationError,
+    DiditDuplicateWebhookError,
     DiditSignatureError,
 )
 from didit.models.webhook import WebhookPayload
@@ -167,7 +168,8 @@ def didit_webhook_view(
             "Must be 'retry', 'pass', 'raise', or 'conflict'."
         )
 
-    effective_lease_ttl = dedup_ttl_seconds if dedup_ttl_seconds is not None else lease_ttl_seconds
+    effective_lease_ttl = lease_ttl_seconds
+    effective_legacy_ttl = dedup_ttl_seconds if dedup_ttl_seconds is not None else 86400
     effective_completed_ttl = completed_ttl_seconds
 
     def decorator(view_func: Callable[..., Any]) -> Callable[..., Any]:
@@ -241,7 +243,10 @@ def didit_webhook_view(
                         dedup_key = compute_dedup_key(payload, signature=sig)
 
                     attempt = await areserve_webhook_event(
-                        dedup_store, dedup_key, ttl_seconds=effective_lease_ttl
+                        dedup_store,
+                        dedup_key,
+                        ttl_seconds=effective_lease_ttl,
+                        legacy_ttl_seconds=effective_legacy_ttl,
                     )
                     is_new = attempt.state == ReservationState.ACQUIRED
                     if attempt.reservation is not None:
@@ -272,11 +277,17 @@ def didit_webhook_view(
                             )
                             resp["Retry-After"] = "5"
                             return resp
-                        if processing_action in ("raise", "conflict"):
+                        if processing_action == "conflict":
                             return HttpResponse(
                                 "Webhook event currently being processed",
                                 status=409,
                                 content_type="text/plain",
+                            )
+                        if processing_action == "raise":
+                            raise DiditDuplicateWebhookError(
+                                "Webhook event currently being processed by another worker",
+                                event_id=payload.event_id,
+                                state="PROCESSING",
                             )
                         payload.is_duplicate = True
 
@@ -368,7 +379,7 @@ def didit_webhook_view(
 
                 claim_fn = getattr(dedup_store, "claim", None)
                 if claim_fn is not None and not hasattr(dedup_store, "reserve"):
-                    claim_res = claim_fn(dedup_key, ttl_seconds=effective_lease_ttl)
+                    claim_res = claim_fn(dedup_key, ttl_seconds=effective_legacy_ttl)
                     if inspect.isawaitable(claim_res):
                         if inspect.iscoroutine(claim_res):
                             claim_res.close()
@@ -393,7 +404,10 @@ def didit_webhook_view(
                         payload.is_duplicate = True
                 else:
                     attempt = reserve_webhook_event(
-                        dedup_store, dedup_key, ttl_seconds=effective_lease_ttl
+                        dedup_store,
+                        dedup_key,
+                        ttl_seconds=effective_lease_ttl,
+                        legacy_ttl_seconds=effective_legacy_ttl,
                     )
                     is_new = attempt.state == ReservationState.ACQUIRED
                     if attempt.reservation is not None:
@@ -424,11 +438,17 @@ def didit_webhook_view(
                             )
                             resp["Retry-After"] = "5"
                             return resp
-                        if processing_action in ("raise", "conflict"):
+                        if processing_action == "conflict":
                             return HttpResponse(
                                 "Webhook event currently being processed",
                                 status=409,
                                 content_type="text/plain",
+                            )
+                        if processing_action == "raise":
+                            raise DiditDuplicateWebhookError(
+                                "Webhook event currently being processed by another worker",
+                                event_id=payload.event_id,
+                                state="PROCESSING",
                             )
                         payload.is_duplicate = True
 

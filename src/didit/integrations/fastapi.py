@@ -9,6 +9,7 @@ from collections.abc import Callable
 from typing import Any, Literal
 
 from starlette.requests import Request
+from starlette.responses import Response as StarletteResponse
 
 from didit.config import DEFAULT_WEBHOOK_MAX_AGE_SECONDS
 from didit.dedup import (
@@ -24,6 +25,7 @@ from didit.dedup import (
 )
 from didit.errors import (
     DiditConfigurationError,
+    DiditDuplicateWebhookError,
     DiditSignatureError,
 )
 from didit.models.webhook import WebhookPayload
@@ -98,9 +100,8 @@ class DiditWebhookGuard:
         self.lease_ttl_seconds = lease_ttl_seconds
         self.completed_ttl_seconds = completed_ttl_seconds
         self.dedup_ttl_seconds = dedup_ttl_seconds
-        self.effective_lease_ttl = (
-            dedup_ttl_seconds if dedup_ttl_seconds is not None else lease_ttl_seconds
-        )
+        self.effective_lease_ttl = lease_ttl_seconds
+        self.effective_legacy_ttl = dedup_ttl_seconds if dedup_ttl_seconds is not None else 86400
         self.effective_completed_ttl = completed_ttl_seconds
         self.duplicate_action = duplicate_action
         self.processing_action = processing_action
@@ -167,7 +168,10 @@ class DiditWebhookGuard:
                 dedup_key = compute_dedup_key(payload, signature=sig)
 
             attempt = await areserve_webhook_event(
-                self.dedup_store, dedup_key, ttl_seconds=self.effective_lease_ttl
+                self.dedup_store,
+                dedup_key,
+                ttl_seconds=self.effective_lease_ttl,
+                legacy_ttl_seconds=self.effective_legacy_ttl,
             )
             request.state.didit_dedup_key = dedup_key
             request.state.didit_dedup_store = self.dedup_store
@@ -197,10 +201,16 @@ class DiditWebhookGuard:
                         headers={"Retry-After": "5"},
                         detail="Webhook event currently being processed by another worker",
                     )
-                if self.processing_action in ("raise", "conflict"):
+                if self.processing_action == "conflict":
                     raise HTTPException(
                         status_code=409,
                         detail="Webhook event currently being processed",
+                    )
+                if self.processing_action == "raise":
+                    raise DiditDuplicateWebhookError(
+                        "Webhook event currently being processed by another worker",
+                        event_id=payload.event_id,
+                        state="PROCESSING",
                     )
                 # "pass" mode
                 payload.is_duplicate = True
@@ -309,7 +319,8 @@ def didit_webhook(
             "Must be 'retry', 'pass', 'raise', or 'conflict'."
         )
 
-    effective_lease_ttl = dedup_ttl_seconds if dedup_ttl_seconds is not None else lease_ttl_seconds
+    effective_lease_ttl = lease_ttl_seconds
+    effective_legacy_ttl = dedup_ttl_seconds if dedup_ttl_seconds is not None else 86400
     effective_completed_ttl = completed_ttl_seconds
 
     def decorator(view_func: Callable[..., Any]) -> Callable[..., Any]:
@@ -341,7 +352,6 @@ def didit_webhook(
         @functools.wraps(view_func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             from fastapi import HTTPException
-            from starlette.responses import Response as StarletteResponse
 
             request: Request | None = kwargs.get("request")
             if request is None:
@@ -416,7 +426,10 @@ def didit_webhook(
                     dedup_key = compute_dedup_key(payload, signature=sig)
 
                 attempt = await areserve_webhook_event(
-                    dedup_store, dedup_key, ttl_seconds=effective_lease_ttl
+                    dedup_store,
+                    dedup_key,
+                    ttl_seconds=effective_lease_ttl,
+                    legacy_ttl_seconds=effective_legacy_ttl,
                 )
                 is_new = attempt.state == ReservationState.ACQUIRED
                 if attempt.reservation is not None:
@@ -444,15 +457,21 @@ def didit_webhook(
                             headers={"Retry-After": "5"},
                             detail="Webhook event currently being processed by another worker",
                         )
-                    if processing_action in ("raise", "conflict"):
+                    if processing_action == "conflict":
                         raise HTTPException(
                             status_code=409,
                             detail="Webhook event currently being processed",
                         )
+                    if processing_action == "raise":
+                        raise DiditDuplicateWebhookError(
+                            "Webhook event currently being processed by another worker",
+                            event_id=payload.event_id,
+                            state="PROCESSING",
+                        )
                     payload.is_duplicate = True
 
-            call_kwargs = dict(kwargs)
             func_sig = inspect.signature(view_func)
+            call_kwargs = {k: v for k, v in kwargs.items() if k in func_sig.parameters}
             if "payload" in func_sig.parameters:
                 call_kwargs["payload"] = payload
             elif any(p.annotation is WebhookPayload for p in func_sig.parameters.values()):
@@ -465,15 +484,57 @@ def didit_webhook(
                 if is_async:
                     result = await view_func(*args, **call_kwargs)
                 else:
-                    result = view_func(*args, **call_kwargs)
+                    from starlette.concurrency import run_in_threadpool
+
+                    result = await run_in_threadpool(view_func, *args, **call_kwargs)
             except Exception:
                 if dedup_store is not None and is_new:
                     await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
                 raise
 
+            route = (
+                request.scope.get("route") if hasattr(request, "scope") and request.scope else None
+            )
+            if (
+                route is not None
+                and getattr(route, "response_field", None) is not None
+                and not isinstance(result, StarletteResponse)
+            ):
+                from fastapi.routing import serialize_response
+
+                try:
+                    await serialize_response(
+                        field=route.response_field,
+                        response_content=result,
+                        include=getattr(route, "response_model_include", None),
+                        exclude=getattr(route, "response_model_exclude", None),
+                        by_alias=getattr(route, "response_model_by_alias", True),
+                        exclude_unset=getattr(route, "response_model_exclude_unset", False),
+                        exclude_defaults=getattr(route, "response_model_exclude_defaults", False),
+                        exclude_none=getattr(route, "response_model_exclude_none", False),
+                    )
+                except Exception:
+                    if dedup_store is not None and is_new:
+                        await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                    raise
+
             if dedup_store is not None and is_new:
-                status_code = getattr(result, "status_code", 200)
-                if isinstance(status_code, int) and 200 <= status_code < 300:
+                route_status = getattr(route, "status_code", None)
+                response = kwargs.get("response")
+                resp_status = (
+                    getattr(response, "status_code", None) if response is not None else None
+                )
+                result_status = getattr(result, "status_code", None)
+
+                status_code: int = 200
+                if isinstance(result_status, int):
+                    status_code = result_status
+                elif isinstance(resp_status, int):
+                    status_code = resp_status
+                elif isinstance(route_status, int):
+                    status_code = route_status
+
+                if 200 <= status_code < 300:
                     if res_token is not None:
                         await acomplete_webhook_event(
                             dedup_store,
@@ -489,11 +550,18 @@ def didit_webhook(
         func_sig = inspect.signature(view_func)
         new_params = []
         has_req = False
+        has_resp = False
         for param in func_sig.parameters.values():
             if param.name == "payload" or param.annotation is WebhookPayload:
                 continue
             if param.name == "request" or param.annotation is Request:
                 has_req = True
+            if (
+                param.name == "response"
+                or param.annotation is StarletteResponse
+                or getattr(param.annotation, "__name__", "") == "Response"
+            ):
+                has_resp = True
             new_params.append(param)
         if not has_req:
             new_params.insert(
@@ -502,6 +570,14 @@ def didit_webhook(
                     "request",
                     inspect.Parameter.POSITIONAL_OR_KEYWORD,
                     annotation=Request,
+                ),
+            )
+        if not has_resp:
+            new_params.append(
+                inspect.Parameter(
+                    "response",
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    annotation=StarletteResponse,
                 ),
             )
         wrapper.__signature__ = func_sig.replace(parameters=new_params)  # type: ignore[attr-defined]
