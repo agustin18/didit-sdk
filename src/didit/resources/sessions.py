@@ -8,9 +8,10 @@ import random
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from didit.errors import (
+    DiditAPIError,
     DiditConnectionError,
     DiditNotFoundError,
     DiditRateLimitError,
@@ -68,7 +69,7 @@ def _validate_session_list_filters(
     date_from: datetime | str | None,
     date_to: datetime | str | None,
 ) -> tuple[str | None, str | None, str | None, str | None]:
-    if session_kind is not None and session_kind != "user":
+    if session_kind != "user":
         raise ValueError(
             f"Unsupported session_kind '{session_kind}'. Only 'user' (KYC) is currently supported."
         )
@@ -188,7 +189,7 @@ class SessionsResource:
         self,
         *,
         status: SessionStatus | str | None = None,
-        session_kind: str | None = "user",
+        session_kind: Literal["user"] = "user",
         vendor_data: str | None = None,
         country: str | None = None,
         workflow_id: str | None = None,
@@ -203,7 +204,7 @@ class SessionsResource:
 
         Args:
             status: Filter by SessionStatus or status string.
-            session_kind: Filter by session kind (default "user" for KYC).
+            session_kind: Filter by session kind (strictly "user" for KYC scope).
             vendor_data: Filter by internal user/vendor identifier.
             country: Filter by ISO country code.
             workflow_id: Filter by workflow UUID.
@@ -226,9 +227,7 @@ class SessionsResource:
             date_from=date_from,
             date_to=date_to,
         )
-        params: dict[str, Any] = {"limit": limit, "offset": offset}
-        if session_kind is not None:
-            params["session_kind"] = session_kind
+        params: dict[str, Any] = {"limit": limit, "offset": offset, "session_kind": "user"}
         if status_str is not None:
             params["status"] = status_str
         if vendor_data is not None:
@@ -372,6 +371,7 @@ class SessionsResource:
         missing_local_count = 0
         missing_remote_count = 0
         offset = 0
+        remote_count: int | None = None
 
         while True:
             current_limit = effective_page_size
@@ -386,8 +386,20 @@ class SessionsResource:
                 offset=offset,
                 options=options,
             )
+            remote_count = page.count
 
             if not page.results:
+                if page.next is not None:
+                    raise DiditAPIError(
+                        "Didit pagination returned next page metadata without progress",
+                        status_code=502,
+                    )
+                if offset < page.count and (max_sessions is None or len(reports) < max_sessions):
+                    raise DiditAPIError(
+                        f"Inconsistent pagination metadata: received {offset} of "
+                        f"{page.count} sessions without next page",
+                        status_code=502,
+                    )
                 break
 
             for item in page.results:
@@ -404,18 +416,33 @@ class SessionsResource:
                     break
 
             offset += len(page.results)
-            if (
-                page.next is None
-                or len(page.results) < current_limit
-                or (max_sessions is not None and len(reports) >= max_sessions)
-            ):
+            if max_sessions is not None and len(reports) >= max_sessions:
                 break
+
+            if page.next is None:
+                if offset < page.count:
+                    raise DiditAPIError(
+                        f"Inconsistent pagination metadata: received {offset} of "
+                        f"{page.count} sessions without next page",
+                        status_code=502,
+                    )
+                break
+
+        truncated = bool(
+            max_sessions is not None
+            and len(reports) >= max_sessions
+            and (
+                page.next is not None or (remote_count is not None and remote_count > len(reports))
+            )
+        )
 
         return BatchReconciliationReport(
             total_evaluated=len(reports),
             drift_count=drift_count,
             missing_local_count=missing_local_count,
             missing_remote_count=missing_remote_count,
+            truncated=truncated,
+            remote_count=remote_count,
             reports=reports,
         )
 
@@ -580,7 +607,7 @@ class AsyncSessionsResource:
         self,
         *,
         status: SessionStatus | str | None = None,
-        session_kind: str | None = "user",
+        session_kind: Literal["user"] = "user",
         vendor_data: str | None = None,
         country: str | None = None,
         workflow_id: str | None = None,
@@ -601,9 +628,7 @@ class AsyncSessionsResource:
             date_from=date_from,
             date_to=date_to,
         )
-        params: dict[str, Any] = {"limit": limit, "offset": offset}
-        if session_kind is not None:
-            params["session_kind"] = session_kind
+        params: dict[str, Any] = {"limit": limit, "offset": offset, "session_kind": "user"}
         if status_str is not None:
             params["status"] = status_str
         if vendor_data is not None:
@@ -745,6 +770,7 @@ class AsyncSessionsResource:
         missing_local_count = 0
         missing_remote_count = 0
         offset = 0
+        remote_count: int | None = None
 
         while True:
             current_limit = effective_page_size
@@ -759,8 +785,20 @@ class AsyncSessionsResource:
                 offset=offset,
                 options=options,
             )
+            remote_count = page.count
 
             if not page.results:
+                if page.next is not None:
+                    raise DiditAPIError(
+                        "Didit pagination returned next page metadata without progress",
+                        status_code=502,
+                    )
+                if offset < page.count and (max_sessions is None or len(reports) < max_sessions):
+                    raise DiditAPIError(
+                        f"Inconsistent pagination metadata: received {offset} of "
+                        f"{page.count} sessions without next page",
+                        status_code=502,
+                    )
                 break
 
             for item in page.results:
@@ -785,18 +823,33 @@ class AsyncSessionsResource:
                     break
 
             offset += len(page.results)
-            if (
-                page.next is None
-                or len(page.results) < current_limit
-                or (max_sessions is not None and len(reports) >= max_sessions)
-            ):
+            if max_sessions is not None and len(reports) >= max_sessions:
                 break
+
+            if page.next is None:
+                if offset < page.count:
+                    raise DiditAPIError(
+                        f"Inconsistent pagination metadata: received {offset} of "
+                        f"{page.count} sessions without next page",
+                        status_code=502,
+                    )
+                break
+
+        truncated = bool(
+            max_sessions is not None
+            and len(reports) >= max_sessions
+            and (
+                page.next is not None or (remote_count is not None and remote_count > len(reports))
+            )
+        )
 
         return BatchReconciliationReport(
             total_evaluated=len(reports),
             drift_count=drift_count,
             missing_local_count=missing_local_count,
             missing_remote_count=missing_remote_count,
+            truncated=truncated,
+            remote_count=remote_count,
             reports=reports,
         )
 

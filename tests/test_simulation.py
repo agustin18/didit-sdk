@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from didit.errors import DiditNotFoundError
+from didit.errors import DiditAPIError, DiditNotFoundError
 from didit.models.decision import DocumentData
 from didit.models.enums import SessionStatus
 from didit.simulation import SimulatedAsyncDidit, SimulatedDidit
@@ -425,8 +425,21 @@ class TestSimulatedAsyncDidit:
 
     def test_simulation_list_filters_and_validations(self) -> None:
         client = SimulatedDidit()
-        # session_kind != "user"
-        assert client.sessions.list(session_kind="business").count == 0
+        # session_kind != "user" raises ValueError matching real API validation parity
+        with pytest.raises(ValueError, match="Unsupported session_kind 'business'"):
+            client.sessions.list(session_kind="business")  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="Unsupported session_kind 'None'"):
+            client.sessions.list(session_kind=None)  # type: ignore[arg-type]
+
+        # Shared validation parity checks
+        with pytest.raises(ValueError, match="limit must be between 1 and 100"):
+            client.sessions.list(limit=0)
+        with pytest.raises(ValueError, match="offset must be non-negative"):
+            client.sessions.list(offset=-1)
+        with pytest.raises(ValueError, match="Expected 3-letter ISO 3166-1 alpha-3 code"):
+            client.sessions.list(country="ES")
+        with pytest.raises(ValueError, match="must be timezone-aware"):
+            client.sessions.list(date_from=datetime(2026, 1, 1))
 
         # Create session with decision containing country
         s = client.sessions.create(
@@ -490,14 +503,26 @@ class TestSimulatedAsyncDidit:
         with pytest.raises(ValueError, match="max_sessions must be greater than 0"):
             client.sessions.reconcile_range(source=DummySource(), max_sessions=0)
 
-        # Range max_sessions cap
+        # Range max_sessions cap and v3 URL verification
         for i in range(5):
             client.sessions.create(
                 vendor_data=f"multi_{i}", workflow_id="wf", sandbox_scenario="approve"
             )
 
+        page = client.sessions.list(limit=2)
+        assert page.count == 6
+        assert page.next == "https://verification.didit.me/v3/sessions/?offset=2&limit=2"
+        assert page.previous is None
+
         cap_report = client.sessions.reconcile_range(source=DummySource(), max_sessions=2)
         assert cap_report.total_evaluated == 2
+        assert cap_report.truncated is True
+        assert cap_report.remote_count == 6
+
+        full_report = client.sessions.reconcile_range(source=DummySource(), page_size=2)
+        assert full_report.total_evaluated == 6
+        assert full_report.truncated is False
+        assert full_report.remote_count == 6
 
         # Multi-page pagination in reconcile_range (page_size=2)
         paginated_report = client.sessions.reconcile_range(source=DummySource(), page_size=2)
@@ -567,3 +592,114 @@ class TestSimulatedAsyncDidit:
         empty_client = SimulatedAsyncDidit()
         empty_report = await empty_client.sessions.reconcile_range(source=DummyAsyncSource())
         assert empty_report.total_evaluated == 0
+
+    def test_simulation_reconcile_range_inconsistent_pagination_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from didit.models.session import ObservedSessionState, SessionListPage
+
+        client = SimulatedDidit()
+
+        class DummySource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        # 1. Empty results with next != None
+        monkeypatch.setattr(
+            client.sessions,
+            "list",
+            lambda **kwargs: SessionListPage(
+                count=10, next="https://test/next", previous=None, results=[]
+            ),
+        )
+        with pytest.raises(
+            DiditAPIError,
+            match="Didit pagination returned next page metadata without progress",
+        ) as exc_info:
+            client.sessions.reconcile_range(source=DummySource())
+        assert exc_info.value.status_code == 502
+
+        # 2. Empty results with next == None and offset < page.count
+        monkeypatch.setattr(
+            client.sessions,
+            "list",
+            lambda **kwargs: SessionListPage(count=10, next=None, previous=None, results=[]),
+        )
+        with pytest.raises(
+            DiditAPIError,
+            match="Inconsistent pagination metadata: received 0 of 10 sessions without next page",
+        ) as exc_info:
+            client.sessions.reconcile_range(source=DummySource())
+        assert exc_info.value.status_code == 502
+
+        # 3. Non-empty results with next == None and offset < page.count
+        from didit.models.session import SessionListItem
+
+        s = client.sessions.create(vendor_data="incon", workflow_id="wf")
+        item = SessionListItem(session_id=s.session_id, status=SessionStatus.APPROVED)
+        monkeypatch.setattr(
+            client.sessions,
+            "list",
+            lambda **kwargs: SessionListPage(count=10, next=None, previous=None, results=[item]),
+        )
+        with pytest.raises(
+            DiditAPIError,
+            match="Inconsistent pagination metadata: received 1 of 10 sessions without next page",
+        ) as exc_info:
+            client.sessions.reconcile_range(source=DummySource())
+        assert exc_info.value.status_code == 502
+
+    @pytest.mark.asyncio
+    async def test_async_simulation_reconcile_range_inconsistent_pagination_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typing import Any
+
+        from didit.models.session import ObservedSessionState, SessionListPage
+
+        client = SimulatedAsyncDidit()
+
+        class DummyAsyncSource:
+            async def aget(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        # 1. Empty results with next != None
+        async def mock_list_1(**kwargs: Any) -> SessionListPage:
+            return SessionListPage(count=10, next="https://test/next", previous=None, results=[])
+
+        monkeypatch.setattr(client.sessions, "list", mock_list_1)
+        with pytest.raises(
+            DiditAPIError,
+            match="Didit pagination returned next page metadata without progress",
+        ) as exc_info:
+            await client.sessions.reconcile_range(source=DummyAsyncSource())
+        assert exc_info.value.status_code == 502
+
+        # 2. Empty results with next == None and offset < page.count
+        async def mock_list_2(**kwargs: Any) -> SessionListPage:
+            return SessionListPage(count=10, next=None, previous=None, results=[])
+
+        monkeypatch.setattr(client.sessions, "list", mock_list_2)
+        with pytest.raises(
+            DiditAPIError,
+            match="Inconsistent pagination metadata: received 0 of 10 sessions without next page",
+        ) as exc_info:
+            await client.sessions.reconcile_range(source=DummyAsyncSource())
+        assert exc_info.value.status_code == 502
+
+        # 3. Non-empty results with next == None and offset < page.count
+        from didit.models.session import SessionListItem
+
+        s = await client.sessions.create(vendor_data="incon_async", workflow_id="wf")
+        item = SessionListItem(session_id=s.session_id, status=SessionStatus.APPROVED)
+
+        async def mock_list_3(**kwargs: Any) -> SessionListPage:
+            return SessionListPage(count=10, next=None, previous=None, results=[item])
+
+        monkeypatch.setattr(client.sessions, "list", mock_list_3)
+        with pytest.raises(
+            DiditAPIError,
+            match="Inconsistent pagination metadata: received 1 of 10 sessions without next page",
+        ) as exc_info:
+            await client.sessions.reconcile_range(source=DummyAsyncSource())
+        assert exc_info.value.status_code == 502

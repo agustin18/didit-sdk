@@ -120,7 +120,7 @@ client = Didit()
 page = client.sessions.list(
     status=SessionStatus.APPROVED,
     vendor_data="user_12345",
-    country="ESP",
+    country="ESP",  # Normalized to uppercase and validated as 3-letter alpha-3-shaped code
     limit=50,
     offset=0,
 )
@@ -173,12 +173,15 @@ batch_report = client.sessions.reconcile_range(
     page_size=50,
     max_sessions=1000,
 )
-print(f"Audited {batch_report.total_evaluated} sessions: {batch_report.drift_count} drifts found.")
+print(
+    f"Audited {batch_report.total_evaluated} sessions (remote: {batch_report.remote_count}, "
+    f"truncated: {batch_report.truncated}): {batch_report.drift_count} drifts found."
+)
 ```
 
 ### 5. PII-Minimized Telemetry Event Sink
 
-Attach a passive `DiditEventSink` to collect structured, privacy-safe SDK operational metrics (backoff retries, rate limits, duplicate webhooks, lease degradations/losses, and reconciliation drift). The event sink is strictly non-blocking: any exception raised inside `emit()` is safely caught and suppressed by the SDK to guarantee that metric reporting never fails core business operations:
+Attach a passive `DiditEventSink` to collect structured, privacy-safe SDK operational metrics (backoff retries, rate limits, duplicate webhooks, lease degradations/losses, and reconciliation drift). Event delivery is synchronous and fail-isolated (exceptions raised inside `emit()` are safely caught and suppressed by `safe_emit`); sink implementations MUST return promptly and should enqueue external I/O:
 
 ```python
 from didit import Didit, DiditEventSink, DiditSDKEvent

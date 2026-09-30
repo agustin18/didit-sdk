@@ -708,6 +708,96 @@ class TestFastAPIWebhookReservation:
         assert len(lost_events) == 1
         assert lost_events[0].reason == "lease_cas_failed"
 
+    @pytest.mark.asyncio
+    async def test_release_didit_claim_cas_failure_emits_lease_lost(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from didit.dedup import WebhookReservation
+        from didit.integrations.fastapi import release_didit_claim
+
+        class FastAPIRecordingSink(DiditEventSink):
+            def __init__(self) -> None:
+                self.events: list[DiditSDKEvent] = []
+
+            def emit(self, event: DiditSDKEvent) -> None:
+                self.events.append(event)
+
+        mock_store = AsyncMock()
+        mock_store.arelease.return_value = False
+
+        sink = FastAPIRecordingSink()
+        req = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/webhook",
+                "headers": [],
+            }
+        )
+        req.state.didit_dedup_store = mock_store
+        req.state.didit_dedup_key = "didit:webhook:evt_rel_cas_fail"
+        req.state.didit_claimed = True
+        req.state.didit_reservation = WebhookReservation(
+            event_id="evt_rel_cas_fail",
+            token="worker_token_rel_fail",
+            expires_at=time.monotonic() + 30,
+        )
+        req.state.didit_event_sink = sink
+        req.state.didit_event_id = "evt_rel_cas_fail"
+        req.state.didit_session_id = "sess_rel_cas_fail"
+
+        res = await release_didit_claim(req)
+        assert res is False
+        lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
+        assert len(lost_events) == 1
+        assert lost_events[0].reason == "lease_release_cas_failed"
+
+    @pytest.mark.asyncio
+    async def test_guard_release_claim_cas_failure_emits_lease_lost(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from didit.dedup import WebhookReservation
+
+        class FastAPIRecordingSink(DiditEventSink):
+            def __init__(self) -> None:
+                self.events: list[DiditSDKEvent] = []
+
+            def emit(self, event: DiditSDKEvent) -> None:
+                self.events.append(event)
+
+        mock_store = AsyncMock()
+        mock_store.arelease.return_value = False
+
+        sink = FastAPIRecordingSink()
+        guard = DiditWebhookGuard(
+            secret=WEBHOOK_SECRET,
+            dedup_store=mock_store,
+            event_sink=sink,
+        )
+        req = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/webhook",
+                "headers": [],
+            }
+        )
+        req.state.didit_dedup_key = "didit:webhook:evt_guard_rel_cas_fail"
+        req.state.didit_claimed = True
+        req.state.didit_reservation = WebhookReservation(
+            event_id="evt_guard_rel_cas_fail",
+            token="worker_token_guard_fail",
+            expires_at=time.monotonic() + 30,
+        )
+        req.state.didit_event_id = "evt_guard_rel_cas_fail"
+        req.state.didit_session_id = "sess_guard_rel_cas_fail"
+
+        res = await guard.release_claim(req)
+        assert res is False
+        lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
+        assert len(lost_events) == 1
+        assert lost_events[0].reason == "lease_release_cas_failed"
+
 
 class TestFastAPIRouteDecoratorLifecycle:
     def test_default_adapter_lease_ttl_is_30_seconds(self) -> None:
@@ -1592,7 +1682,7 @@ class TestDiditWebhookRoute:
         event = sink.events[0]
         assert isinstance(event, WebhookLeaseLost)
         assert event.event_id == "evt_lease_lost_test"
-        assert "Redis connection broken during release" in event.reason
+        assert event.reason == "lease_release_failed"
 
 
 class TestIntegrationsLazyLoading:

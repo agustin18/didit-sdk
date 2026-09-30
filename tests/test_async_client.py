@@ -197,14 +197,13 @@ class TestAsyncDiditClient:
         assert page.results[0].session_id == "sess_1"
         assert page.results[0].status == SessionStatus.APPROVED
 
-        # Also test with session_kind=None and string dates
+        # Also test with string dates
         await async_client.sessions.list(
-            session_kind=None,
             date_from="2026-01-01T00:00:00Z",
             date_to="2026-01-02T00:00:00Z",
         )
         req2 = route.calls.last.request
-        assert "session_kind" not in req2.url.params
+        assert req2.url.params["session_kind"] == "user"
 
         # Test listing with pure defaults
         page_default = await async_client.sessions.list()
@@ -870,6 +869,8 @@ class TestAsyncDiditClient:
         assert batch_report.total_evaluated == 52
         assert len(batch_report.reports) == 52
         assert batch_report.drift_count == 0
+        assert batch_report.truncated is False
+        assert batch_report.remote_count == 52
         await async_client.aclose()
 
     @respx.mock
@@ -910,6 +911,162 @@ class TestAsyncDiditClient:
         )
         assert batch_report.total_evaluated == 30
         assert len(batch_report.reports) == 30
+        assert batch_report.truncated is True
+        assert batch_report.remote_count == 100
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_reconcile_range_short_page_with_next_continues_pagination(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        from didit.models.session import ObservedSessionState
+
+        page1_items = [{"session_id": f"sess_ashort1_{i}", "status": "Approved"} for i in range(50)]
+        page2_items = [{"session_id": f"sess_ashort2_{i}", "status": "Approved"} for i in range(20)]
+        respx.get(f"{base_url}/sessions/").mock(
+            side_effect=[
+                Response(
+                    200,
+                    json={
+                        "count": 70,
+                        "next": f"{base_url}/sessions/?offset=50&limit=100",
+                        "previous": None,
+                        "results": page1_items,
+                    },
+                ),
+                Response(
+                    200,
+                    json={
+                        "count": 70,
+                        "next": None,
+                        "previous": f"{base_url}/sessions/?offset=0&limit=100",
+                        "results": page2_items,
+                    },
+                ),
+            ]
+        )
+        for i in range(50):
+            respx.get(f"{base_url}/session/sess_ashort1_{i}/decision/").mock(
+                return_value=Response(
+                    200,
+                    json={"session_id": f"sess_ashort1_{i}", "status": "Approved", "warnings": []},
+                )
+            )
+        for i in range(20):
+            respx.get(f"{base_url}/session/sess_ashort2_{i}/decision/").mock(
+                return_value=Response(
+                    200,
+                    json={"session_id": f"sess_ashort2_{i}", "status": "Approved", "warnings": []},
+                )
+            )
+
+        class AllSyncSource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        batch_report = await async_client.sessions.reconcile_range(
+            page_size=100,
+            source=AllSyncSource(),
+        )
+        assert batch_report.total_evaluated == 70
+        assert len(batch_report.reports) == 70
+        assert batch_report.drift_count == 0
+        assert batch_report.truncated is False
+        assert batch_report.remote_count == 70
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_reconcile_range_empty_results_with_next_raises_api_error(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/sessions/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "count": 10,
+                    "next": f"{base_url}/sessions/?offset=0&limit=50",
+                    "previous": None,
+                    "results": [],
+                },
+            )
+        )
+
+        class DummyAsyncSource:
+            async def aget(self, session_id: str) -> None:
+                return None
+
+        with pytest.raises(
+            DiditAPIError,
+            match="Didit pagination returned next page metadata without progress",
+        ) as exc_info:
+            await async_client.sessions.reconcile_range(source=DummyAsyncSource())
+        assert exc_info.value.status_code == 502
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_reconcile_range_inconsistent_count_without_next_raises_api_error(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        from didit.models.session import ObservedSessionState
+
+        page_items = [{"session_id": f"sess_aincon_{i}", "status": "Approved"} for i in range(5)]
+        respx.get(f"{base_url}/sessions/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "count": 50,
+                    "next": None,
+                    "previous": None,
+                    "results": page_items,
+                },
+            )
+        )
+        for i in range(5):
+            respx.get(f"{base_url}/session/sess_aincon_{i}/decision/").mock(
+                return_value=Response(
+                    200,
+                    json={"session_id": f"sess_aincon_{i}", "status": "Approved", "warnings": []},
+                )
+            )
+
+        class AllSyncSource:
+            def get(self, session_id: str) -> ObservedSessionState | None:
+                return ObservedSessionState(session_id=session_id, status=SessionStatus.APPROVED)
+
+        with pytest.raises(
+            DiditAPIError,
+            match="Inconsistent pagination metadata: received 5 of 50 sessions without next page",
+        ) as exc_info:
+            await async_client.sessions.reconcile_range(source=AllSyncSource())
+        assert exc_info.value.status_code == 502
+        await async_client.aclose()
+
+    @respx.mock
+    async def test_async_reconcile_range_empty_results_inconsistent_count_raises_api_error(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/sessions/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "count": 50,
+                    "next": None,
+                    "previous": None,
+                    "results": [],
+                },
+            )
+        )
+
+        class DummyAsyncSource:
+            async def aget(self, session_id: str) -> None:
+                return None
+
+        with pytest.raises(
+            DiditAPIError,
+            match="Inconsistent pagination metadata: received 0 of 50 sessions without next page",
+        ) as exc_info:
+            await async_client.sessions.reconcile_range(source=DummyAsyncSource())
+        assert exc_info.value.status_code == 502
         await async_client.aclose()
 
     @respx.mock
@@ -1000,6 +1157,7 @@ class TestAsyncDiditClient:
         ("filter_kwargs", "err_match"),
         [
             ({"session_kind": "business"}, "Unsupported session_kind 'business'"),
+            ({"session_kind": None}, "Unsupported session_kind 'None'"),
             ({"country": "ES"}, "Expected 3-letter ISO 3166-1 alpha-3 code"),
             ({"country": "españa"}, "Expected 3-letter ISO 3166-1 alpha-3 code"),
             ({"limit": 0}, "limit must be between 1 and 100"),

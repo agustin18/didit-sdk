@@ -885,7 +885,7 @@ class TestDjangoTelemetry:
 
         lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
         assert len(lost_events) == 1
-        assert "Release failed during exception unwind" in lost_events[0].reason
+        assert lost_events[0].reason == "lease_release_failed"
 
     @pytest.mark.asyncio
     async def test_django_async_telemetry_release_failure_during_unwind(self) -> None:
@@ -909,7 +909,50 @@ class TestDjangoTelemetry:
 
         lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
         assert len(lost_events) == 1
-        assert "Release failed during exception unwind" in lost_events[0].reason
+        assert lost_events[0].reason == "lease_release_failed"
+
+    def test_django_telemetry_release_cas_failure_emits_lease_lost(self) -> None:
+        sink = RecordingSink()
+        store = MagicMock()
+        store.reserve.return_value = ReservationAttempt(
+            state=ReservationState.ACQUIRED,
+            reservation=MagicMock(token="tok_rel_cas"),
+        )
+        store.release.return_value = False
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store, event_sink=sink)
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("not found", status=404)
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        resp = view(req)
+        assert resp.status_code == 404
+        lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
+        assert len(lost_events) == 1
+        assert lost_events[0].reason == "lease_release_cas_failed"
+
+    @pytest.mark.asyncio
+    async def test_django_async_telemetry_release_cas_failure_emits_lease_lost(self) -> None:
+        sink = RecordingSink()
+        store = MagicMock()
+        store.areserve = AsyncMock(
+            return_value=ReservationAttempt(
+                state=ReservationState.ACQUIRED,
+                reservation=MagicMock(token="tok_async_rel_cas"),
+            )
+        )
+        store.arelease = AsyncMock(return_value=False)
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store, event_sink=sink)
+        async def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("not found", status=404)
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        resp = await view(req)
+        assert resp.status_code == 404
+        lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
+        assert len(lost_events) == 1
+        assert lost_events[0].reason == "lease_release_cas_failed"
 
     def test_django_telemetry_cas_failure_emits_lease_lost(self) -> None:
         sink = RecordingSink()

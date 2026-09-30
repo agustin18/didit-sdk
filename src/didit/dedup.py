@@ -927,8 +927,12 @@ def release_webhook_event(
     store: Any,
     event_id: str,
     token: str | None = None,
-) -> None:
-    """Safely release a webhook event reservation synchronously."""
+) -> bool:
+    """Safely release a webhook event reservation synchronously.
+
+    Returns:
+        bool: True if released or not a reservation store, False if CAS release failed.
+    """
     release_fn = getattr(store, "release", None)
     if (
         release_fn is not None
@@ -937,42 +941,49 @@ def release_webhook_event(
     ):
         sig = inspect.signature(release_fn)
         if len(sig.parameters) >= 2 and token is not None:
-            release_fn(event_id, token)
-        else:
-            release_fn(event_id)
+            res = release_fn(event_id, token)
+            return bool(res) if res is not None else True
+        res = release_fn(event_id)
+        return bool(res) if res is not None else True
+    return True
 
 
 async def arelease_webhook_event(
     store: Any,
     event_id: str,
     token: str | None = None,
-) -> None:
-    """Safely release a webhook event reservation across sync and async stores."""
+) -> bool:
+    """Safely release a webhook event reservation across sync and async stores.
+
+    Returns:
+        bool: True if released or not a reservation store, False if CAS release failed.
+    """
     if hasattr(store, "arelease") and callable(store.arelease):
         sig = inspect.signature(store.arelease)
         if len(sig.parameters) >= 2 and token is not None:
-            await store.arelease(event_id, token)
+            res = await store.arelease(event_id, token)
         else:
-            await store.arelease(event_id)
-        return
+            res = await store.arelease(event_id)
+        return bool(res) if res is not None else True
 
     release_fn = getattr(store, "release", None)
     if release_fn is None or not callable(release_fn):
-        return
+        return True
 
     sig = inspect.signature(release_fn)
     takes_token = len(sig.parameters) >= 2 and token is not None
 
     if inspect.iscoroutinefunction(release_fn):
         if takes_token:
-            await release_fn(event_id, token)
+            res = await release_fn(event_id, token)
         else:
-            await release_fn(event_id)
+            res = await release_fn(event_id)
     else:
         if takes_token:
-            await asyncio.to_thread(release_fn, event_id, token)
+            res = await asyncio.to_thread(release_fn, event_id, token)
         else:
-            await asyncio.to_thread(release_fn, event_id)
+            res = await asyncio.to_thread(release_fn, event_id)
+    return bool(res) if res is not None else True
 
 
 def renew_webhook_event(

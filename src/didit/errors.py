@@ -72,7 +72,7 @@ class DiditAPIError(DiditError):
         self,
         message: str,
         *,
-        status_code: int,
+        status_code: int = 502,
         response_body: str | None = None,
         headers: Mapping[str, str] | None = None,
         error_code: str | None = None,

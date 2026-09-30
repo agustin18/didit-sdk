@@ -339,14 +339,25 @@ def didit_webhook_view(
                 except Exception:
                     if dedup_store is not None and is_new:
                         try:
-                            await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
-                        except Exception as release_exc:
+                            released = await arelease_webhook_event(
+                                dedup_store, dedup_key, token=res_token
+                            )
+                            if not released:
+                                safe_emit(
+                                    sink,
+                                    WebhookLeaseLost(
+                                        event_id=payload.event_id,
+                                        session_id=payload.session_id,
+                                        reason="lease_release_cas_failed",
+                                    ),
+                                )
+                        except Exception:
                             safe_emit(
                                 sink,
                                 WebhookLeaseLost(
                                     event_id=payload.event_id,
                                     session_id=payload.session_id,
-                                    reason=f"Release failed during exception unwind: {release_exc}",
+                                    reason="lease_release_failed",
                                 ),
                             )
                     raise
@@ -371,7 +382,18 @@ def didit_webhook_view(
                                     ),
                                 )
                     else:
-                        await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                        released = await arelease_webhook_event(
+                            dedup_store, dedup_key, token=res_token
+                        )
+                        if not released:
+                            safe_emit(
+                                sink,
+                                WebhookLeaseLost(
+                                    event_id=payload.event_id,
+                                    session_id=payload.session_id,
+                                    reason="lease_release_cas_failed",
+                                ),
+                            )
 
                 if result is None:
                     return HttpResponse(status=200)
@@ -558,14 +580,23 @@ def didit_webhook_view(
             except Exception:
                 if dedup_store is not None and is_new:
                     try:
-                        release_webhook_event(dedup_store, dedup_key, token=res_token)
-                    except Exception as release_exc:
+                        released = release_webhook_event(dedup_store, dedup_key, token=res_token)
+                        if not released:
+                            safe_emit(
+                                sink,
+                                WebhookLeaseLost(
+                                    event_id=payload.event_id,
+                                    session_id=payload.session_id,
+                                    reason="lease_release_cas_failed",
+                                ),
+                            )
+                    except Exception:
                         safe_emit(
                             sink,
                             WebhookLeaseLost(
                                 event_id=payload.event_id,
                                 session_id=payload.session_id,
-                                reason=f"Release failed during exception unwind: {release_exc}",
+                                reason="lease_release_failed",
                             ),
                         )
                 raise
@@ -590,7 +621,16 @@ def didit_webhook_view(
                                 ),
                             )
                 else:
-                    release_webhook_event(dedup_store, dedup_key, token=res_token)
+                    released = release_webhook_event(dedup_store, dedup_key, token=res_token)
+                    if not released:
+                        safe_emit(
+                            sink,
+                            WebhookLeaseLost(
+                                event_id=payload.event_id,
+                                session_id=payload.session_id,
+                                reason="lease_release_cas_failed",
+                            ),
+                        )
 
             if result is None:
                 return HttpResponse(status=200)

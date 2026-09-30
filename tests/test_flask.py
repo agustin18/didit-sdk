@@ -992,7 +992,7 @@ class TestFlaskTelemetry:
 
         lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
         assert len(lost_events) == 1
-        assert "Release failed during exception unwind" in lost_events[0].reason
+        assert lost_events[0].reason == "lease_release_failed"
 
     def test_flask_telemetry_cas_failure_emits_lease_lost(self) -> None:
         app = Flask(__name__)
@@ -1014,6 +1014,27 @@ class TestFlaskTelemetry:
         lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
         assert len(lost_events) == 1
         assert lost_events[0].reason == "lease_cas_failed"
+
+    def test_flask_telemetry_release_cas_failure_emits_lease_lost(self) -> None:
+        app = Flask(__name__)
+        sink = FlaskRecordingSink()
+        store = MagicMock()
+        store.reserve.return_value = ReservationAttempt(
+            state=ReservationState.ACQUIRED,
+            reservation=MagicMock(token="tok_rel_cas"),
+        )
+        store.release.return_value = False
+
+        @app.route("/telemetry-release-cas", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=store, event_sink=sink)
+        def handle(payload: WebhookPayload) -> tuple[str, int]:
+            return "not found", 404
+
+        res = create_signed_flask_client(app, "/telemetry-release-cas", SAMPLE_PAYLOAD)
+        assert res.status_code == 404
+        lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
+        assert len(lost_events) == 1
+        assert lost_events[0].reason == "lease_release_cas_failed"
 
     def test_flask_async_telemetry_suite(self) -> None:
         app = Flask(__name__)
@@ -1063,4 +1084,27 @@ class TestFlaskTelemetry:
 
         lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
         assert len(lost_events) == 1
-        assert "Release failed during exception unwind" in lost_events[0].reason
+        assert lost_events[0].reason == "lease_release_failed"
+
+    def test_flask_async_telemetry_release_cas_failure(self) -> None:
+        app = Flask(__name__)
+        sink = FlaskRecordingSink()
+        store = MagicMock()
+        store.areserve = AsyncMock(
+            return_value=ReservationAttempt(
+                state=ReservationState.ACQUIRED,
+                reservation=MagicMock(token="tok_async_cas_fail"),
+            )
+        )
+        store.arelease = AsyncMock(return_value=False)
+
+        @app.route("/telemetry-async-release-cas", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=store, event_sink=sink)
+        async def handle(payload: WebhookPayload) -> tuple[str, int]:
+            return "not found", 404
+
+        res = create_signed_flask_client(app, "/telemetry-async-release-cas", SAMPLE_PAYLOAD)
+        assert res.status_code == 404
+        lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
+        assert len(lost_events) == 1
+        assert lost_events[0].reason == "lease_release_cas_failed"

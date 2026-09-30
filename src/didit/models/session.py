@@ -79,12 +79,20 @@ class SessionListItem(BaseModel):
             f"workflow_id={self.workflow_id!r}, session_token={token_repr})"
         )
 
+    __str__ = __repr__
+
     def redacted_dump(self) -> dict[str, Any]:
-        """Dump model dictionary with session_token redacted."""
-        data = self.model_dump()
-        if data.get("session_token"):
-            data["session_token"] = "[REDACTED]"
-        return data
+        """Dump model dictionary with session_token redacted using a strict allowlist."""
+        return {
+            "session_id": self.session_id,
+            "status": self.status.value if isinstance(self.status, SessionStatus) else self.status,
+            "session_token": "[REDACTED]" if self.session_token else None,
+            "workflow_id": self.workflow_id,
+            "country": self.country,
+            "session_kind": self.session_kind,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
 
 
 class SessionListPage(BaseModel):
@@ -103,12 +111,14 @@ class SessionListPage(BaseModel):
             f"has_next={self.next is not None}, has_previous={self.previous is not None})"
         )
 
+    __str__ = __repr__
+
     def redacted_dump(self) -> dict[str, Any]:
-        """Dump model dictionary with all contained session tokens redacted."""
+        """Dump model dictionary with session tokens redacted and without raw query URLs."""
         return {
             "count": self.count,
-            "next": self.next,
-            "previous": self.previous,
+            "has_next": self.next is not None,
+            "has_previous": self.previous is not None,
             "results": [item.redacted_dump() for item in self.results],
         }
 
@@ -193,6 +203,14 @@ class BatchReconciliationReport(BaseModel):
     )
     missing_local_count: int = Field(default=0, description="Count of sessions missing locally")
     missing_remote_count: int = Field(default=0, description="Count of sessions missing remotely")
+    truncated: bool = Field(
+        default=False,
+        description="True if range was capped by max_sessions before exhausting pages",
+    )
+    remote_count: int | None = Field(
+        default=None,
+        description="Total matching sessions count reported by remote Didit API metadata",
+    )
     reports: list[SessionReconciliationReport] = Field(
         default_factory=list, description="Individual session reconciliation reports"
     )

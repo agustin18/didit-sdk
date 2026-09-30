@@ -765,15 +765,26 @@ class TestSessionListAndReconciliationModels:
         assert isinstance(CustomAsyncSource(), AsyncSessionStateSource)
 
     def test_session_models_redacted_dump(self) -> None:
-        from didit.models.session import SessionListItem, SessionListPage
+        from didit.models.session import (
+            SessionListItem,
+            SessionListPage,
+        )
 
         item_with_token = SessionListItem(
             session_id="sess_1",
             status=SessionStatus.APPROVED,
             session_token="secret_token_123",
+            extra_field="should_be_omitted_from_redacted_dump",
+            vendor_data="sensitive_vendor_data",
+            url="https://verification.didit.me/verify/123",
+            callback="https://customer.com/callback",
         )
         dump1 = item_with_token.redacted_dump()
         assert dump1["session_token"] == "[REDACTED]"
+        assert "extra_field" not in dump1
+        assert "vendor_data" not in dump1
+        assert "url" not in dump1
+        assert "callback" not in dump1
 
         item_without_token = SessionListItem(
             session_id="sess_2",
@@ -785,12 +796,56 @@ class TestSessionListAndReconciliationModels:
 
         page = SessionListPage(
             count=2,
-            next="https://api.didit.me/v1/sessions/?offset=2",
+            next="https://verification.didit.me/v3/sessions/?offset=2",
             previous=None,
             results=[item_with_token, item_without_token],
         )
         page_dump = page.redacted_dump()
         assert page_dump["count"] == 2
-        assert page_dump["next"] == "https://api.didit.me/v1/sessions/?offset=2"
+        assert page_dump["has_next"] is True
+        assert page_dump["has_previous"] is False
+        assert "next" not in page_dump
+        assert "previous" not in page_dump
         assert page_dump["results"][0]["session_token"] == "[REDACTED]"
+        assert "extra_field" not in page_dump["results"][0]
         assert page_dump["results"][1]["session_token"] is None
+
+    def test_session_models_str_repr_redaction(self) -> None:
+        from didit.models.session import SessionListItem, SessionListPage
+
+        secret_token = "ultra_secret_client_token_999"
+        item = SessionListItem(
+            session_id="sess_secret",
+            status=SessionStatus.APPROVED,
+            session_token=secret_token,
+        )
+
+        # __str__ and __repr__ MUST both redact the secret session token
+        assert secret_token not in str(item)
+        assert secret_token not in repr(item)
+        assert "[REDACTED]" in str(item)
+        assert "[REDACTED]" in repr(item)
+        assert str(item) == repr(item)
+
+        page = SessionListPage(
+            count=1,
+            next=None,
+            previous=None,
+            results=[item],
+        )
+        assert str(page) == repr(page)
+
+    def test_batch_reconciliation_report_metadata(self) -> None:
+        from didit.models.session import BatchReconciliationReport
+
+        report_default = BatchReconciliationReport()
+        assert report_default.truncated is False
+        assert report_default.remote_count is None
+
+        report_custom = BatchReconciliationReport(
+            total_evaluated=50,
+            truncated=True,
+            remote_count=120,
+        )
+        assert report_custom.truncated is True
+        assert report_custom.remote_count == 120

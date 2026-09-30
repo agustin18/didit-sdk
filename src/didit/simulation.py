@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from didit.errors import (
+    DiditAPIError,
     DiditConfigurationError,
     DiditNotFoundError,
     DiditTimeoutError,
@@ -38,6 +39,7 @@ from didit.models.session import (
     SessionResponse,
     SessionStateSource,
 )
+from didit.resources.sessions import _validate_session_list_filters
 from didit.webhooks import compute_signature
 
 SUPPORTED_SANDBOX_SCENARIOS: set[str] = {
@@ -407,29 +409,27 @@ class _SimulatedStorage:
         limit: int = 50,
         offset: int = 0,
     ) -> SessionListPage:
-        if session_kind is not None and session_kind != "user":
-            return SessionListPage(count=0, next=None, previous=None, results=[])
-
-        status_filter = status.value if isinstance(status, SessionStatus) else status
-        norm_country = country.strip().upper() if country is not None else None
+        status_str, norm_country, date_from_str, date_to_str = _validate_session_list_filters(
+            status=status,
+            session_kind=session_kind,
+            country=country,
+            limit=limit,
+            offset=offset,
+            date_from=date_from,
+            date_to=date_to,
+        )
 
         from_ts: float | None = None
-        if date_from is not None:
-            if isinstance(date_from, datetime):
-                from_ts = date_from.timestamp()
-            else:
-                from_ts = datetime.fromisoformat(str(date_from).replace("Z", "+00:00")).timestamp()
+        if date_from_str is not None:
+            from_ts = datetime.fromisoformat(date_from_str.replace("Z", "+00:00")).timestamp()
 
         to_ts: float | None = None
-        if date_to is not None:
-            if isinstance(date_to, datetime):
-                to_ts = date_to.timestamp()
-            else:
-                to_ts = datetime.fromisoformat(str(date_to).replace("Z", "+00:00")).timestamp()
+        if date_to_str is not None:
+            to_ts = datetime.fromisoformat(date_to_str.replace("Z", "+00:00")).timestamp()
 
         items: list[SessionListItem] = []
         for s in self.sessions.values():
-            if status_filter is not None and s.status.value != status_filter:
+            if status_str is not None and s.status.value != status_str:
                 continue
             if vendor_data is not None and s.vendor_data != vendor_data:
                 continue
@@ -451,9 +451,9 @@ class _SimulatedStorage:
                     continue
 
             s_created = self.created_at.get(s.session_id, 0.0)
-            if from_ts is not None and s_created < from_ts - 0.1:
+            if from_ts is not None and s_created < from_ts:
                 continue
-            if to_ts is not None and s_created > to_ts + 0.1:
+            if to_ts is not None and s_created > to_ts:
                 continue
 
             item = SessionListItem(
@@ -465,7 +465,7 @@ class _SimulatedStorage:
                 vendor_data=s.vendor_data,
                 callback=s.callback,
                 country=s_country,
-                session_kind=session_kind or "user",
+                session_kind="user",
                 created_at=s_created,
             )
             items.append(item)
@@ -473,12 +473,13 @@ class _SimulatedStorage:
         total = len(items)
         sliced = items[offset : offset + limit]
         next_url = (
-            f"https://api.didit.me/v1/sessions/?offset={offset + limit}&limit={limit}"
+            f"https://verification.didit.me/v3/sessions/?offset={offset + limit}&limit={limit}"
             if offset + limit < total
             else None
         )
+        prev_offset = max(0, offset - limit)
         prev_url = (
-            f"https://api.didit.me/v1/sessions/?offset={max(0, offset - limit)}&limit={limit}"
+            f"https://verification.didit.me/v3/sessions/?offset={prev_offset}&limit={limit}"
             if offset > 0
             else None
         )
@@ -666,6 +667,7 @@ class SimulatedSessionsResource:
         missing_local_count = 0
         missing_remote_count = 0
         offset = 0
+        remote_count: int | None = None
 
         while True:
             current_limit = effective_page_size
@@ -679,8 +681,20 @@ class SimulatedSessionsResource:
                 limit=current_limit,
                 offset=offset,
             )
+            remote_count = page.count
 
             if not page.results:
+                if page.next is not None:
+                    raise DiditAPIError(
+                        "Didit pagination returned next page metadata without progress",
+                        status_code=502,
+                    )
+                if offset < page.count and (max_sessions is None or len(reports) < max_sessions):
+                    raise DiditAPIError(
+                        f"Inconsistent pagination metadata: received {offset} of "
+                        f"{page.count} sessions without next page",
+                        status_code=502,
+                    )
                 break
 
             for item in page.results:
@@ -697,18 +711,33 @@ class SimulatedSessionsResource:
                     break
 
             offset += len(page.results)
-            if (
-                page.next is None
-                or len(page.results) < current_limit
-                or (max_sessions is not None and len(reports) >= max_sessions)
-            ):
+            if max_sessions is not None and len(reports) >= max_sessions:
                 break
+
+            if page.next is None:
+                if offset < page.count:
+                    raise DiditAPIError(
+                        f"Inconsistent pagination metadata: received {offset} of "
+                        f"{page.count} sessions without next page",
+                        status_code=502,
+                    )
+                break
+
+        truncated = bool(
+            max_sessions is not None
+            and len(reports) >= max_sessions
+            and (
+                page.next is not None or (remote_count is not None and remote_count > len(reports))
+            )
+        )
 
         return BatchReconciliationReport(
             total_evaluated=len(reports),
             drift_count=drift_count,
             missing_local_count=missing_local_count,
             missing_remote_count=missing_remote_count,
+            truncated=truncated,
+            remote_count=remote_count,
             reports=reports,
         )
 
@@ -889,6 +918,7 @@ class SimulatedAsyncSessionsResource:
         missing_local_count = 0
         missing_remote_count = 0
         offset = 0
+        remote_count: int | None = None
 
         while True:
             current_limit = effective_page_size
@@ -902,8 +932,20 @@ class SimulatedAsyncSessionsResource:
                 limit=current_limit,
                 offset=offset,
             )
+            remote_count = page.count
 
             if not page.results:
+                if page.next is not None:
+                    raise DiditAPIError(
+                        "Didit pagination returned next page metadata without progress",
+                        status_code=502,
+                    )
+                if offset < page.count and (max_sessions is None or len(reports) < max_sessions):
+                    raise DiditAPIError(
+                        f"Inconsistent pagination metadata: received {offset} of "
+                        f"{page.count} sessions without next page",
+                        status_code=502,
+                    )
                 break
 
             for item in page.results:
@@ -928,18 +970,33 @@ class SimulatedAsyncSessionsResource:
                     break
 
             offset += len(page.results)
-            if (
-                page.next is None
-                or len(page.results) < current_limit
-                or (max_sessions is not None and len(reports) >= max_sessions)
-            ):
+            if max_sessions is not None and len(reports) >= max_sessions:
                 break
+
+            if page.next is None:
+                if offset < page.count:
+                    raise DiditAPIError(
+                        f"Inconsistent pagination metadata: received {offset} of "
+                        f"{page.count} sessions without next page",
+                        status_code=502,
+                    )
+                break
+
+        truncated = bool(
+            max_sessions is not None
+            and len(reports) >= max_sessions
+            and (
+                page.next is not None or (remote_count is not None and remote_count > len(reports))
+            )
+        )
 
         return BatchReconciliationReport(
             total_evaluated=len(reports),
             drift_count=drift_count,
             missing_local_count=missing_local_count,
             missing_remote_count=missing_remote_count,
+            truncated=truncated,
+            remote_count=remote_count,
             reports=reports,
         )
 
