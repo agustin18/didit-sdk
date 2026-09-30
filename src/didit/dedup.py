@@ -51,7 +51,16 @@ class ReservationAttempt:
 
 @runtime_checkable
 class WebhookDedupStore(Protocol):
-    """Synchronous interface for legacy webhook deduplication stores."""
+    """Synchronous interface for legacy webhook deduplication stores.
+
+    Note:
+        Do not rely on runtime `isinstance(obj, WebhookDedupStore)` to distinguish
+        legacy stores from `WebhookReservationStore`. In Python, `@runtime_checkable`
+        performs only shallow attribute existence checks and does not validate method
+        signatures. Notice that legacy `release(key)` accepts a single key, whereas
+        reservation `release(event_id, token)` requires both the event ID and token.
+        Always inspect capability attributes or type annotations instead.
+    """
 
     def claim(self, key: str, ttl_seconds: int = 86400) -> bool:
         """Attempt to atomically record and claim key.
@@ -87,7 +96,12 @@ class AsyncWebhookDedupStore(Protocol):
 
 @runtime_checkable
 class WebhookReservationStore(Protocol):
-    """Synchronous interface for crash-recoverable tokenized webhook reservations."""
+    """Synchronous interface for crash-recoverable tokenized webhook reservations.
+
+    Note:
+        `WebhookReservationStore` is distinct from legacy `WebhookDedupStore`.
+        Do not use runtime `isinstance()` for capability detection.
+    """
 
     def reserve(
         self, event_id: str, token: str | None = None, ttl_seconds: int = 30

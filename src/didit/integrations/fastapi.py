@@ -260,20 +260,65 @@ async def release_didit_claim(request: Request) -> None:
     if store and key and claimed:
         await arelease_webhook_event(store, key, token=token)
         request.state.didit_claimed = False
+        request.state.didit_reservation = None
 
 
 async def complete_didit_reservation(request: Request, completed_ttl: int = 86400) -> bool:
     """Helper to complete active reservation on request.state upon successful processing."""
     store = getattr(request.state, "didit_dedup_store", None)
     key = getattr(request.state, "didit_dedup_key", None)
+    claimed = getattr(request.state, "didit_claimed", False)
     res = getattr(request.state, "didit_reservation", None)
-    if store and key and res:
+    if store and key and claimed and res:
         success = await acomplete_webhook_event(
             store, key, token=res.token, completed_ttl=completed_ttl
         )
         request.state.didit_claimed = False
+        request.state.didit_reservation = None
         return success
     return False
+
+
+try:
+    from fastapi.routing import APIRoute
+except ImportError:  # pragma: no cover
+
+    class APIRoute:  # type: ignore[no-redef]
+        pass
+
+
+class DiditWebhookRoute(APIRoute):
+    """FastAPI APIRoute subclass that manages Didit webhook reservation lifecycles
+    at the final response boundary.
+
+    Wraps the route handler to observe the concrete Response after endpoint execution,
+    response validation, serialization, and rendering:
+    - If route handler or serialization/rendering raises an exception:
+      automatically releases any active reservation recorded on request.state.
+    - If the final response status is 2xx (200-299):
+      automatically completes the active reservation.
+    - If the final response status is non-2xx (e.g. 404, 500):
+      automatically releases the active reservation so retries succeed.
+    """
+
+    def get_route_handler(self) -> Callable[[Request], Any]:
+        original_route_handler = super().get_route_handler()
+
+        async def didit_route_handler(request: Request) -> StarletteResponse:
+            try:
+                response = await original_route_handler(request)
+            except Exception:
+                await release_didit_claim(request)
+                raise
+
+            if 200 <= response.status_code < 300:
+                await complete_didit_reservation(request)
+            else:
+                await release_didit_claim(request)
+
+            return response
+
+        return didit_route_handler
 
 
 def didit_webhook(
@@ -495,34 +540,16 @@ def didit_webhook(
             route = (
                 request.scope.get("route") if hasattr(request, "scope") and request.scope else None
             )
-            if (
-                route is not None
-                and getattr(route, "response_field", None) is not None
-                and not isinstance(result, StarletteResponse)
-            ):
-                from fastapi.routing import serialize_response
 
-                try:
-                    await serialize_response(
-                        field=route.response_field,
-                        response_content=result,
-                        include=getattr(route, "response_model_include", None),
-                        exclude=getattr(route, "response_model_exclude", None),
-                        by_alias=getattr(route, "response_model_by_alias", True),
-                        exclude_unset=getattr(route, "response_model_exclude_unset", False),
-                        exclude_defaults=getattr(route, "response_model_exclude_defaults", False),
-                        exclude_none=getattr(route, "response_model_exclude_none", False),
-                    )
-                except Exception:
-                    if dedup_store is not None and is_new:
-                        await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
-                    raise
-
-            if dedup_store is not None and is_new:
+            if isinstance(result, StarletteResponse):
+                final_response = result
+            else:
                 route_status = getattr(route, "status_code", None)
-                response = kwargs.get("response")
+                response_param = kwargs.get("response")
                 resp_status = (
-                    getattr(response, "status_code", None) if response is not None else None
+                    getattr(response_param, "status_code", None)
+                    if response_param is not None
+                    else None
                 )
                 result_status = getattr(result, "status_code", None)
 
@@ -534,7 +561,52 @@ def didit_webhook(
                 elif isinstance(route_status, int):
                     status_code = route_status
 
-                if 200 <= status_code < 300:
+                from fastapi.datastructures import DefaultPlaceholder
+                from fastapi.responses import JSONResponse
+
+                raw_resp_cls = getattr(route, "response_class", None) if route else None
+                if raw_resp_cls is None or isinstance(raw_resp_cls, DefaultPlaceholder):
+                    resp_cls = JSONResponse
+                else:
+                    resp_cls = raw_resp_cls
+
+                content = result
+                if route is not None and getattr(route, "response_field", None) is not None:
+                    from fastapi.routing import serialize_response
+
+                    try:
+                        content = await serialize_response(
+                            field=route.response_field,
+                            response_content=result,
+                            include=getattr(route, "response_model_include", None),
+                            exclude=getattr(route, "response_model_exclude", None),
+                            by_alias=getattr(route, "response_model_by_alias", True),
+                            exclude_unset=getattr(route, "response_model_exclude_unset", False),
+                            exclude_defaults=getattr(
+                                route, "response_model_exclude_defaults", False
+                            ),
+                            exclude_none=getattr(route, "response_model_exclude_none", False),
+                        )
+                    except Exception:
+                        if dedup_store is not None and is_new:
+                            await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                        raise
+
+                try:
+                    final_response = resp_cls(content, status_code=status_code)
+                    if (
+                        response_param is not None
+                        and hasattr(final_response, "headers")
+                        and hasattr(response_param, "headers")
+                    ):
+                        final_response.headers.raw.extend(response_param.headers.raw)
+                except Exception:
+                    if dedup_store is not None and is_new:
+                        await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                    raise
+
+            if dedup_store is not None and is_new:
+                if 200 <= final_response.status_code < 300:
                     if res_token is not None:
                         await acomplete_webhook_event(
                             dedup_store,
@@ -545,7 +617,7 @@ def didit_webhook(
                 else:
                     await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
 
-            return result
+            return final_response
 
         func_sig = inspect.signature(view_func)
         new_params = []

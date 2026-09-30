@@ -996,8 +996,225 @@ class TestFastAPIRouteDecoratorLifecycle:
         attempt = store.reserve("evt_resp_status_404")
         assert attempt.state == ReservationState.ACQUIRED
 
+    def test_response_json_render_nan_failure_releases_reservation(self) -> None:
+        """When an endpoint returns a dict with NaN without a response model,
+        FastAPI JSONResponse.render() fails with ValueError (HTTP 500).
+        The reservation MUST NOT be left in COMPLETED state.
+        """
+        from didit.dedup import InMemoryWebhookReservationStore, ReservationState
+
+        store = InMemoryWebhookReservationStore()
+        app_nan = FastAPI()
+
+        @app_nan.post("/webhook-nan")
+        @didit_webhook(
+            secret=WEBHOOK_SECRET,
+            dedup_store=store,
+            duplicate_action="respond_ok",
+        )
+        async def webhook_nan(payload: WebhookPayload):
+            return {"value": float("nan")}
+
+        client = TestClient(app_nan, raise_server_exceptions=False)
+        data = {
+            "event_id": "evt_nan_fail_123",
+            "session_id": "sess_nan",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/webhook-nan", content=raw_body, headers=headers)
+        assert resp.status_code == 500
+
+        # Reservation MUST NOT be marked COMPLETED when response construction fails
+        attempt = store.reserve("evt_nan_fail_123")
+        assert attempt.state == ReservationState.ACQUIRED
+
+    def test_custom_response_class_render_failure_releases_reservation(self) -> None:
+        """When an endpoint uses a custom response_class whose render() raises an exception,
+        FastAPI returns HTTP 500. The reservation MUST NOT be left in COMPLETED state.
+        """
+        from starlette.responses import Response as StarletteResponse
+
+        from didit.dedup import InMemoryWebhookReservationStore, ReservationState
+
+        class ExplodingResponse(StarletteResponse):
+            def render(self, content: Any) -> bytes:
+                raise RuntimeError("Exploding response class render error")
+
+        store = InMemoryWebhookReservationStore()
+        app_custom = FastAPI()
+
+        @app_custom.post("/webhook-custom-exploding", response_class=ExplodingResponse)
+        @didit_webhook(
+            secret=WEBHOOK_SECRET,
+            dedup_store=store,
+            duplicate_action="respond_ok",
+        )
+        async def webhook_custom(payload: WebhookPayload):
+            return {"status": "ok"}
+
+        client = TestClient(app_custom, raise_server_exceptions=False)
+        data = {
+            "event_id": "evt_custom_explode_123",
+            "session_id": "sess_custom",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/webhook-custom-exploding", content=raw_body, headers=headers)
+        assert resp.status_code == 500
+
+        attempt = store.reserve("evt_custom_explode_123")
+        assert attempt.state == ReservationState.ACQUIRED
+
     def test_didit_webhook_view_alias(self) -> None:
         assert didit_webhook_view is didit_webhook
+
+
+class TestDiditWebhookRoute:
+    def test_didit_webhook_route_nan_releases_reservation(self) -> None:
+        from fastapi import APIRouter
+
+        from didit.dedup import InMemoryWebhookReservationStore, ReservationState
+        from didit.integrations.fastapi import DiditWebhookGuard, DiditWebhookRoute
+
+        store = InMemoryWebhookReservationStore()
+        guard = DiditWebhookGuard(secret=WEBHOOK_SECRET, dedup_store=store)
+        router = APIRouter(route_class=DiditWebhookRoute)
+
+        @router.post("/webhook-route-nan")
+        async def endpoint(payload: WebhookPayload = Depends(guard)):
+            return {"value": float("nan")}
+
+        app_route = FastAPI()
+        app_route.include_router(router)
+
+        client = TestClient(app_route, raise_server_exceptions=False)
+        data = {
+            "event_id": "evt_route_nan_1",
+            "session_id": "sess_route_nan",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/webhook-route-nan", content=raw_body, headers=headers)
+        assert resp.status_code == 500
+
+        attempt = store.reserve("evt_route_nan_1")
+        assert attempt.state == ReservationState.ACQUIRED
+
+    def test_didit_webhook_route_success_completes_reservation(self) -> None:
+        from fastapi import APIRouter
+
+        from didit.dedup import InMemoryWebhookReservationStore, ReservationState
+        from didit.integrations.fastapi import DiditWebhookGuard, DiditWebhookRoute
+
+        store = InMemoryWebhookReservationStore()
+        guard = DiditWebhookGuard(secret=WEBHOOK_SECRET, dedup_store=store)
+        router = APIRouter(route_class=DiditWebhookRoute)
+
+        @router.post("/webhook-route-ok")
+        async def endpoint(payload: WebhookPayload = Depends(guard)):
+            return {"status": "processed"}
+
+        app_route = FastAPI()
+        app_route.include_router(router)
+
+        client = TestClient(app_route)
+        data = {
+            "event_id": "evt_route_ok_1",
+            "session_id": "sess_route_ok",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/webhook-route-ok", content=raw_body, headers=headers)
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "processed"}
+
+        attempt = store.reserve("evt_route_ok_1")
+        assert attempt.state == ReservationState.COMPLETED
+
+    def test_didit_webhook_route_404_releases_reservation(self) -> None:
+        from fastapi import APIRouter, Response
+
+        from didit.dedup import InMemoryWebhookReservationStore, ReservationState
+        from didit.integrations.fastapi import DiditWebhookGuard, DiditWebhookRoute
+
+        store = InMemoryWebhookReservationStore()
+        guard = DiditWebhookGuard(secret=WEBHOOK_SECRET, dedup_store=store)
+        router = APIRouter(route_class=DiditWebhookRoute)
+
+        @router.post("/webhook-route-404")
+        async def endpoint(payload: WebhookPayload = Depends(guard)):
+            return Response(content="not found", status_code=404)
+
+        app_route = FastAPI()
+        app_route.include_router(router)
+
+        client = TestClient(app_route)
+        data = {
+            "event_id": "evt_route_404_1",
+            "session_id": "sess_route_404",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/webhook-route-404", content=raw_body, headers=headers)
+        assert resp.status_code == 404
+
+        attempt = store.reserve("evt_route_404_1")
+        assert attempt.state == ReservationState.ACQUIRED
+
+    def test_didit_webhook_route_exception_releases_reservation(self) -> None:
+        from fastapi import APIRouter
+
+        from didit.dedup import InMemoryWebhookReservationStore, ReservationState
+        from didit.integrations.fastapi import DiditWebhookGuard, DiditWebhookRoute
+
+        store = InMemoryWebhookReservationStore()
+        guard = DiditWebhookGuard(secret=WEBHOOK_SECRET, dedup_store=store)
+        router = APIRouter(route_class=DiditWebhookRoute)
+
+        @router.post("/webhook-route-err")
+        async def endpoint(payload: WebhookPayload = Depends(guard)):
+            raise RuntimeError("Database connection crashed")
+
+        app_route = FastAPI()
+        app_route.include_router(router)
+
+        client = TestClient(app_route, raise_server_exceptions=False)
+        data = {
+            "event_id": "evt_route_err_1",
+            "session_id": "sess_route_err",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/webhook-route-err", content=raw_body, headers=headers)
+        assert resp.status_code == 500
+
+        attempt = store.reserve("evt_route_err_1")
+        assert attempt.state == ReservationState.ACQUIRED
 
 
 class TestIntegrationsLazyLoading:
@@ -1005,6 +1222,8 @@ class TestIntegrationsLazyLoading:
         import didit.integrations as pkg
 
         assert pkg.DiditWebhookGuard is not None
+        assert pkg.DiditWebhookRoute is not None
+        assert pkg.complete_didit_reservation is not None
         assert pkg.release_didit_claim is not None
         assert pkg.didit_webhook_view is not None
         assert pkg.parse_django_webhook is not None

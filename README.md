@@ -150,18 +150,22 @@ async def handle_webhook(payload: WebhookPayload):
     return {"status": "ok"}
 ```
 
-Alternatively, use `DiditWebhookGuard` as a FastAPI `Depends(...)` dependency:
+Alternatively, use `DiditWebhookGuard` as a FastAPI `Depends(...)` dependency. When using `DiditWebhookGuard` with a reservation store, the application is responsible for explicitly completing or releasing the reservation, or configuring `route_class=DiditWebhookRoute` on your router for automated lifecycle management:
 
 ```python
-from fastapi import Depends
-from didit.integrations.fastapi import DiditWebhookGuard
+from fastapi import APIRouter, Depends, Request
+from didit.integrations.fastapi import DiditWebhookGuard, DiditWebhookRoute
 
+router = APIRouter(route_class=DiditWebhookRoute)
 guard = DiditWebhookGuard(secret="whsec_...", dedup_store=store)
 
 
-@app.post("/webhooks/didit")
-async def handle_webhook_guard(payload: WebhookPayload = Depends(guard)): ...
+@router.post("/webhooks/didit")
+async def handle_webhook_guard(payload: WebhookPayload = Depends(guard)):
+    return {"status": "ok"}
 ```
+
+When using `DiditWebhookGuard` on standard routers without `DiditWebhookRoute`, manage the lifecycle explicitly via `await guard.complete_reservation(request)` or `await guard.release_claim(request)`.
 
 > [!TIP]
 > **Deduplication Semantics (`duplicate_action`)**:
