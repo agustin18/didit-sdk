@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import django
 from django.conf import settings
@@ -20,7 +20,13 @@ if not settings.configured:
 import pytest
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
-from didit.dedup import InMemoryWebhookDedupStore
+from didit.dedup import (
+    AsyncWebhookDedupStore,
+    InMemoryWebhookDedupStore,
+    InMemoryWebhookReservationStore,
+    ReservationAttempt,
+    ReservationState,
+)
 from didit.errors import DiditConfigurationError
 from didit.integrations.django import didit_webhook_view, parse_django_webhook
 from didit.models.enums import SessionStatus
@@ -265,7 +271,7 @@ class TestDjangoWebhookView:
 
     @pytest.mark.asyncio
     async def test_async_dedup_store_with_async_view(self) -> None:
-        mock_store = AsyncMock()
+        mock_store = AsyncMock(spec=AsyncWebhookDedupStore)
         mock_store.aclaim.side_effect = [True, False]
 
         @didit_webhook_view(secret=SECRET, dedup_store=mock_store, duplicate_action="respond_ok")
@@ -413,3 +419,256 @@ class TestParseDjangoWebhook:
         mock_req.META = {}
         with pytest.raises(ValueError, match="exceeds maximum size limit"):
             parse_django_webhook(mock_req, secret=SECRET, max_body_bytes=20)
+
+
+class TestDjangoWebhookReservation:
+    def test_invalid_processing_action_raises(self) -> None:
+        with pytest.raises(ValueError, match="Invalid processing_action 'invalid'"):
+            didit_webhook_view(secret=SECRET, processing_action="invalid")  # type: ignore[arg-type]
+
+    def test_async_reservation_store_with_sync_view_raises(self) -> None:
+        class FakeAsyncResStore:
+            async def areserve(self, *args: Any, **kwargs: Any) -> Any:
+                pass
+
+        with pytest.raises(
+            DiditConfigurationError, match="AsyncWebhookReservationStore cannot be used"
+        ):
+
+            @didit_webhook_view(secret=SECRET, dedup_store=FakeAsyncResStore())  # type: ignore[arg-type]
+            def sync_view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+                return HttpResponse("ok")
+
+    @pytest.mark.parametrize("action", ["retry", "raise", "pass"])
+    def test_sync_processing_actions(self, action: str) -> None:
+        store = InMemoryWebhookReservationStore()
+        payload_data = {**SAMPLE_PAYLOAD, "event_id": "evt_django_res"}
+        # Seed in-flight reservation
+        store.reserve("evt_django_res", token="other_worker", ttl_seconds=60)
+
+        @didit_webhook_view(
+            secret=SECRET,
+            dedup_store=store,
+            processing_action=action,  # type: ignore[arg-type]
+        )
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return JsonResponse({"duplicate": payload.is_duplicate})
+
+        req = create_signed_django_request(payload_data)
+        if action == "retry":
+            resp = view(req)
+            assert resp.status_code == 503
+            assert resp.headers["Retry-After"] == "5"
+        elif action == "raise":
+            from didit.errors import DiditDuplicateWebhookError
+
+            with pytest.raises(DiditDuplicateWebhookError) as exc_info:
+                view(req)
+            assert exc_info.value.state == "PROCESSING"
+            assert exc_info.value.event_id == "evt_django_res"
+        elif action == "pass":
+            resp = view(req)
+            assert resp.status_code == 200
+            assert json.loads(resp.content)["duplicate"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action", ["retry", "raise", "pass"])
+    async def test_async_processing_actions(self, action: str) -> None:
+        store = InMemoryWebhookReservationStore()
+        payload_data = {**SAMPLE_PAYLOAD, "event_id": "evt_django_async_res"}
+        store.reserve("evt_django_async_res", token="other_worker", ttl_seconds=60)
+
+        @didit_webhook_view(
+            secret=SECRET,
+            dedup_store=store,
+            processing_action=action,  # type: ignore[arg-type]
+        )
+        async def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return JsonResponse({"duplicate": payload.is_duplicate})
+
+        req = create_signed_django_request(payload_data)
+        if action == "retry":
+            resp = await view(req)
+            assert resp.status_code == 503
+            assert resp.headers["Retry-After"] == "5"
+        elif action == "raise":
+            from didit.errors import DiditDuplicateWebhookError
+
+            with pytest.raises(DiditDuplicateWebhookError) as exc_info:
+                await view(req)
+            assert exc_info.value.state == "PROCESSING"
+            assert exc_info.value.event_id == "evt_django_async_res"
+        elif action == "pass":
+            resp = await view(req)
+            assert resp.status_code == 200
+            assert json.loads(resp.content)["duplicate"] is True
+
+    def test_sync_reservation_lifecycle_complete_and_release(self) -> None:
+        store = InMemoryWebhookReservationStore()
+        call_count = 0
+        should_fail_500 = False
+        should_raise = False
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store, duplicate_action="respond_ok")
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            nonlocal call_count
+            call_count += 1
+            if should_raise:
+                raise RuntimeError("Handler failed")
+            if should_fail_500:
+                return HttpResponse(status=500)
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+
+        # 1. Exception -> releases lease so next call can acquire
+        should_raise = True
+        with pytest.raises(RuntimeError):
+            view(req)
+        assert call_count == 1
+
+        # 2. 500 status -> releases lease so next call can acquire
+        should_raise = False
+        should_fail_500 = True
+        resp500 = view(req)
+        assert resp500.status_code == 500
+        assert call_count == 2
+
+        # 3. 200 status -> completes lease
+        should_fail_500 = False
+        resp200 = view(req)
+        assert resp200.status_code == 200
+        assert call_count == 3
+
+        # 4. Duplicate call -> returns duplicate acknowledgment (view not invoked)
+        resp_dup = view(req)
+        assert resp_dup.status_code == 200
+        assert b"Duplicate webhook event acknowledged" in resp_dup.content
+        assert call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_async_reservation_lifecycle_complete_and_release(self) -> None:
+        store = InMemoryWebhookReservationStore()
+        call_count = 0
+        should_fail_500 = False
+        should_raise = False
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store, duplicate_action="respond_ok")
+        async def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            nonlocal call_count
+            call_count += 1
+            if should_raise:
+                raise RuntimeError("Handler failed")
+            if should_fail_500:
+                return HttpResponse(status=500)
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+
+        # 1. Exception -> releases lease
+        should_raise = True
+        with pytest.raises(RuntimeError):
+            await view(req)
+
+        # 2. 500 status -> releases lease
+        should_raise = False
+        should_fail_500 = True
+        resp500 = await view(req)
+        assert resp500.status_code == 500
+
+        # 3. 200 status -> completes lease
+        should_fail_500 = False
+        resp200 = await view(req)
+        assert resp200.status_code == 200
+
+        # 4. Duplicate call -> duplicate acknowledged
+        resp_dup = await view(req)
+        assert resp_dup.status_code == 200
+        assert b"Duplicate webhook event acknowledged" in resp_dup.content
+
+    def test_default_adapter_lease_ttl_is_30_seconds(self) -> None:
+        mock_store = MagicMock()
+        mock_store.reserve.return_value = ReservationAttempt(state=ReservationState.ACQUIRED)
+
+        @didit_webhook_view(secret=SECRET, dedup_store=mock_store)
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        view(req)
+
+        mock_store.reserve.assert_called_once()
+        _, kwargs = mock_store.reserve.call_args
+        assert kwargs.get("ttl_seconds") == 30
+
+    def test_actual_async_redis_store_in_sync_django_raises_config_error(self) -> None:
+        from didit.dedup import AsyncRedisWebhookReservationStore
+
+        store = AsyncRedisWebhookReservationStore(client=MagicMock())
+
+        with pytest.raises(
+            DiditConfigurationError,
+            match="AsyncWebhookReservationStore cannot be used with synchronous",
+        ):
+
+            @didit_webhook_view(secret=SECRET, dedup_store=store)
+            def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+                return HttpResponse("ok", status=200)
+
+    def test_django_404_releases_reservation(self) -> None:
+        store = InMemoryWebhookReservationStore()
+        execution_count = 0
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store)
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            nonlocal execution_count
+            execution_count += 1
+            if execution_count == 1:
+                return HttpResponse("not found", status=404)
+            return HttpResponse("recovered", status=200)
+
+        # Request 1: returns 404 -> reservation released
+        req1 = create_signed_django_request(SAMPLE_PAYLOAD)
+        resp1 = view(req1)
+        assert resp1.status_code == 404
+        assert execution_count == 1
+
+        # Request 2 (retry with identical payload): must execute view and return 200
+        req2 = create_signed_django_request(SAMPLE_PAYLOAD)
+        resp2 = view(req2)
+        assert resp2.status_code == 200
+        assert resp2.content == b"recovered"
+        assert execution_count == 2
+
+    def test_django_legacy_store_retains_default_86400_ttl(self) -> None:
+        mock_legacy = MagicMock(spec=["claim", "release"])
+        mock_legacy.claim.return_value = True
+
+        @didit_webhook_view(secret=SECRET, dedup_store=mock_legacy)
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(SAMPLE_PAYLOAD)
+        view(req)
+        mock_legacy.claim.assert_called_once()
+        call_args = mock_legacy.claim.call_args
+        effective_ttl = call_args.kwargs.get("ttl_seconds") or call_args.args[1]
+        assert effective_ttl == 86400
+
+    def test_django_processing_action_conflict(self) -> None:
+        store = InMemoryWebhookReservationStore()
+        payload_data = {**SAMPLE_PAYLOAD, "event_id": "evt_conflict"}
+        store.reserve("evt_conflict", token="other_worker", ttl_seconds=60)
+
+        @didit_webhook_view(
+            secret=SECRET,
+            dedup_store=store,
+            processing_action="conflict",
+        )
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            return HttpResponse("ok", status=200)
+
+        req = create_signed_django_request(payload_data)
+        resp = view(req)
+        assert resp.status_code == 409
+        assert b"currently being processed" in resp.content

@@ -20,13 +20,23 @@ except ImportError as err:  # pragma: no cover
 from didit.config import DEFAULT_WEBHOOK_MAX_AGE_SECONDS
 from didit.dedup import (
     AsyncWebhookDedupStore,
+    AsyncWebhookReservationStore,
+    ReservationState,
     WebhookDedupStore,
-    aclaim_webhook_event,
+    WebhookReservationStore,
+    acomplete_webhook_event,
     arelease_webhook_event,
+    areserve_webhook_event,
+    complete_webhook_event,
     compute_dedup_key,
     release_webhook_event,
+    reserve_webhook_event,
 )
-from didit.errors import DiditConfigurationError, DiditSignatureError
+from didit.errors import (
+    DiditConfigurationError,
+    DiditDuplicateWebhookError,
+    DiditSignatureError,
+)
 from didit.models.webhook import WebhookPayload
 from didit.webhooks import parse_webhook_payload
 
@@ -107,48 +117,31 @@ def parse_flask_webhook(
     )
 
 
-def _is_server_error(res: Any) -> bool:
-    """Determine if a Flask view result represents an HTTP 5xx error."""
-    if isinstance(res, tuple) and len(res) >= 2 and isinstance(res[1], int):
-        return res[1] >= 500
-    if hasattr(res, "status_code") and isinstance(res.status_code, int):
-        return res.status_code >= 500
-    return False
-
-
 def didit_webhook(
     secret: str | None = None,
     *,
     max_age_seconds: int = DEFAULT_WEBHOOK_MAX_AGE_SECONDS,
     max_body_bytes: int = DEFAULT_MAX_WEBHOOK_BYTES,
-    dedup_store: WebhookDedupStore | AsyncWebhookDedupStore | None = None,
-    dedup_ttl_seconds: int = 86400,
+    dedup_store: (
+        WebhookDedupStore
+        | AsyncWebhookDedupStore
+        | WebhookReservationStore
+        | AsyncWebhookReservationStore
+        | None
+    ) = None,
+    lease_ttl_seconds: int = 30,
+    completed_ttl_seconds: int = 86400,
+    dedup_ttl_seconds: int | None = None,
     duplicate_action: Literal["respond_ok", "pass", "raise"] = "pass",
+    processing_action: Literal["retry", "pass", "raise", "conflict"] = "retry",
     dedup_key_builder: Callable[[WebhookPayload, Request], str] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Flask view decorator for verifying, parsing, and deduplicating Didit webhooks.
 
     Enforces POST method, bounds request body memory (HTTP 413), verifies HMAC-SHA256
-    signatures, prevents duplicate processing via WebhookDedupStore, assigns the payload to
-    `flask.g.didit_payload`, and injects `payload: WebhookPayload` into the route handler.
-
-    `duplicate_action` semantics:
-    - `"pass"` (default): Duplicate events are passed to the route handler with
-      `payload.is_duplicate = True`. This safe default ensures Didit delivery retries
-      are never swallowed if a previous attempt crashed or failed before durable processing.
-    - `"respond_ok"`: Short-circuits with an immediate 200 OK without invoking the handler.
-      Use only when claiming the event constitutes durable acceptance (e.g. transactional inbox).
-    - `"raise"`: Raises an HTTP 409 Conflict.
-
-    Example:
-        ```python
-        @app.route("/webhooks/didit", methods=["POST"])
-        @didit_webhook(secret="whsec_...")
-        def handle_didit(payload: WebhookPayload):
-            if payload.status == SessionStatus.APPROVED:
-                ...
-            return {"status": "ok"}, 200
-        ```
+    signatures, prevents duplicate processing via WebhookDedupStore or WebhookReservationStore,
+    assigns the payload to `flask.g.didit_payload`, and injects `payload: WebhookPayload`
+    into the route handler.
     """
     resolved_secret = secret or os.environ.get("DIDIT_WEBHOOK_SECRET")
     if not resolved_secret:
@@ -161,6 +154,15 @@ def didit_webhook(
             f"Invalid duplicate_action '{duplicate_action}'. "
             "Must be 'respond_ok', 'pass', or 'raise'."
         )
+    if processing_action not in ("retry", "pass", "raise", "conflict"):
+        raise ValueError(
+            f"Invalid processing_action '{processing_action}'. "
+            "Must be 'retry', 'pass', 'raise', or 'conflict'."
+        )
+
+    effective_lease_ttl = lease_ttl_seconds
+    effective_legacy_ttl = dedup_ttl_seconds if dedup_ttl_seconds is not None else 86400
+    effective_completed_ttl = completed_ttl_seconds
 
     def decorator(view_func: Callable[..., Any]) -> Callable[..., Any]:
         is_async = inspect.iscoroutinefunction(view_func)
@@ -168,12 +170,24 @@ def didit_webhook(
         if (
             not is_async
             and dedup_store is not None
+            and hasattr(dedup_store, "areserve")
+            and not hasattr(dedup_store, "reserve")
+        ):
+            raise DiditConfigurationError(
+                "AsyncWebhookReservationStore cannot be used with synchronous Flask view "
+                "functions. Use WebhookReservationStore."
+            )
+
+        if (
+            not is_async
+            and dedup_store is not None
             and hasattr(dedup_store, "aclaim")
             and not hasattr(dedup_store, "claim")
+            and not hasattr(dedup_store, "reserve")
         ):
             raise DiditConfigurationError(
                 "AsyncWebhookDedupStore cannot be used with synchronous Flask view functions. "
-                "Use WebhookDedupStore."
+                "Use WebhookDedupStore or WebhookReservationStore."
             )
 
         if is_async:
@@ -212,6 +226,7 @@ def didit_webhook(
 
                 is_new = False
                 dedup_key = ""
+                res_token: str | None = None
                 if dedup_store is not None:
                     if dedup_key_builder is not None:
                         dedup_key = dedup_key_builder(payload, request)
@@ -221,11 +236,18 @@ def didit_webhook(
                         )
                         dedup_key = compute_dedup_key(payload, signature=sig)
 
-                    is_new = await aclaim_webhook_event(
-                        dedup_store, dedup_key, ttl_seconds=dedup_ttl_seconds
+                    attempt = await areserve_webhook_event(
+                        dedup_store,
+                        dedup_key,
+                        ttl_seconds=effective_lease_ttl,
+                        legacy_ttl_seconds=effective_legacy_ttl,
                     )
+                    is_new = attempt.state == ReservationState.ACQUIRED
+                    if attempt.reservation is not None:
+                        res_token = attempt.reservation.token
+                        g.didit_reservation = attempt.reservation
 
-                    if not is_new:
+                    if attempt.state == ReservationState.COMPLETED:
                         if duplicate_action == "respond_ok":
                             return Response(
                                 "Duplicate webhook event acknowledged",
@@ -240,6 +262,29 @@ def didit_webhook(
                             )
                         payload.is_duplicate = True
 
+                    elif attempt.state == ReservationState.PROCESSING:
+                        if processing_action == "retry":
+                            resp = Response(
+                                "Webhook event currently being processed by another worker",
+                                status=503,
+                                mimetype="text/plain",
+                            )
+                            resp.headers["Retry-After"] = "5"
+                            return resp
+                        if processing_action == "conflict":
+                            return Response(
+                                "Webhook event currently being processed",
+                                status=409,
+                                mimetype="text/plain",
+                            )
+                        if processing_action == "raise":
+                            raise DiditDuplicateWebhookError(
+                                "Webhook event currently being processed by another worker",
+                                event_id=payload.event_id,
+                                state="PROCESSING",
+                            )
+                        payload.is_duplicate = True
+
                 try:
                     sig_params = inspect.signature(view_func).parameters
                     if "payload" in sig_params or len(sig_params) > len(args):
@@ -248,15 +293,30 @@ def didit_webhook(
                         result = await view_func(*args, **kwargs)
                 except Exception:
                     if dedup_store is not None and is_new:
-                        await arelease_webhook_event(dedup_store, dedup_key)
+                        await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
                     raise
 
-                if dedup_store is not None and is_new and _is_server_error(result):
-                    await arelease_webhook_event(dedup_store, dedup_key)
-
                 if result is None:
-                    return Response(status=200)
-                return result
+                    response = Response(status=200)
+                else:
+                    from flask import current_app
+
+                    response = current_app.make_response(result)
+
+                if dedup_store is not None and is_new:
+                    status_code = response.status_code
+                    if 200 <= status_code < 300:
+                        if res_token is not None:
+                            await acomplete_webhook_event(
+                                dedup_store,
+                                dedup_key,
+                                token=res_token,
+                                completed_ttl=effective_completed_ttl,
+                            )
+                    else:
+                        await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+
+                return response
 
             return async_wrapper
 
@@ -294,7 +354,23 @@ def didit_webhook(
 
             is_new = False
             dedup_key = ""
+            res_token: str | None = None
             if dedup_store is not None:
+                if hasattr(dedup_store, "areserve") and not hasattr(dedup_store, "reserve"):
+                    raise DiditConfigurationError(
+                        "AsyncWebhookReservationStore cannot be used with "
+                        "synchronous Flask view functions. Use WebhookReservationStore."
+                    )
+                if (
+                    hasattr(dedup_store, "aclaim")
+                    and not hasattr(dedup_store, "claim")
+                    and not hasattr(dedup_store, "reserve")
+                ):
+                    raise DiditConfigurationError(
+                        "AsyncWebhookDedupStore cannot be used with "
+                        "synchronous Flask view functions. Use WebhookDedupStore."
+                    )
+
                 if dedup_key_builder is not None:
                     dedup_key = dedup_key_builder(payload, request)
                 else:
@@ -303,35 +379,83 @@ def didit_webhook(
                     )
                     dedup_key = compute_dedup_key(payload, signature=sig)
 
+                effective_legacy_ttl = (
+                    dedup_ttl_seconds if dedup_ttl_seconds is not None else completed_ttl_seconds
+                )
                 claim_fn = getattr(dedup_store, "claim", None)
-                if claim_fn is None:
-                    raise DiditConfigurationError(
-                        "AsyncWebhookDedupStore cannot be used with "
-                        "synchronous Flask view functions. Use WebhookDedupStore."
-                    )
-                claim_res = claim_fn(dedup_key, ttl_seconds=dedup_ttl_seconds)
-                if inspect.isawaitable(claim_res):
-                    if inspect.iscoroutine(claim_res):
-                        claim_res.close()
-                    raise DiditConfigurationError(
-                        "dedup_store.claim returned a coroutine in a synchronous Flask view. "
-                        "Provide a synchronous WebhookDedupStore."
-                    )
-                is_new = bool(claim_res)
-                if not is_new:
-                    if duplicate_action == "respond_ok":
-                        return Response(
-                            "Duplicate webhook event acknowledged",
-                            status=200,
-                            mimetype="text/plain",
+                if claim_fn is not None and not hasattr(dedup_store, "reserve"):
+                    claim_res = claim_fn(dedup_key, ttl_seconds=effective_legacy_ttl)
+                    if inspect.isawaitable(claim_res):
+                        if inspect.iscoroutine(claim_res):
+                            claim_res.close()
+                        raise DiditConfigurationError(
+                            "dedup_store.claim returned a coroutine in a synchronous Flask view. "
+                            "Provide a synchronous WebhookDedupStore."
                         )
-                    if duplicate_action == "raise":
-                        return Response(
-                            "Duplicate webhook event",
-                            status=409,
-                            mimetype="text/plain",
-                        )
-                    payload.is_duplicate = True
+                    is_new = bool(claim_res)
+                    if not is_new:
+                        if duplicate_action == "respond_ok":
+                            return Response(
+                                "Duplicate webhook event acknowledged",
+                                status=200,
+                                mimetype="text/plain",
+                            )
+                        if duplicate_action == "raise":
+                            return Response(
+                                "Duplicate webhook event",
+                                status=409,
+                                mimetype="text/plain",
+                            )
+                        payload.is_duplicate = True
+                else:
+                    attempt = reserve_webhook_event(
+                        dedup_store,
+                        dedup_key,
+                        ttl_seconds=effective_lease_ttl,
+                        legacy_ttl_seconds=effective_legacy_ttl,
+                    )
+                    is_new = attempt.state == ReservationState.ACQUIRED
+                    if attempt.reservation is not None:
+                        res_token = attempt.reservation.token
+                        g.didit_reservation = attempt.reservation
+
+                    if attempt.state == ReservationState.COMPLETED:
+                        if duplicate_action == "respond_ok":
+                            return Response(
+                                "Duplicate webhook event acknowledged",
+                                status=200,
+                                mimetype="text/plain",
+                            )
+                        if duplicate_action == "raise":
+                            return Response(
+                                "Duplicate webhook event",
+                                status=409,
+                                mimetype="text/plain",
+                            )
+                        payload.is_duplicate = True
+
+                    elif attempt.state == ReservationState.PROCESSING:
+                        if processing_action == "retry":
+                            resp = Response(
+                                "Webhook event currently being processed by another worker",
+                                status=503,
+                                mimetype="text/plain",
+                            )
+                            resp.headers["Retry-After"] = "5"
+                            return resp
+                        if processing_action == "conflict":
+                            return Response(
+                                "Webhook event currently being processed",
+                                status=409,
+                                mimetype="text/plain",
+                            )
+                        if processing_action == "raise":
+                            raise DiditDuplicateWebhookError(
+                                "Webhook event currently being processed by another worker",
+                                event_id=payload.event_id,
+                                state="PROCESSING",
+                            )
+                        payload.is_duplicate = True
 
             try:
                 sig_params = inspect.signature(view_func).parameters
@@ -341,15 +465,30 @@ def didit_webhook(
                     result = view_func(*args, **kwargs)
             except Exception:
                 if dedup_store is not None and is_new:
-                    release_webhook_event(dedup_store, dedup_key)
+                    release_webhook_event(dedup_store, dedup_key, token=res_token)
                 raise
 
-            if dedup_store is not None and is_new and _is_server_error(result):
-                release_webhook_event(dedup_store, dedup_key)
-
             if result is None:
-                return Response(status=200)
-            return result
+                response = Response(status=200)
+            else:
+                from flask import current_app
+
+                response = current_app.make_response(result)
+
+            if dedup_store is not None and is_new:
+                status_code = response.status_code
+                if 200 <= status_code < 300:
+                    if res_token is not None:
+                        complete_webhook_event(
+                            dedup_store,
+                            dedup_key,
+                            token=res_token,
+                            completed_ttl=effective_completed_ttl,
+                        )
+                else:
+                    release_webhook_event(dedup_store, dedup_key, token=res_token)
+
+            return response
 
         return sync_wrapper
 

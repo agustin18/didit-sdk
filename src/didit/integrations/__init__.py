@@ -6,6 +6,8 @@ from typing import Any
 
 __all__ = [
     "DiditWebhookGuard",
+    "DiditWebhookRoute",
+    "complete_didit_reservation",
     "didit_webhook",
     "didit_webhook_view",
     "parse_django_webhook",
@@ -15,15 +17,26 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    if name in ("DiditWebhookGuard", "release_didit_claim"):
+    if name in (
+        "DiditWebhookGuard",
+        "DiditWebhookRoute",
+        "release_didit_claim",
+        "complete_didit_reservation",
+    ):
         try:
             from didit.integrations.fastapi import (
                 DiditWebhookGuard,
+                DiditWebhookRoute,
+                complete_didit_reservation,
                 release_didit_claim,
             )
 
             if name == "DiditWebhookGuard":
                 return DiditWebhookGuard
+            if name == "DiditWebhookRoute":
+                return DiditWebhookRoute
+            if name == "complete_didit_reservation":
+                return complete_didit_reservation
             return release_didit_claim
         except ImportError as e:
             raise ImportError(
