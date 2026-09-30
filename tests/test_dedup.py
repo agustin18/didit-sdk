@@ -5,7 +5,7 @@ from __future__ import annotations
 import concurrent.futures
 import time
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -138,6 +138,18 @@ class TestRedisDedupStore:
             # FAIL_OPEN allows processing to continue
             assert store.claim("evt_down", ttl_seconds=60) is True
 
+    def test_redis_dedup_store_from_url(self) -> None:
+        with patch("redis.Redis.from_url") as mock_from_url:
+            mock_client = MagicMock()
+            mock_from_url.return_value = mock_client
+            store = RedisWebhookDedupStore.from_url(
+                "redis://localhost:6379/0", prefix="pfx:", failure_mode=DedupFailureMode.FAIL_OPEN
+            )
+            mock_from_url.assert_called_once_with("redis://localhost:6379/0")
+            assert store.prefix == "pfx:"
+            assert store.failure_mode == DedupFailureMode.FAIL_OPEN
+            assert store._client is mock_client
+
 
 class TestAsyncRedisDedupStore:
     @pytest.mark.asyncio
@@ -170,6 +182,17 @@ class TestAsyncRedisDedupStore:
                 await store.claim("evt_async_down", ttl_seconds=60)
         else:
             assert await store.claim("evt_async_down", ttl_seconds=60) is True
+
+    def test_async_redis_dedup_store_from_url(self) -> None:
+        with patch("redis.asyncio.Redis.from_url") as mock_from_url:
+            mock_client = MagicMock()
+            mock_from_url.return_value = mock_client
+            store = AsyncRedisWebhookDedupStore.from_url(
+                "redis://localhost:6379/0", prefix="async_pfx:"
+            )
+            mock_from_url.assert_called_once_with("redis://localhost:6379/0")
+            assert store.prefix == "async_pfx:"
+            assert store._client is mock_client
 
 
 class TestComputeDedupKey:

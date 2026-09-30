@@ -26,19 +26,28 @@ class DiditWebhookGuard:
     executes single-pass cryptographic verification, and optionally deduplicates
     events against a WebhookDedupStore.
 
+    `duplicate_action` semantics:
+    - `"pass"` (default): Duplicate events are passed to the route handler with
+      `payload.is_duplicate = True`. This safe default prevents lost retries if a
+      previous attempt crashed or failed before durable processing was complete.
+    - `"respond_ok"`: Short-circuits with a fast 200 OK without invoking the handler.
+      Use only when claiming the event itself constitutes durable acceptance
+      (e.g., immediate transactional inbox insertion).
+    - `"raise"`: Raises an HTTP 409 Conflict.
+
     Example:
         ```python
         guard = DiditWebhookGuard(
             secret="whsec_...",
             dedup_store=InMemoryWebhookDedupStore(),
-            duplicate_action="respond_ok",
+            # duplicate_action defaults to "pass" for at-least-once safe delivery
         )
 
 
         @app.post("/webhooks/didit")
         async def handle_webhook(payload: WebhookPayload = Depends(guard)):
             if payload.status == SessionStatus.APPROVED:
-                # Process approved KYC verification
+                # Idempotently process approved KYC verification
                 ...
         ```
     """
@@ -51,7 +60,7 @@ class DiditWebhookGuard:
         max_body_bytes: int = DEFAULT_MAX_WEBHOOK_BYTES,
         dedup_store: WebhookDedupStore | AsyncWebhookDedupStore | None = None,
         dedup_ttl_seconds: int = 86400,
-        duplicate_action: Literal["respond_ok", "pass", "raise"] = "respond_ok",
+        duplicate_action: Literal["respond_ok", "pass", "raise"] = "pass",
         dedup_key_builder: Callable[[WebhookPayload, Request], str] | None = None,
     ) -> None:
         resolved_secret = secret or os.environ.get("DIDIT_WEBHOOK_SECRET")

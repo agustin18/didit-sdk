@@ -231,6 +231,23 @@ class TestDjangoWebhookView:
         view(request2)
         assert seen_duplicates == [False, True]
 
+    def test_dedup_store_default_action_is_pass(self) -> None:
+        store = InMemoryWebhookDedupStore()
+        seen_duplicates: list[bool] = []
+
+        @didit_webhook_view(secret=SECRET, dedup_store=store)
+        def view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
+            seen_duplicates.append(payload.is_duplicate)
+            return HttpResponse("ok")
+
+        request1 = create_signed_django_request(SAMPLE_PAYLOAD)
+        view(request1)
+        assert seen_duplicates == [False]
+
+        request2 = create_signed_django_request(SAMPLE_PAYLOAD)
+        view(request2)
+        assert seen_duplicates == [False, True]
+
     def test_custom_dedup_key_builder(self) -> None:
         store = InMemoryWebhookDedupStore()
 

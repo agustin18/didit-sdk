@@ -242,6 +242,40 @@ class TestFastAPIWebhookGuard:
         assert resp2.status_code == 200
         assert resp2.json()["is_duplicate"] is True
 
+    def test_guard_dedup_default_action_is_pass(self) -> None:
+        from didit.dedup import InMemoryWebhookDedupStore
+
+        store = InMemoryWebhookDedupStore()
+        guard = DiditWebhookGuard(
+            secret=WEBHOOK_SECRET,
+            dedup_store=store,
+        )
+        assert guard.duplicate_action == "pass"
+        app = FastAPI()
+
+        @app.post("/webhook-default")
+        async def endpoint(payload: WebhookPayload = Depends(guard)) -> dict[str, Any]:
+            return {"is_duplicate": payload.is_duplicate}
+
+        test_client = TestClient(app)
+        data = {
+            "event_id": "evt_fastapi_default",
+            "session_id": "sess_default",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp1 = test_client.post("/webhook-default", content=raw_body, headers=headers)
+        assert resp1.status_code == 200
+        assert resp1.json()["is_duplicate"] is False
+
+        resp2 = test_client.post("/webhook-default", content=raw_body, headers=headers)
+        assert resp2.status_code == 200
+        assert resp2.json()["is_duplicate"] is True
+
     def test_guard_dedup_raise_action(self) -> None:
         from didit.dedup import InMemoryWebhookDedupStore
 

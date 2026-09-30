@@ -122,6 +122,20 @@ class RedisWebhookDedupStore:
         self.prefix = prefix
         self.failure_mode = failure_mode
 
+    @classmethod
+    def from_url(
+        cls,
+        url: str,
+        prefix: str = "didit:dedup:",
+        failure_mode: DedupFailureMode = DedupFailureMode.RAISE,
+        **kwargs: Any,
+    ) -> RedisWebhookDedupStore:
+        """Create a RedisWebhookDedupStore from a Redis connection URL."""
+        import redis
+
+        client = redis.Redis.from_url(url, **kwargs)
+        return cls(client=client, prefix=prefix, failure_mode=failure_mode)
+
     def claim(self, key: str, ttl_seconds: int = 86400) -> bool:
         """Atomically claim key in Redis with TTL expiration."""
         full_key = f"{self.prefix}{key}"
@@ -134,7 +148,12 @@ class RedisWebhookDedupStore:
             raise DiditDedupError(f"Redis dedup store failed: {exc}") from exc
 
     def release(self, key: str) -> None:
-        """Release/delete a claimed key in Redis."""
+        """Release/delete a claimed key in Redis.
+
+        Note: In v0.2.0, release() performs a best-effort deletion of the key.
+        Tokenized two-phase lease reservations with strict ownership verification
+        are planned for v0.3.0.
+        """
         full_key = f"{self.prefix}{key}"
         try:
             self._client.delete(full_key)
@@ -157,6 +176,20 @@ class AsyncRedisWebhookDedupStore:
         self.prefix = prefix
         self.failure_mode = failure_mode
 
+    @classmethod
+    def from_url(
+        cls,
+        url: str,
+        prefix: str = "didit:dedup:",
+        failure_mode: DedupFailureMode = DedupFailureMode.RAISE,
+        **kwargs: Any,
+    ) -> AsyncRedisWebhookDedupStore:
+        """Create an AsyncRedisWebhookDedupStore from a Redis connection URL."""
+        import redis.asyncio as aioredis
+
+        client = aioredis.Redis.from_url(url, **kwargs)
+        return cls(client=client, prefix=prefix, failure_mode=failure_mode)
+
     async def aclaim(self, key: str, ttl_seconds: int = 86400) -> bool:
         """Atomically claim key in Redis asynchronously with TTL expiration."""
         full_key = f"{self.prefix}{key}"
@@ -169,7 +202,12 @@ class AsyncRedisWebhookDedupStore:
             raise DiditDedupError(f"Async Redis dedup store failed: {exc}") from exc
 
     async def arelease(self, key: str) -> None:
-        """Release/delete a claimed key in Redis asynchronously."""
+        """Release/delete a claimed key in Redis asynchronously.
+
+        Note: In v0.2.0, arelease() performs a best-effort deletion of the key.
+        Tokenized two-phase lease reservations with strict ownership verification
+        are planned for v0.3.0.
+        """
         full_key = f"{self.prefix}{key}"
         try:
             await self._client.delete(full_key)
