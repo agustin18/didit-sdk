@@ -10,6 +10,7 @@ from didit.errors import (
     DiditAPIError,
     DiditAuthenticationError,
     DiditConfigurationError,
+    DiditConnectionError,
     DiditNotFoundError,
     DiditPermissionError,
     DiditRateLimitError,
@@ -320,6 +321,80 @@ class TestAsyncDiditClient:
         assert isinstance(exc_info.value, DiditAPIError)
         assert exc_info.value.status_code == status_code
         await async_client.aclose()
+
+    @respx.mock
+    async def test_http_error_capture_sensitive_response_default_and_explicit(
+        self, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/s_leak_async/").mock(
+            return_value=Response(
+                400,
+                text='{"detail": "Sensitive Biometric Payload Async"}',
+                headers={"X-Request-Id": "req_leak_async_123"},
+            )
+        )
+        # Default: capture_sensitive_response=False -> response_body is None
+        client_safe = AsyncDidit(api_key="key", base_url=base_url)
+        with pytest.raises(DiditAPIError) as exc_safe:
+            await client_safe.sessions.get("s_leak_async")
+        assert exc_safe.value.response_body is None
+        assert exc_safe.value.status_code == 400
+        assert exc_safe.value.request_id == "req_leak_async_123"
+        await client_safe.aclose()
+
+        # Explicit: capture_sensitive_response=True -> response_body retained
+        client_sensitive = AsyncDidit(
+            api_key="key", base_url=base_url, capture_sensitive_response=True
+        )
+        with pytest.raises(DiditAPIError) as exc_sens:
+            await client_sensitive.sessions.get("s_leak_async")
+        assert exc_sens.value.response_body == '{"detail": "Sensitive Biometric Payload Async"}'
+        await client_sensitive.aclose()
+
+        # Test exception causes suppression on connection/network error
+        import httpx
+
+        class AsyncConnFailTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                raise httpx.ConnectError("Async failed TCP connect")
+
+        client_cause_safe = AsyncDidit(
+            api_key="key",
+            base_url="https://api.example.com",
+            http_client=httpx.AsyncClient(transport=AsyncConnFailTransport()),
+        )
+        with pytest.raises(DiditConnectionError) as conn_exc_safe:
+            await client_cause_safe.sessions.get("s_cause_async")
+        assert conn_exc_safe.value.__cause__ is None
+        assert conn_exc_safe.value.__suppress_context__ is True
+        await client_cause_safe.aclose()
+
+        client_cause_sens = AsyncDidit(
+            api_key="key",
+            base_url="https://api.example.com",
+            capture_sensitive_response=True,
+            http_client=httpx.AsyncClient(transport=AsyncConnFailTransport()),
+        )
+        with pytest.raises(DiditConnectionError) as conn_exc_sens:
+            await client_cause_sens.sessions.get("s_cause_async")
+        assert isinstance(conn_exc_sens.value.__cause__, httpx.ConnectError)
+        await client_cause_sens.aclose()
+
+    @pytest.mark.parametrize(
+        ("kwargs",),
+        [
+            ({"api_key": "k"},),
+            ({"base_url": "https://api.example.com"},),
+            ({"timeout": 10.0},),
+            ({"max_retries": 1},),
+            ({"webhook_secret": "whsec"},),
+            ({"capture_sensitive_response": False},),
+        ],
+    )
+    def test_async_client_config_mutual_exclusivity(self, kwargs: dict[str, object]) -> None:
+        cfg = DiditConfig(api_key="cfg_key")
+        with pytest.raises(DiditConfigurationError, match="Cannot combine `config`"):
+            AsyncDidit(config=cfg, **kwargs)
 
     @respx.mock
     async def test_rate_limit_error_retry_after(

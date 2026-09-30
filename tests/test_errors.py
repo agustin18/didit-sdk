@@ -1,3 +1,5 @@
+import pytest
+
 from didit.errors import (
     DiditAPIError,
     DiditAuthenticationError,
@@ -75,7 +77,8 @@ class TestErrors:
         assert err.error_code == "RATE_LIMIT_EXCEEDED"
         assert err.request_id == "req_rl"
 
-    def test_handle_http_error_pii_safe_and_403_separation(self) -> None:
+    @pytest.mark.parametrize("capture_sensitive", [False, True])
+    def test_handle_http_error_pii_safe_and_403_separation(self, capture_sensitive: bool) -> None:
         import httpx
         import pytest
 
@@ -83,14 +86,98 @@ class TestErrors:
         res_403 = httpx.Response(
             403,
             json={"error_code": "KEY_EXPIRED", "detail": "Sensitive PII user data"},
-            headers={"X-Request-Id": "req_secret_403"},
+            headers={
+                "X-Request-Id": "req_secret_403",
+                "Authorization": "Bearer secret_token_123",
+                "x-api-key": "secret_key_456",
+                "Set-Cookie": "session_id=secret_cookie_789",
+                "Content-Type": "application/json",
+                "X-Untrusted-Header": "internal_private_context",
+            },
             request=httpx.Request("GET", "https://api.didit.me/v1/session/"),
         )
         with pytest.raises(DiditPermissionError) as exc_info:
-            handle_http_error(res_403)
+            handle_http_error(res_403, capture_sensitive_response=capture_sensitive)
         assert "Sensitive PII" not in str(exc_info.value)
         assert "status=403" in str(exc_info.value)
         assert "code=KEY_EXPIRED" in str(exc_info.value)
         assert "request_id=req_secret_403" in str(exc_info.value)
-        assert exc_info.value.response_body is not None
-        assert "Sensitive PII" in exc_info.value.response_body
+
+        # Sensitive headers must always be stripped from exc.headers
+        assert "authorization" not in exc_info.value.headers
+        assert "x-api-key" not in exc_info.value.headers
+        assert "set-cookie" not in exc_info.value.headers
+        assert exc_info.value.headers.get("content-type") == "application/json"
+
+        if capture_sensitive:
+            assert exc_info.value.response_body is not None
+            assert "Sensitive PII" in exc_info.value.response_body
+            # In sensitive mode, non-secret headers are preserved
+            assert exc_info.value.headers.get("x-untrusted-header") == "internal_private_context"
+        else:
+            assert exc_info.value.response_body is None
+            # In safe mode, untrusted non-whitelisted headers are stripped
+            assert "x-untrusted-header" not in exc_info.value.headers
+
+    @pytest.mark.parametrize(
+        ("raw_code", "expected_code"),
+        [
+            ("SESSION_NOT_FOUND", "SESSION_NOT_FOUND"),
+            ("INVALID_API_KEY", "INVALID_API_KEY"),
+            ("AUTH:KEY.REVOKED-1", "AUTH:KEY.REVOKED-1"),
+            ("john.doe@example.com", None),
+            ("This is an unvalidated error string with PII", None),
+            ({"nested": "dict"}, None),
+            (12345, None),
+            (None, None),
+        ],
+    )
+    def test_handle_http_error_machine_error_code_validation(
+        self, raw_code: object, expected_code: str | None
+    ) -> None:
+        import httpx
+        import pytest
+
+        res = httpx.Response(
+            400,
+            json={"error_code": raw_code},
+            request=httpx.Request("POST", "https://api.didit.me/v1/session/"),
+        )
+        with pytest.raises(DiditAPIError) as exc_info:
+            handle_http_error(res)
+
+        assert exc_info.value.error_code == expected_code
+        if expected_code:
+            assert f"code={expected_code}" in str(exc_info.value)
+        else:
+            assert "code=" not in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        ("raw_req_id", "expected_req_id"),
+        [
+            ("req_valid_123", "req_valid_123"),
+            ("REQ:123.456-abc", "REQ:123.456-abc"),
+            ("req with spaces and <script>", None),
+            ("a" * 200, None),  # Exceeds max 128 chars
+            ("", None),
+        ],
+    )
+    def test_handle_http_error_request_id_validation(
+        self, raw_req_id: str, expected_req_id: str | None
+    ) -> None:
+        import httpx
+        import pytest
+
+        res = httpx.Response(
+            400,
+            headers={"x-request-id": raw_req_id} if raw_req_id else {},
+            request=httpx.Request("GET", "https://api.didit.me/v1/session/"),
+        )
+        with pytest.raises(DiditAPIError) as exc_info:
+            handle_http_error(res)
+
+        assert exc_info.value.request_id == expected_req_id
+        if expected_req_id:
+            assert f"request_id={expected_req_id}" in str(exc_info.value)
+        else:
+            assert "request_id=" not in str(exc_info.value)

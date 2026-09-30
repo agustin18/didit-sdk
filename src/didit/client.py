@@ -31,12 +31,26 @@ class Didit:
         timeout: float | None = None,
         max_retries: int | None = None,
         webhook_secret: str | None = None,
+        capture_sensitive_response: bool | None = None,
         config: DiditConfig | None = None,
         http_client: httpx.Client | None = None,
         retry_policy: RetryPolicy | None = None,
         default_options: RequestOptions | None = None,
     ) -> None:
         if config is not None:
+            if (
+                api_key is not None
+                or base_url is not None
+                or timeout is not None
+                or max_retries is not None
+                or webhook_secret is not None
+                or capture_sensitive_response is not None
+            ):
+                raise DiditConfigurationError(
+                    "Cannot combine `config` with explicit configuration arguments "
+                    "(api_key, base_url, timeout, max_retries, webhook_secret, "
+                    "capture_sensitive_response). Pass either `config` or explicit arguments."
+                )
             self._config = config
         else:
             self._config = DiditConfig.from_env(
@@ -45,6 +59,7 @@ class Didit:
                 timeout=timeout,
                 max_retries=max_retries,
                 webhook_secret=webhook_secret,
+                capture_sensitive_response=capture_sensitive_response,
             )
 
         self._manage_http = http_client is None
@@ -67,6 +82,7 @@ class Didit:
             retry_policy=self._retry_policy,
             default_timeout=self._config.timeout,
             default_options=self._default_options,
+            capture_sensitive_response=self._config.capture_sensitive_response,
         )
 
         self.sessions = SessionsResource(self._requestor)
@@ -159,12 +175,26 @@ class AsyncDidit:
         timeout: float | None = None,
         max_retries: int | None = None,
         webhook_secret: str | None = None,
+        capture_sensitive_response: bool | None = None,
         config: DiditConfig | None = None,
         http_client: httpx.AsyncClient | None = None,
         retry_policy: RetryPolicy | None = None,
         default_options: RequestOptions | None = None,
     ) -> None:
         if config is not None:
+            if (
+                api_key is not None
+                or base_url is not None
+                or timeout is not None
+                or max_retries is not None
+                or webhook_secret is not None
+                or capture_sensitive_response is not None
+            ):
+                raise DiditConfigurationError(
+                    "Cannot combine `config` with explicit configuration arguments "
+                    "(api_key, base_url, timeout, max_retries, webhook_secret, "
+                    "capture_sensitive_response). Pass either `config` or explicit arguments."
+                )
             self._config = config
         else:
             self._config = DiditConfig.from_env(
@@ -173,6 +203,7 @@ class AsyncDidit:
                 timeout=timeout,
                 max_retries=max_retries,
                 webhook_secret=webhook_secret,
+                capture_sensitive_response=capture_sensitive_response,
             )
 
         self._manage_http = http_client is None
@@ -195,6 +226,7 @@ class AsyncDidit:
             retry_policy=self._retry_policy,
             default_timeout=self._config.timeout,
             default_options=self._default_options,
+            capture_sensitive_response=self._config.capture_sensitive_response,
         )
 
         self.sessions = AsyncSessionsResource(self._requestor)

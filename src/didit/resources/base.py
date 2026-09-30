@@ -2,6 +2,7 @@
 
 import datetime
 import email.utils
+import re
 
 import httpx
 
@@ -35,26 +36,72 @@ def parse_retry_after(retry_after_header: str | None) -> float | None:
         return None
 
 
-def handle_http_error(response: httpx.Response) -> None:
-    """Inspect HTTP response and raise appropriate typed exception on non-2xx status."""
+SAFE_ERROR_HEADERS: frozenset[str] = frozenset(
+    {
+        "x-request-id",
+        "retry-after",
+        "content-type",
+        "x-ratelimit-limit",
+        "x-ratelimit-remaining",
+        "x-ratelimit-reset",
+    }
+)
+
+SENSITIVE_HEADER_NAMES: frozenset[str] = frozenset(
+    {"authorization", "x-api-key", "set-cookie", "cookie"}
+)
+
+_ERROR_CODE_REGEX = re.compile(r"^[A-Z][A-Z0-9_.:-]{0,63}$")
+_REQUEST_ID_REGEX = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+def handle_http_error(
+    response: httpx.Response,
+    *,
+    capture_sensitive_response: bool = False,
+) -> None:
+    """Inspect HTTP response and raise appropriate typed exception on non-2xx status.
+
+    When capture_sensitive_response is False (default), response_body and details
+    are set to None, headers are restricted to a strict allowlist (SAFE_ERROR_HEADERS),
+    and error_code/request_id are strictly validated to prevent PII and secret leaks
+    into telemetry or APMs.
+    """
     if response.is_success:
         return
 
     status = response.status_code
-    body = response.text
-    headers = dict(response.headers)
+    body = response.text if capture_sensitive_response else None
+
+    if capture_sensitive_response:
+        headers = {
+            k.lower(): v
+            for k, v in response.headers.items()
+            if k.lower() not in SENSITIVE_HEADER_NAMES
+        }
+    else:
+        headers = {
+            k.lower(): v for k, v in response.headers.items() if k.lower() in SAFE_ERROR_HEADERS
+        }
+
+    raw_req_id = response.headers.get("x-request-id") or response.headers.get("X-Request-Id")
+    request_id = None
+    if isinstance(raw_req_id, str) and _REQUEST_ID_REGEX.match(raw_req_id.strip()):
+        request_id = raw_req_id.strip()
 
     error_code = None
     details = None
     try:
         json_data = response.json()
         if isinstance(json_data, dict):
-            error_code = json_data.get("error_code") or json_data.get("code")
-            details = json_data.get("details") or json_data.get("detail")
+            raw_code = json_data.get("error_code") or json_data.get("code")
+            if isinstance(raw_code, str) and _ERROR_CODE_REGEX.match(raw_code.strip()):
+                error_code = raw_code.strip()
+            if capture_sensitive_response:
+                details = json_data.get("details") or json_data.get("detail")
     except Exception:
         pass
 
-    request_id = headers.get("x-request-id") or headers.get("X-Request-Id")
     msg_parts = [f"Didit API request failed (status={status})"]
     if error_code:
         msg_parts.append(f"code={error_code}")

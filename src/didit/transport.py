@@ -60,6 +60,11 @@ class RetryPolicy:
         return parse_retry_after(retry_after_header)
 
 
+def _resolve_cause(exc: BaseException, capture: bool) -> BaseException | None:
+    """Return exc if capture is enabled, otherwise None to suppress cause."""
+    return exc if capture else None
+
+
 def should_retry(
     method: str,
     status_code: int | None,
@@ -177,6 +182,7 @@ class _SyncRequestor:
         retry_policy: RetryPolicy | None = None,
         default_timeout: float | None = None,
         default_options: RequestOptions | None = None,
+        capture_sensitive_response: bool = False,
     ) -> None:
         self._client = client
         self._base_url = base_url
@@ -184,6 +190,7 @@ class _SyncRequestor:
         self._retry_policy = retry_policy or RetryPolicy()
         self._default_timeout = default_timeout
         self._default_options = default_options
+        self._capture_sensitive_response = capture_sensitive_response
 
     def request(
         self,
@@ -251,7 +258,10 @@ class _SyncRequestor:
                     )
                     if retry_after is not None and retry_after > self._retry_policy.max_retry_after:
                         # Exceeds max allowable wait; abort immediately
-                        handle_http_error(response)
+                        handle_http_error(
+                            response,
+                            capture_sensitive_response=self._capture_sensitive_response,
+                        )
 
                     delay = (
                         retry_after
@@ -269,12 +279,15 @@ class _SyncRequestor:
                     attempt += 1
                     continue
 
-                handle_http_error(response)
+                handle_http_error(
+                    response,
+                    capture_sensitive_response=self._capture_sensitive_response,
+                )
 
             except httpx.PoolTimeout as exc:
                 raise DiditPoolTimeoutError(
                     f"Connection pool acquisition timed out: {exc}"
-                ) from exc
+                ) from _resolve_cause(exc, self._capture_sensitive_response)
 
             except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                 if should_retry(
@@ -291,11 +304,13 @@ class _SyncRequestor:
                         if delay >= remaining or remaining <= 0:
                             raise DiditTimeoutError(
                                 "Request deadline exceeded before retry backoff."
-                            ) from exc
+                            ) from _resolve_cause(exc, self._capture_sensitive_response)
                     time.sleep(delay)
                     attempt += 1
                     continue
-                raise DiditConnectionError(f"Failed to connect to Didit API: {exc}") from exc
+                raise DiditConnectionError(
+                    f"Failed to connect to Didit API: {exc}"
+                ) from _resolve_cause(exc, self._capture_sensitive_response)
 
             except (httpx.ReadTimeout, httpx.WriteTimeout) as exc:
                 if should_retry(
@@ -312,11 +327,13 @@ class _SyncRequestor:
                         if delay >= remaining or remaining <= 0:
                             raise DiditTimeoutError(
                                 "Request deadline exceeded before retry backoff."
-                            ) from exc
+                            ) from _resolve_cause(exc, self._capture_sensitive_response)
                     time.sleep(delay)
                     attempt += 1
                     continue
-                raise DiditTimeoutError(f"Request timed out during transmission: {exc}") from exc
+                raise DiditTimeoutError(
+                    f"Request timed out during transmission: {exc}"
+                ) from _resolve_cause(exc, self._capture_sensitive_response)
 
             except (
                 httpx.RemoteProtocolError,
@@ -338,11 +355,13 @@ class _SyncRequestor:
                         if delay >= remaining or remaining <= 0:
                             raise DiditTimeoutError(
                                 "Request deadline exceeded before retry backoff."
-                            ) from exc
+                            ) from _resolve_cause(exc, self._capture_sensitive_response)
                     time.sleep(delay)
                     attempt += 1
                     continue
-                raise DiditConnectionError(f"Network error during transmission: {exc}") from exc
+                raise DiditConnectionError(
+                    f"Network error during transmission: {exc}"
+                ) from _resolve_cause(exc, self._capture_sensitive_response)
 
 
 class _AsyncRequestor:
@@ -357,6 +376,7 @@ class _AsyncRequestor:
         retry_policy: RetryPolicy | None = None,
         default_timeout: float | None = None,
         default_options: RequestOptions | None = None,
+        capture_sensitive_response: bool = False,
     ) -> None:
         self._client = client
         self._base_url = base_url
@@ -364,6 +384,7 @@ class _AsyncRequestor:
         self._retry_policy = retry_policy or RetryPolicy()
         self._default_timeout = default_timeout
         self._default_options = default_options
+        self._capture_sensitive_response = capture_sensitive_response
 
     async def request(
         self,
@@ -443,7 +464,10 @@ class _AsyncRequestor:
                         response.headers.get("retry-after")
                     )
                     if retry_after is not None and retry_after > self._retry_policy.max_retry_after:
-                        handle_http_error(response)
+                        handle_http_error(
+                            response,
+                            capture_sensitive_response=self._capture_sensitive_response,
+                        )
 
                     delay = (
                         retry_after
@@ -461,12 +485,15 @@ class _AsyncRequestor:
                     attempt += 1
                     continue
 
-                handle_http_error(response)
+                handle_http_error(
+                    response,
+                    capture_sensitive_response=self._capture_sensitive_response,
+                )
 
             except httpx.PoolTimeout as exc:
                 raise DiditPoolTimeoutError(
                     f"Connection pool acquisition timed out: {exc}"
-                ) from exc
+                ) from _resolve_cause(exc, self._capture_sensitive_response)
 
             except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                 if should_retry(
@@ -483,11 +510,13 @@ class _AsyncRequestor:
                         if delay >= remaining or remaining <= 0:
                             raise DiditTimeoutError(
                                 "Request deadline exceeded before retry backoff."
-                            ) from exc
+                            ) from _resolve_cause(exc, self._capture_sensitive_response)
                     await asyncio.sleep(delay)
                     attempt += 1
                     continue
-                raise DiditConnectionError(f"Failed to connect to Didit API: {exc}") from exc
+                raise DiditConnectionError(
+                    f"Failed to connect to Didit API: {exc}"
+                ) from _resolve_cause(exc, self._capture_sensitive_response)
 
             except (
                 httpx.ReadTimeout,
@@ -509,11 +538,13 @@ class _AsyncRequestor:
                         if delay >= remaining or remaining <= 0:
                             raise DiditTimeoutError(
                                 "Request deadline exceeded before retry backoff."
-                            ) from exc
+                            ) from _resolve_cause(exc, self._capture_sensitive_response)
                     await asyncio.sleep(delay)
                     attempt += 1
                     continue
-                raise DiditTimeoutError(f"Request timed out during transmission: {exc}") from exc
+                raise DiditTimeoutError(
+                    f"Request timed out during transmission: {exc}"
+                ) from _resolve_cause(exc, self._capture_sensitive_response)
 
             except (
                 httpx.RemoteProtocolError,
@@ -535,8 +566,10 @@ class _AsyncRequestor:
                         if delay >= remaining or remaining <= 0:
                             raise DiditTimeoutError(
                                 "Request deadline exceeded before retry backoff."
-                            ) from exc
+                            ) from _resolve_cause(exc, self._capture_sensitive_response)
                     await asyncio.sleep(delay)
                     attempt += 1
                     continue
-                raise DiditConnectionError(f"Network error during transmission: {exc}") from exc
+                raise DiditConnectionError(
+                    f"Network error during transmission: {exc}"
+                ) from _resolve_cause(exc, self._capture_sensitive_response)
