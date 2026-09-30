@@ -489,6 +489,116 @@ class TestFastAPIWebhookGuard:
         # release_didit_claim on uninitialized request
         await release_didit_claim(req)
 
+    def test_guard_invalid_processing_action_raises(self) -> None:
+        with pytest.raises(ValueError, match="Invalid processing_action 'unknown'"):
+            DiditWebhookGuard(secret=WEBHOOK_SECRET, processing_action="unknown")  # type: ignore[arg-type]
+
+
+class TestFastAPIWebhookReservation:
+    @pytest.mark.parametrize("action", ["retry", "raise", "pass"])
+    def test_processing_action_outcomes(self, action: str) -> None:
+        from fastapi import Request
+
+        from didit.dedup import InMemoryWebhookReservationStore
+        from didit.integrations.fastapi import complete_didit_reservation
+
+        res_store = InMemoryWebhookReservationStore()
+        # Seed an in-flight processing reservation with different token
+        res_store.reserve("evt_res_test", token="other_worker", ttl_seconds=60)
+
+        res_guard = DiditWebhookGuard(
+            secret=WEBHOOK_SECRET,
+            dedup_store=res_store,
+            processing_action=action,  # type: ignore[arg-type]
+        )
+        test_app = FastAPI()
+
+        @test_app.post("/test-res")
+        async def endpoint(
+            request: Request,
+            payload: WebhookPayload = Depends(res_guard),
+        ) -> dict[str, Any]:
+            await complete_didit_reservation(request)
+            await res_guard.complete_reservation(request)
+            return {"duplicate": payload.is_duplicate}
+
+        client = TestClient(test_app)
+        data = {
+            "event_id": "evt_res_test",
+            "session_id": "sess_res",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/test-res", content=raw_body, headers=headers)
+        if action == "retry":
+            assert resp.status_code == 503
+            assert resp.headers.get("retry-after") == "5"
+            assert "currently being processed" in resp.json()["detail"]
+        elif action == "raise":
+            assert resp.status_code == 409
+            assert "currently being processed" in resp.json()["detail"]
+        elif action == "pass":
+            assert resp.status_code == 200
+            assert resp.json() == {"duplicate": True}
+
+    def test_complete_reservation_success_flow(self) -> None:
+        from fastapi import Request
+
+        from didit.dedup import InMemoryWebhookReservationStore
+        from didit.integrations.fastapi import complete_didit_reservation
+
+        res_store = InMemoryWebhookReservationStore()
+        res_guard = DiditWebhookGuard(secret=WEBHOOK_SECRET, dedup_store=res_store)
+        test_app = FastAPI()
+        completed_results: list[bool] = []
+
+        @test_app.post("/test-res-complete")
+        async def endpoint(
+            request: Request,
+            payload: WebhookPayload = Depends(res_guard),
+        ) -> dict[str, str]:
+            res1 = await res_guard.complete_reservation(request)
+            res2 = await complete_didit_reservation(request)
+            completed_results.extend([res1, res2])
+            return {"status": "ok"}
+
+        client = TestClient(test_app)
+        data = {
+            "event_id": "evt_comp_flow",
+            "session_id": "sess_comp",
+            "status": "Approved",
+            "created_at": int(time.time()),
+        }
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(WEBHOOK_SECRET, data, version="v2")
+        headers = {"X-Signature-V2": sig, "Content-Type": "application/json"}
+
+        resp = client.post("/test-res-complete", content=raw_body, headers=headers)
+        assert resp.status_code == 200
+        # First complete succeeded; second was already completed/cleared
+        assert completed_results[0] is True
+
+    @pytest.mark.asyncio
+    async def test_complete_reservation_no_op_branches(self) -> None:
+        from starlette.requests import Request
+
+        from didit.dedup import InMemoryWebhookReservationStore
+        from didit.integrations.fastapi import complete_didit_reservation
+
+        guard_none = DiditWebhookGuard(secret=WEBHOOK_SECRET, dedup_store=None)
+        req = Request({"type": "http"})
+        assert await guard_none.complete_reservation(req) is False
+
+        store = InMemoryWebhookReservationStore()
+        guard_with_store = DiditWebhookGuard(secret=WEBHOOK_SECRET, dedup_store=store)
+        assert await guard_with_store.complete_reservation(req) is False
+
+        assert await complete_didit_reservation(req) is False
+
 
 class TestIntegrationsLazyLoading:
     def test_lazy_attribute_access_success(self) -> None:

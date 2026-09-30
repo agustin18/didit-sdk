@@ -1,3 +1,7 @@
+"""FastAPI integration for verifying, parsing, and deduplicating Didit webhooks."""
+
+from __future__ import annotations
+
 import os
 from collections.abc import Callable
 from typing import Literal
@@ -7,9 +11,13 @@ from starlette.requests import Request
 from didit.config import DEFAULT_WEBHOOK_MAX_AGE_SECONDS
 from didit.dedup import (
     AsyncWebhookDedupStore,
+    AsyncWebhookReservationStore,
+    ReservationState,
     WebhookDedupStore,
-    aclaim_webhook_event,
+    WebhookReservationStore,
+    acomplete_webhook_event,
     arelease_webhook_event,
+    areserve_webhook_event,
     compute_dedup_key,
 )
 from didit.errors import DiditConfigurationError, DiditSignatureError
@@ -20,36 +28,25 @@ DEFAULT_MAX_WEBHOOK_BYTES: int = 1_048_576  # 1 MiB
 
 
 class DiditWebhookGuard:
-    """FastAPI dependency for verifying, parsing, and deduplicating Didit webhook requests.
+    """FastAPI dependency for verifying, parsing, and reserving Didit webhook requests.
 
     Enforces streaming body bounds (HTTP 413) to prevent memory DoS attacks,
-    executes single-pass cryptographic verification, and optionally deduplicates
-    events against a WebhookDedupStore.
+    executes single-pass cryptographic verification, and optionally deduplicates/leases
+    events against a WebhookDedupStore or WebhookReservationStore.
 
     `duplicate_action` semantics:
-    - `"pass"` (default): Duplicate events are passed to the route handler with
+    - `"pass"` (default): Duplicate events (COMPLETED) are passed to the route handler with
       `payload.is_duplicate = True`. This safe default prevents lost retries if a
       previous attempt crashed or failed before durable processing was complete.
     - `"respond_ok"`: Short-circuits with a fast 200 OK without invoking the handler.
-      Use only when claiming the event itself constitutes durable acceptance
-      (e.g., immediate transactional inbox insertion).
     - `"raise"`: Raises an HTTP 409 Conflict.
 
-    Example:
-        ```python
-        guard = DiditWebhookGuard(
-            secret="whsec_...",
-            dedup_store=InMemoryWebhookDedupStore(),
-            # duplicate_action defaults to "pass" for at-least-once safe delivery
-        )
-
-
-        @app.post("/webhooks/didit")
-        async def handle_webhook(payload: WebhookPayload = Depends(guard)):
-            if payload.status == SessionStatus.APPROVED:
-                # Idempotently process approved KYC verification
-                ...
-        ```
+    `processing_action` semantics:
+    - `"retry"` (default): When another worker is actively holding the processing lease
+      (PROCESSING), raises HTTP 503 Service Unavailable with `Retry-After: 5` header so Didit
+      automatically retries delivery.
+    - `"raise"`: Raises an HTTP 409 Conflict.
+    - `"pass"`: Passes event to route handler with `payload.is_duplicate = True`.
     """
 
     def __init__(
@@ -58,9 +55,16 @@ class DiditWebhookGuard:
         *,
         max_age_seconds: int = DEFAULT_WEBHOOK_MAX_AGE_SECONDS,
         max_body_bytes: int = DEFAULT_MAX_WEBHOOK_BYTES,
-        dedup_store: WebhookDedupStore | AsyncWebhookDedupStore | None = None,
+        dedup_store: (
+            WebhookDedupStore
+            | AsyncWebhookDedupStore
+            | WebhookReservationStore
+            | AsyncWebhookReservationStore
+            | None
+        ) = None,
         dedup_ttl_seconds: int = 86400,
         duplicate_action: Literal["respond_ok", "pass", "raise"] = "pass",
+        processing_action: Literal["retry", "pass", "raise"] = "retry",
         dedup_key_builder: Callable[[WebhookPayload, Request], str] | None = None,
     ) -> None:
         resolved_secret = secret or os.environ.get("DIDIT_WEBHOOK_SECRET")
@@ -74,6 +78,11 @@ class DiditWebhookGuard:
                 f"Invalid duplicate_action '{duplicate_action}'. "
                 "Must be 'respond_ok', 'pass', or 'raise'."
             )
+        if processing_action not in ("retry", "pass", "raise"):
+            raise ValueError(
+                f"Invalid processing_action '{processing_action}'. "
+                "Must be 'retry', 'pass', or 'raise'."
+            )
 
         self.secret: str = resolved_secret
         self.max_age_seconds = max_age_seconds
@@ -81,6 +90,7 @@ class DiditWebhookGuard:
         self.dedup_store = dedup_store
         self.dedup_ttl_seconds = dedup_ttl_seconds
         self.duplicate_action = duplicate_action
+        self.processing_action = processing_action
         self.dedup_key_builder = dedup_key_builder
 
     async def __call__(self, request: Request) -> WebhookPayload:
@@ -101,26 +111,26 @@ class DiditWebhookGuard:
             except ValueError:
                 pass
 
-        chunks: list[bytes] = []
-        total_bytes = 0
+        body_chunks = []
+        bytes_received = 0
         async for chunk in request.stream():
-            total_bytes += len(chunk)
-            if total_bytes > self.max_body_bytes:
+            bytes_received += len(chunk)
+            if bytes_received > self.max_body_bytes:
                 raise HTTPException(
                     status_code=413,
                     detail=(
                         f"Webhook payload exceeds maximum size limit of {self.max_body_bytes} bytes"
                     ),
                 )
-            chunks.append(chunk)
+            body_chunks.append(chunk)
 
-        raw_body = b"".join(chunks)
+        raw_body = b"".join(body_chunks)
 
         try:
             payload = parse_webhook_payload(
                 raw_body,
-                request.headers,
-                self.secret,
+                headers=dict(request.headers),
+                secret=self.secret,
                 max_age_seconds=self.max_age_seconds,
             )
         except DiditSignatureError as err:
@@ -143,14 +153,16 @@ class DiditWebhookGuard:
                 )
                 dedup_key = compute_dedup_key(payload, signature=sig)
 
-            is_new = await aclaim_webhook_event(
+            attempt = await areserve_webhook_event(
                 self.dedup_store, dedup_key, ttl_seconds=self.dedup_ttl_seconds
             )
             request.state.didit_dedup_key = dedup_key
             request.state.didit_dedup_store = self.dedup_store
-            request.state.didit_claimed = is_new
+            request.state.didit_attempt = attempt
+            request.state.didit_reservation = attempt.reservation
+            request.state.didit_claimed = attempt.state == ReservationState.ACQUIRED
 
-            if not is_new:
+            if attempt.state == ReservationState.COMPLETED:
                 if self.duplicate_action == "respond_ok":
                     raise HTTPException(
                         status_code=200,
@@ -165,23 +177,74 @@ class DiditWebhookGuard:
                 payload.is_duplicate = True
                 request.state.is_duplicate = True
 
+            elif attempt.state == ReservationState.PROCESSING:
+                if self.processing_action == "retry":
+                    raise HTTPException(
+                        status_code=503,
+                        headers={"Retry-After": "5"},
+                        detail="Webhook event currently being processed by another worker",
+                    )
+                if self.processing_action == "raise":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Webhook event currently being processed",
+                    )
+                # "pass" mode
+                payload.is_duplicate = True
+                request.state.is_duplicate = True
+
+            else:  # ACQUIRED
+                payload.is_duplicate = False
+                request.state.is_duplicate = False
+
         return payload
 
     async def release_claim(self, request: Request) -> None:
-        """Release dedup claim associated with this request if processing failed."""
+        """Release dedup claim or reservation associated with this request if processing failed."""
         if self.dedup_store is not None:
             key = getattr(request.state, "didit_dedup_key", None)
             claimed = getattr(request.state, "didit_claimed", False)
+            res = getattr(request.state, "didit_reservation", None)
+            token = res.token if res else None
             if key and claimed:
-                await arelease_webhook_event(self.dedup_store, key)
+                await arelease_webhook_event(self.dedup_store, key, token=token)
                 request.state.didit_claimed = False
+
+    async def complete_reservation(self, request: Request, completed_ttl: int = 86400) -> bool:
+        """Transition active reservation to COMPLETED state upon successful processing."""
+        if self.dedup_store is not None:
+            key = getattr(request.state, "didit_dedup_key", None)
+            res = getattr(request.state, "didit_reservation", None)
+            if key and res:
+                success = await acomplete_webhook_event(
+                    self.dedup_store, key, token=res.token, completed_ttl=completed_ttl
+                )
+                request.state.didit_claimed = False
+                return success
+        return False
 
 
 async def release_didit_claim(request: Request) -> None:
-    """Helper to release dedup claim recorded on request.state if processing failed."""
+    """Helper to release claim or reservation recorded on request.state if processing failed."""
     store = getattr(request.state, "didit_dedup_store", None)
     key = getattr(request.state, "didit_dedup_key", None)
     claimed = getattr(request.state, "didit_claimed", False)
+    res = getattr(request.state, "didit_reservation", None)
+    token = res.token if res else None
     if store and key and claimed:
-        await arelease_webhook_event(store, key)
+        await arelease_webhook_event(store, key, token=token)
         request.state.didit_claimed = False
+
+
+async def complete_didit_reservation(request: Request, completed_ttl: int = 86400) -> bool:
+    """Helper to complete active reservation on request.state upon successful processing."""
+    store = getattr(request.state, "didit_dedup_store", None)
+    key = getattr(request.state, "didit_dedup_key", None)
+    res = getattr(request.state, "didit_reservation", None)
+    if store and key and res:
+        success = await acomplete_webhook_event(
+            store, key, token=res.token, completed_ttl=completed_ttl
+        )
+        request.state.didit_claimed = False
+        return success
+    return False

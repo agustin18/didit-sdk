@@ -9,7 +9,10 @@ from typing import Any
 import pytest
 from flask import Flask, Response, g, jsonify
 
-from didit.dedup import InMemoryWebhookDedupStore
+from didit.dedup import (
+    InMemoryWebhookDedupStore,
+    InMemoryWebhookReservationStore,
+)
 from didit.errors import DiditConfigurationError, DiditSignatureError
 from didit.integrations.flask import didit_webhook, parse_flask_webhook
 from didit.models.enums import SessionStatus
@@ -509,3 +512,188 @@ class TestParseFlaskWebhook:
         mock_req.get_data.side_effect = RuntimeError("Disk IO failure")
         with pytest.raises(RuntimeError, match="Disk IO failure"):
             parse_flask_webhook(request_obj=mock_req, secret="sec", max_body_bytes=100)
+
+
+class TestFlaskWebhookReservation:
+    def test_invalid_processing_action_raises(self) -> None:
+        with pytest.raises(ValueError, match="Invalid processing_action 'invalid'"):
+            didit_webhook(secret=SECRET, processing_action="invalid")  # type: ignore[arg-type]
+
+    def test_async_reservation_store_with_sync_view_raises(self) -> None:
+        class FakeAsyncResStore:
+            async def areserve(self, *args: Any, **kwargs: Any) -> Any:
+                pass
+
+        with pytest.raises(
+            DiditConfigurationError, match="AsyncWebhookReservationStore cannot be used"
+        ):
+
+            @didit_webhook(secret=SECRET, dedup_store=FakeAsyncResStore())  # type: ignore[arg-type]
+            def sync_view(payload: WebhookPayload) -> str:
+                return "ok"
+
+    @pytest.mark.parametrize("action", ["retry", "raise", "pass"])
+    def test_sync_processing_actions(self, action: str) -> None:
+        app = Flask(__name__)
+        store = InMemoryWebhookReservationStore()
+        payload_data = {**SAMPLE_PAYLOAD, "event_id": "evt_flask_res"}
+        store.reserve("evt_flask_res", token="other_worker", ttl_seconds=60)
+
+        @app.route("/res-test", methods=["POST"])
+        @didit_webhook(
+            secret=SECRET,
+            dedup_store=store,
+            processing_action=action,  # type: ignore[arg-type]
+        )
+        def handle(payload: WebhookPayload):
+            return jsonify({"duplicate": payload.is_duplicate})
+
+        res = create_signed_flask_client(app, "/res-test", payload_data)
+        if action == "retry":
+            assert res.status_code == 503
+            assert res.headers["Retry-After"] == "5"
+        elif action == "raise":
+            assert res.status_code == 409
+        elif action == "pass":
+            assert res.status_code == 200
+            assert res.get_json()["duplicate"] is True
+
+    @pytest.mark.parametrize("action", ["retry", "raise", "pass"])
+    def test_async_processing_actions(self, action: str) -> None:
+        app = Flask(__name__)
+        store = InMemoryWebhookReservationStore()
+        payload_data = {**SAMPLE_PAYLOAD, "event_id": "evt_flask_async_res"}
+        store.reserve("evt_flask_async_res", token="other_worker", ttl_seconds=60)
+
+        @app.route("/res-async-test", methods=["POST"])
+        @didit_webhook(
+            secret=SECRET,
+            dedup_store=store,
+            processing_action=action,  # type: ignore[arg-type]
+        )
+        async def handle(payload: WebhookPayload):
+            return jsonify({"duplicate": payload.is_duplicate})
+
+        client = app.test_client()
+        data = dict(payload_data)
+        data["created_at"] = int(time.time())
+        raw_body = json.dumps(data).encode("utf-8")
+        sig = compute_signature(SECRET, data, version="v2")
+
+        res = client.post(
+            "/res-async-test",
+            data=raw_body,
+            headers={"x-signature-v2": sig, "content-type": "application/json"},
+        )
+        if action == "retry":
+            assert res.status_code == 503
+            assert res.headers["Retry-After"] == "5"
+        elif action == "raise":
+            assert res.status_code == 409
+        elif action == "pass":
+            assert res.status_code == 200
+            assert res.get_json()["duplicate"] is True
+
+    def test_sync_reservation_lifecycle_complete_and_release(self) -> None:
+        app = Flask(__name__)
+        app.testing = True
+        store = InMemoryWebhookReservationStore()
+        call_count = 0
+        should_fail_500 = False
+        should_raise = False
+
+        @app.route("/res-lifecycle", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=store, duplicate_action="respond_ok")
+        def handle(payload: WebhookPayload):
+            nonlocal call_count
+            call_count += 1
+            if should_raise:
+                raise RuntimeError("Handler crash")
+            if should_fail_500:
+                return "error", 500
+            return "success", 200
+
+        payload_data = {**SAMPLE_PAYLOAD, "event_id": "evt_flask_lifecycle"}
+
+        # 1. Exception -> releases lease
+        should_raise = True
+        with pytest.raises(RuntimeError):
+            create_signed_flask_client(app, "/res-lifecycle", payload_data)
+        assert call_count == 1
+
+        # 2. 500 error -> releases lease
+        should_raise = False
+        should_fail_500 = True
+        res500 = create_signed_flask_client(app, "/res-lifecycle", payload_data)
+        assert res500.status_code == 500
+        assert call_count == 2
+
+        # 3. 200 OK -> completes lease
+        should_fail_500 = False
+        res200 = create_signed_flask_client(app, "/res-lifecycle", payload_data)
+        assert res200.status_code == 200
+        assert call_count == 3
+
+        # 4. Duplicate call -> acknowledged without executing view
+        res_dup = create_signed_flask_client(app, "/res-lifecycle", payload_data)
+        assert res_dup.status_code == 200
+        assert b"Duplicate webhook event acknowledged" in res_dup.data
+        assert call_count == 3
+
+    def test_async_reservation_lifecycle_complete_and_release(self) -> None:
+        app = Flask(__name__)
+        app.testing = True
+        store = InMemoryWebhookReservationStore()
+        call_count = 0
+        should_fail_500 = False
+        should_raise = False
+
+        @app.route("/res-async-lifecycle", methods=["POST"])
+        @didit_webhook(secret=SECRET, dedup_store=store, duplicate_action="respond_ok")
+        async def handle(payload: WebhookPayload):
+            nonlocal call_count
+            call_count += 1
+            if should_raise:
+                raise RuntimeError("Handler crash")
+            if should_fail_500:
+                return "error", 500
+            return "success", 200
+
+        client = app.test_client()
+        payload_data = {**SAMPLE_PAYLOAD, "event_id": "evt_flask_async_lifecycle"}
+
+        def do_post():
+            data = dict(payload_data)
+            data["created_at"] = int(time.time())
+            raw_body = json.dumps(data).encode("utf-8")
+            sig = compute_signature(SECRET, data, version="v2")
+            return client.post(
+                "/res-async-lifecycle",
+                data=raw_body,
+                headers={"x-signature-v2": sig, "content-type": "application/json"},
+            )
+
+        # 1. Exception -> releases lease
+        should_raise = True
+        with pytest.raises(RuntimeError):
+            do_post()
+        assert call_count == 1
+
+        # 2. 500 error -> releases lease
+        should_raise = False
+        should_fail_500 = True
+        res500 = do_post()
+        assert res500.status_code == 500
+        assert call_count == 2
+
+        # 3. 200 OK -> completes lease
+        should_fail_500 = False
+        res200 = do_post()
+        assert res200.status_code == 200
+        assert call_count == 3
+
+        # 4. Duplicate call -> duplicate acknowledged
+        res_dup = do_post()
+        assert res_dup.status_code == 200
+        assert b"Duplicate webhook event acknowledged" in res_dup.data
+        assert call_count == 3

@@ -24,11 +24,17 @@ except ImportError as err:  # pragma: no cover
 from didit.config import DEFAULT_WEBHOOK_MAX_AGE_SECONDS
 from didit.dedup import (
     AsyncWebhookDedupStore,
+    AsyncWebhookReservationStore,
+    ReservationState,
     WebhookDedupStore,
-    aclaim_webhook_event,
+    WebhookReservationStore,
+    acomplete_webhook_event,
     arelease_webhook_event,
+    areserve_webhook_event,
+    complete_webhook_event,
     compute_dedup_key,
     release_webhook_event,
+    reserve_webhook_event,
 )
 from didit.errors import DiditConfigurationError, DiditSignatureError
 from didit.models.webhook import WebhookPayload
@@ -103,11 +109,14 @@ def parse_django_webhook(
             if key.startswith("HTTP_"):
                 header_name = key[5:].replace("_", "-").lower()
                 headers_mapping[header_name] = str(value)
+            elif key in ("CONTENT_TYPE", "CONTENT_LENGTH"):
+                header_name = key.replace("_", "-").lower()
+                headers_mapping[header_name] = str(value)
 
     return parse_webhook_payload(
         raw_body,
-        headers_mapping,
-        resolved_secret,
+        headers=headers_mapping,
+        secret=resolved_secret,
         max_age_seconds=max_age_seconds,
     )
 
@@ -117,34 +126,24 @@ def didit_webhook_view(
     *,
     max_age_seconds: int = DEFAULT_WEBHOOK_MAX_AGE_SECONDS,
     max_body_bytes: int = DEFAULT_MAX_WEBHOOK_BYTES,
-    dedup_store: WebhookDedupStore | AsyncWebhookDedupStore | None = None,
+    dedup_store: (
+        WebhookDedupStore
+        | AsyncWebhookDedupStore
+        | WebhookReservationStore
+        | AsyncWebhookReservationStore
+        | None
+    ) = None,
     dedup_ttl_seconds: int = 86400,
     duplicate_action: Literal["respond_ok", "pass", "raise"] = "pass",
+    processing_action: Literal["retry", "pass", "raise"] = "retry",
     dedup_key_builder: Callable[[WebhookPayload, HttpRequest], str] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Django view decorator for verifying, parsing, and deduplicating Didit webhooks.
+    """Django view decorator for verifying, parsing, and reserving Didit webhooks.
 
     Automatically applies @csrf_exempt, enforces POST method, bounds request body
-    memory, validates cryptographic signatures, handles deduplication, and passes
+    memory, validates cryptographic signatures, handles deduplication/leasing, and passes
     the parsed WebhookPayload into the decorated view function. Supports both synchronous
     and asynchronous Django view functions.
-
-    `duplicate_action` semantics:
-    - `"pass"` (default): Duplicate events are passed to the view with
-      `payload.is_duplicate = True`. This safe default ensures Didit delivery retries
-      are never swallowed if a previous attempt crashed or failed before durable processing.
-    - `"respond_ok"`: Short-circuits with an immediate 200 OK without invoking the view. Use only
-      when claiming the event constitutes durable acceptance (e.g. transactional inbox).
-    - `"raise"`: Raises an HTTP 409 Conflict.
-
-    Example:
-        ```python
-        @didit_webhook_view(secret="whsec_...")
-        def my_webhook_view(request: HttpRequest, payload: WebhookPayload) -> HttpResponse:
-            if payload.status == SessionStatus.APPROVED:
-                ...
-            return HttpResponse(status=200)
-        ```
     """
     resolved_secret = secret or os.environ.get("DIDIT_WEBHOOK_SECRET")
     if not resolved_secret:
@@ -157,6 +156,10 @@ def didit_webhook_view(
             f"Invalid duplicate_action '{duplicate_action}'. "
             "Must be 'respond_ok', 'pass', or 'raise'."
         )
+    if processing_action not in ("retry", "pass", "raise"):
+        raise ValueError(
+            f"Invalid processing_action '{processing_action}'. Must be 'retry', 'pass', or 'raise'."
+        )
 
     def decorator(view_func: Callable[..., Any]) -> Callable[..., Any]:
         is_async = inspect.iscoroutinefunction(view_func)
@@ -164,12 +167,24 @@ def didit_webhook_view(
         if (
             not is_async
             and dedup_store is not None
+            and hasattr(dedup_store, "areserve")
+            and not hasattr(dedup_store, "reserve")
+        ):
+            raise DiditConfigurationError(
+                "AsyncWebhookReservationStore cannot be used with synchronous Django view "
+                "functions. Use WebhookReservationStore."
+            )
+
+        if (
+            not is_async
+            and dedup_store is not None
             and hasattr(dedup_store, "aclaim")
             and not hasattr(dedup_store, "claim")
+            and not hasattr(dedup_store, "reserve")
         ):
             raise DiditConfigurationError(
                 "AsyncWebhookDedupStore cannot be used with synchronous Django view functions. "
-                "Use WebhookDedupStore."
+                "Use WebhookDedupStore or WebhookReservationStore."
             )
 
         if is_async:
@@ -206,6 +221,7 @@ def didit_webhook_view(
 
                 is_new = False
                 dedup_key = ""
+                res_token: str | None = None
                 if dedup_store is not None:
                     if dedup_key_builder is not None:
                         dedup_key = dedup_key_builder(payload, request)
@@ -215,11 +231,15 @@ def didit_webhook_view(
                         ).get("x-signature-v2")
                         dedup_key = compute_dedup_key(payload, signature=sig)
 
-                    is_new = await aclaim_webhook_event(
+                    attempt = await areserve_webhook_event(
                         dedup_store, dedup_key, ttl_seconds=dedup_ttl_seconds
                     )
+                    is_new = attempt.state == ReservationState.ACQUIRED
+                    if attempt.reservation is not None:
+                        res_token = attempt.reservation.token
+                        request.didit_reservation = attempt.reservation
 
-                    if not is_new:
+                    if attempt.state == ReservationState.COMPLETED:
                         if duplicate_action == "respond_ok":
                             return HttpResponse(
                                 "Duplicate webhook event acknowledged",
@@ -234,8 +254,24 @@ def didit_webhook_view(
                             )
                         payload.is_duplicate = True
 
+                    elif attempt.state == ReservationState.PROCESSING:
+                        if processing_action == "retry":
+                            resp = HttpResponse(
+                                "Webhook event currently being processed by another worker",
+                                status=503,
+                                content_type="text/plain",
+                            )
+                            resp["Retry-After"] = "5"
+                            return resp
+                        if processing_action == "raise":
+                            return HttpResponse(
+                                "Webhook event currently being processed",
+                                status=409,
+                                content_type="text/plain",
+                            )
+                        payload.is_duplicate = True
+
                 try:
-                    # Call view function
                     sig_params = inspect.signature(view_func).parameters
                     if len(sig_params) >= 2 or "payload" in sig_params:
                         result = await view_func(request, payload, *args, **kwargs)
@@ -243,13 +279,15 @@ def didit_webhook_view(
                         result = await view_func(request, *args, **kwargs)
                 except Exception:
                     if dedup_store is not None and is_new:
-                        await arelease_webhook_event(dedup_store, dedup_key)
+                        await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
                     raise
 
                 if dedup_store is not None and is_new:
                     status_code = getattr(result, "status_code", None)
                     if isinstance(status_code, int) and status_code >= 500:
-                        await arelease_webhook_event(dedup_store, dedup_key)
+                        await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                    elif res_token is not None:
+                        await acomplete_webhook_event(dedup_store, dedup_key, token=res_token)
 
                 if result is None:
                     return HttpResponse(status=200)
@@ -288,7 +326,23 @@ def didit_webhook_view(
 
             is_new = False
             dedup_key = ""
+            res_token: str | None = None
             if dedup_store is not None:
+                if hasattr(dedup_store, "areserve") and not hasattr(dedup_store, "reserve"):
+                    raise DiditConfigurationError(
+                        "AsyncWebhookReservationStore cannot be used with "
+                        "synchronous Django view functions. Use WebhookReservationStore."
+                    )
+                if (
+                    hasattr(dedup_store, "aclaim")
+                    and not hasattr(dedup_store, "claim")
+                    and not hasattr(dedup_store, "reserve")
+                ):
+                    raise DiditConfigurationError(
+                        "AsyncWebhookDedupStore cannot be used with "
+                        "synchronous Django view functions. Use WebhookDedupStore."
+                    )
+
                 if dedup_key_builder is not None:
                     dedup_key = dedup_key_builder(payload, request)
                 else:
@@ -298,37 +352,72 @@ def didit_webhook_view(
                     dedup_key = compute_dedup_key(payload, signature=sig)
 
                 claim_fn = getattr(dedup_store, "claim", None)
-                if claim_fn is None:
-                    raise DiditConfigurationError(
-                        "AsyncWebhookDedupStore cannot be used with "
-                        "synchronous Django view functions. Use WebhookDedupStore."
-                    )
-                claim_res = claim_fn(dedup_key, ttl_seconds=dedup_ttl_seconds)
-                if inspect.isawaitable(claim_res):
-                    if inspect.iscoroutine(claim_res):
-                        claim_res.close()
-                    raise DiditConfigurationError(
-                        "dedup_store.claim returned a coroutine in a synchronous Django view. "
-                        "Provide a synchronous WebhookDedupStore."
-                    )
-                is_new = bool(claim_res)
-                if not is_new:
-                    if duplicate_action == "respond_ok":
-                        return HttpResponse(
-                            "Duplicate webhook event acknowledged",
-                            status=200,
-                            content_type="text/plain",
+                if claim_fn is not None and not hasattr(dedup_store, "reserve"):
+                    claim_res = claim_fn(dedup_key, ttl_seconds=dedup_ttl_seconds)
+                    if inspect.isawaitable(claim_res):
+                        if inspect.iscoroutine(claim_res):
+                            claim_res.close()
+                        raise DiditConfigurationError(
+                            "dedup_store.claim returned a coroutine in a synchronous Django view. "
+                            "Provide a synchronous WebhookDedupStore."
                         )
-                    if duplicate_action == "raise":
-                        return HttpResponse(
-                            "Duplicate webhook event",
-                            status=409,
-                            content_type="text/plain",
-                        )
-                    payload.is_duplicate = True
+                    is_new = bool(claim_res)
+                    if not is_new:
+                        if duplicate_action == "respond_ok":
+                            return HttpResponse(
+                                "Duplicate webhook event acknowledged",
+                                status=200,
+                                content_type="text/plain",
+                            )
+                        if duplicate_action == "raise":
+                            return HttpResponse(
+                                "Duplicate webhook event",
+                                status=409,
+                                content_type="text/plain",
+                            )
+                        payload.is_duplicate = True
+                else:
+                    attempt = reserve_webhook_event(
+                        dedup_store, dedup_key, ttl_seconds=dedup_ttl_seconds
+                    )
+                    is_new = attempt.state == ReservationState.ACQUIRED
+                    if attempt.reservation is not None:
+                        res_token = attempt.reservation.token
+                        request.didit_reservation = attempt.reservation
+
+                    if attempt.state == ReservationState.COMPLETED:
+                        if duplicate_action == "respond_ok":
+                            return HttpResponse(
+                                "Duplicate webhook event acknowledged",
+                                status=200,
+                                content_type="text/plain",
+                            )
+                        if duplicate_action == "raise":
+                            return HttpResponse(
+                                "Duplicate webhook event",
+                                status=409,
+                                content_type="text/plain",
+                            )
+                        payload.is_duplicate = True
+
+                    elif attempt.state == ReservationState.PROCESSING:
+                        if processing_action == "retry":
+                            resp = HttpResponse(
+                                "Webhook event currently being processed by another worker",
+                                status=503,
+                                content_type="text/plain",
+                            )
+                            resp["Retry-After"] = "5"
+                            return resp
+                        if processing_action == "raise":
+                            return HttpResponse(
+                                "Webhook event currently being processed",
+                                status=409,
+                                content_type="text/plain",
+                            )
+                        payload.is_duplicate = True
 
             try:
-                # Call view function
                 sig_params = inspect.signature(view_func).parameters
                 if len(sig_params) >= 2 or "payload" in sig_params:
                     result = view_func(request, payload, *args, **kwargs)
@@ -336,13 +425,15 @@ def didit_webhook_view(
                     result = view_func(request, *args, **kwargs)
             except Exception:
                 if dedup_store is not None and is_new:
-                    release_webhook_event(dedup_store, dedup_key)
+                    release_webhook_event(dedup_store, dedup_key, token=res_token)
                 raise
 
             if dedup_store is not None and is_new:
                 status_code = getattr(result, "status_code", None)
                 if isinstance(status_code, int) and status_code >= 500:
-                    release_webhook_event(dedup_store, dedup_key)
+                    release_webhook_event(dedup_store, dedup_key, token=res_token)
+                elif res_token is not None:
+                    complete_webhook_event(dedup_store, dedup_key, token=res_token)
 
             if result is None:
                 return HttpResponse(status=200)
