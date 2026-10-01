@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Automated sandbox contract matrix (`tests/test_contract_matrix.py`) validating all 16 Didit sandbox scenarios, additive schema drift resilience (`extra="allow"`), and warning code catalog normalization.
   - Scheduled GitHub Actions workflow (`.github/workflows/live-contract.yml`) for periodic live contract verification.
 - **Contractual Precision & Upstream OpenAPI Drift Monitoring:**
-  - Enforced strict enum validation on `CallbackMethod` (`INITIATOR`, `DESKTOP`, `BOTH`) and `ResubmitFeature` (`OCR`, `LIVENESS`, `FACE_MATCH`), eliminating loose string union bypasses while preserving backward-compatible case normalization.
+  - Enforced strict enum validation on `CallbackMethod` (`INITIATOR`, `COMPLETER`, `BOTH`) and `ResubmitFeature` (`OCR`, `LIVENESS`, `FACE_MATCH`), eliminating loose string union bypasses while preserving backward-compatible case normalization.
   - Fail-closed normalization in `_normalize_nodes_to_resubmit()`: rejects unrecognized strings, malformed shorthand, and non-resubmittable organizational KYB steps across objects, dictionaries, and string shorthands.
   - Arbitrary JSON metadata typing via `JsonValue` for session creation (`client.sessions.create(metadata=...)`), supporting dictionaries, primitives, and lists.
   - Truthful `UpdateSessionStatusResponse` model preserving unconfirmed status (`status: None`) while recording intention in `requested_status` when Didit V3 returns only `{"session_id": ...}` without an immediate status confirmation.

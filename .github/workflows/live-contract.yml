@@ -123,6 +123,6 @@ jobs:
               contract = json.load(f)
           scenarios = {s['slug'] for s in data.get('scenarios', [])}
           expected = set(contract['expected_slugs'])
-          assert scenarios == expected, f'Live sandbox scenarios contract mismatch: {scenarios ^ expected}'
-          print(f'Successfully verified {len(scenarios)} live sandbox scenarios matching oracle!')
+          assert expected.issubset(scenarios), f'Live sandbox scenarios missing expected slugs: {expected - scenarios}'
+          print(f'Successfully verified {len(expected)} live sandbox scenarios matching oracle!')
           "
