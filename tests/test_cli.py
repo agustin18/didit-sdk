@@ -6,6 +6,7 @@ import io
 import json
 import os
 import stat
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -728,7 +729,7 @@ class TestDiditCLI:
         assert out_file.read_bytes() == pdf_content
 
         # Verify 0600 permissions on POSIX
-        if hasattr(os, "chmod"):
+        if sys.platform != "win32":
             mode = stat.S_IMODE(out_file.stat().st_mode)
             assert mode == 0o600
 
@@ -776,10 +777,19 @@ class TestDiditCLI:
         assert data["status"] == "error"
         assert data["error"]["code"] == "SESSION_NOT_FOUND"
 
-    def test_secure_write_bytes_cleanup_on_error(self) -> None:
-        # Test that temporary files are cleaned up if writing fails
-        with pytest.raises(OSError):
-            _secure_write_bytes(Path("/dev/null/impossible/path"), b"test")
+    def test_secure_write_bytes_cleanup_on_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Test that temporary files are cleaned up if file replacement fails
+        target = tmp_path / "final.pdf"
+
+        def broken_replace(*args: Any, **kwargs: Any) -> None:
+            raise OSError("Replace operation failed")
+
+        monkeypatch.setattr(Path, "replace", broken_replace)
+        with pytest.raises(OSError, match="Replace operation failed"):
+            _secure_write_bytes(target, b"test")
+        assert not target.exists()
 
     # -------------------------------------------------------------------------
     # didit sandbox scenarios
@@ -951,8 +961,8 @@ class TestDiditCLI:
         def broken_chmod(*args: Any, **kwargs: Any) -> None:
             raise OSError("Operation not permitted")
 
-        monkeypatch.setattr(os, "fchmod", broken_chmod)
-        monkeypatch.setattr(os, "chmod", broken_chmod)
+        monkeypatch.setattr(os, "fchmod", broken_chmod, raising=False)
+        monkeypatch.setattr(os, "chmod", broken_chmod, raising=False)
         _secure_write_bytes(target, b"%PDF-1.4 test")
         assert target.exists()
 

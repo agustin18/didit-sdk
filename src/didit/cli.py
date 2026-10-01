@@ -193,16 +193,22 @@ def _secure_write_bytes(dest_path: Path, data: bytes, *, force: bool = False) ->
 
     tmp_fd, tmp_path_str = tempfile.mkstemp(dir=dest_dir, prefix=".didit_tmp_")
     tmp_path = Path(tmp_path_str)
+    fd_closed = False
     try:
         with contextlib.suppress(AttributeError, OSError):
             os.fchmod(tmp_fd, 0o600)
         with os.fdopen(tmp_fd, "wb") as f:
+            fd_closed = True
             f.write(data)
         tmp_path.replace(dest_path)
         with contextlib.suppress(AttributeError, OSError):
             os.chmod(dest_path, 0o600)
     except Exception:
-        tmp_path.unlink(missing_ok=True)
+        if not fd_closed:
+            with contextlib.suppress(OSError):
+                os.close(tmp_fd)
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
         raise
 
 
