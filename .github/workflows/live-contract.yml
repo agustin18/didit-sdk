@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "src/didit/**"
+      - "tests/contracts/**"
       - "tests/test_contract_matrix.py"
       - "tests/test_v020_compatibility.py"
       - ".github/workflows/live-contract.yml"

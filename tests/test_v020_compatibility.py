@@ -494,12 +494,14 @@ class TestV020Compatibility:
         # 1. Dedup helpers signatures and None return types for v0.2.0 callers
         sig_rel = inspect.signature(release_webhook_event)
         assert "store" in sig_rel.parameters
-        assert "event_id" in sig_rel.parameters
+        assert "key" in sig_rel.parameters
+        assert "event_id" not in sig_rel.parameters
         assert sig_rel.return_annotation in (None, "None", type(None))
 
         sig_arel = inspect.signature(arelease_webhook_event)
         assert "store" in sig_arel.parameters
-        assert "event_id" in sig_arel.parameters
+        assert "key" in sig_arel.parameters
+        assert "event_id" not in sig_arel.parameters
         assert sig_arel.return_annotation in (None, "None", type(None))
 
         sig_aclaim = inspect.signature(aclaim_webhook_event)
@@ -545,3 +547,25 @@ class TestV020Compatibility:
         sig_flask_parse = inspect.signature(parse_flask_webhook)
         assert "request_obj" in sig_flask_parse.parameters
         assert sig_flask_parse.return_annotation in (WebhookPayload, "WebhookPayload")
+
+    @pytest.mark.asyncio
+    async def test_v020_keyword_invocation_release_webhook_event(self) -> None:
+        """Verify calling release_webhook_event and arelease_webhook_event with keyword 'key'."""
+        from didit.dedup import (
+            InMemoryWebhookDedupStore,
+            arelease_webhook_event,
+            release_webhook_event,
+        )
+
+        store = InMemoryWebhookDedupStore()
+        store.claim("test_key_kw", ttl_seconds=60)
+
+        # Call synchronous release_webhook_event using keyword arguments exactly as in v0.2.0
+        res = release_webhook_event(store=store, key="test_key_kw")
+        assert res is None
+        assert store.claim("test_key_kw", ttl_seconds=60) is True
+
+        # Call asynchronous arelease_webhook_event using keyword arguments exactly as in v0.2.0
+        res_async = await arelease_webhook_event(store=store, key="test_key_kw")
+        assert res_async is None
+        assert store.claim("test_key_kw", ttl_seconds=60) is True
