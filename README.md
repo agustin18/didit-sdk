@@ -24,7 +24,7 @@ Unofficial, community-maintained Python client for the [Didit](https://didit.me)
 - **Didit V3 API Alignment**: Full fidelity to upstream V3 schemas (`id_verifications[]`, `liveness_checks[]`, `face_matches[]`, `aml_screenings[]`, `reviews[]`, `warnings[]`) with forward compatibility (`extra="allow"`), verification warnings helper (`decision.has_warning(...)`), and backward-compatible property accessors.
 - **Complete Session Lifecycle**: Covers all 10 documented Didit session statuses (`Not Started`, `In Progress`, `In Review`, `Approved`, `Declined`, `Expired`, `Abandoned`, `Kyc Expired`, `Resubmitted`, `Awaiting User`) with granular state inspection (`is_decided`, `is_closed`, `requires_review`, `requires_user_action`, `requires_resubmission`).
 - **Resubmission & Manual Review**: Full resubmission support (`client.sessions.resubmit()`) and review status transitions (`client.sessions.update_status()`).
-- **Official Compliance PDF Reports**: Download verification audit reports (`client.sessions.generate_pdf_report()`) with binary header (`%PDF-`) and MIME format validation.
+- **Official Compliance PDF Reports**: Download verification audit reports (`client.sessions.generate_pdf_report()` / `download_pdf_report()`) with binary header (`%PDF-`), MIME format validation, and atomic disk writes with private permissions.
 - **Production CLI (`didit`)**: Inspect sessions, download PDF reports, verify webhook signatures, query sandbox scenarios, and run diagnostic health checks with zero-credential exposure in command arguments.
 - **Cryptographic Security & DoS Defense**: Constant-time HMAC-SHA256 signature verification (`X-Signature-V2` & `X-Signature`), full UTF-8 Unicode canonical JSON support (`ensure_ascii=False`, `allow_nan=False`), authoritative signed body anti-replay verification with strict header matching, and bounded body limits (HTTP 413) to prevent memory exhaustion.
 - **Webhook Deduplication**: Thread-safe in-memory and atomic Redis deduplication stores (`InMemoryWebhookDedupStore`, `RedisWebhookDedupStore`, `AsyncRedisWebhookDedupStore`) with configurable duplicate actions (`respond_ok`, `pass`, `raise`).
@@ -236,11 +236,15 @@ from didit import Didit
 
 client = Didit()
 
-# Download verification report (60s default timeout per upstream processing characteristics)
-pdf_bytes = client.sessions.generate_pdf_report("sess_12345")
+# Option A: Direct-to-disk secure download (atomic swap, POSIX 0600 private permissions)
+report_path = client.sessions.download_pdf_report(
+    "sess_12345",
+    "reports/verification_report.pdf",
+    force=True,
+)
 
-with open("verification_report.pdf", "wb") as f:
-    f.write(pdf_bytes)
+# Option B: In-memory raw binary bytes (60s default timeout tailored to upstream generation latencies)
+pdf_bytes = client.sessions.generate_pdf_report("sess_12345")
 ```
 
 ---
@@ -421,8 +425,11 @@ Audit your network connectivity, API availability, and authentication credential
 
 ```bash
 didit doctor
-# Or with structured JSON
+# Or with structured JSON output
 didit doctor --json
+
+# In CI/CD pipelines (fails with non-zero exit code if healthcheck or latency probes are unavailable)
+didit doctor --strict
 ```
 
 #### Session Inspection & Lifecycle

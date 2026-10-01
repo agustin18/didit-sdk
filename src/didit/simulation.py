@@ -8,6 +8,7 @@ import json
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 from didit.errors import (
@@ -40,7 +41,7 @@ from didit.models.session import (
     SessionResponse,
     SessionStateSource,
 )
-from didit.resources.sessions import _validate_session_list_filters
+from didit.resources.sessions import _secure_write_bytes, _validate_session_list_filters
 from didit.webhooks import compute_signature
 
 SUPPORTED_SANDBOX_SCENARIOS: set[str] = {
@@ -603,6 +604,20 @@ class SimulatedSessionsResource:
 
     get_pdf_report = generate_pdf_report
 
+    def download_pdf_report(
+        self,
+        session_id: str,
+        destination: Path | str,
+        *,
+        force: bool = False,
+        options: Any = None,
+    ) -> Path:
+        """Download simulated compliance PDF report and save securely to disk."""
+        dest_path = Path(destination).resolve()
+        pdf_bytes = self.generate_pdf_report(session_id)
+        _secure_write_bytes(dest_path, pdf_bytes, force=force)
+        return dest_path
+
     def update_status(
         self,
         session_id: str,
@@ -897,6 +912,22 @@ class SimulatedAsyncSessionsResource:
         )
 
     get_pdf_report = generate_pdf_report
+
+    async def download_pdf_report(
+        self,
+        session_id: str,
+        destination: Path | str,
+        *,
+        force: bool = False,
+        options: Any = None,
+    ) -> Path:
+        """Download simulated compliance PDF report asynchronously and save securely to disk."""
+        dest_path = Path(destination).resolve()
+        pdf_bytes = await self.generate_pdf_report(session_id)
+        await asyncio.to_thread(_secure_write_bytes, dest_path, pdf_bytes, force=force)
+        return dest_path
+
+    adownload_pdf_report = download_pdf_report
 
     async def update_status(
         self,

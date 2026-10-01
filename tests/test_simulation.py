@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -158,6 +159,21 @@ class TestSimulatedDidit:
 
         with pytest.raises(ValueError, match="session_id must not be empty"):
             client.sessions.generate_pdf_report("")
+
+    def test_simulation_download_pdf_report(self, tmp_path: Path) -> None:
+        client = SimulatedDidit()
+        s = client.sessions.create(vendor_data="pdf_sim_sync_dl", workflow_id="wf")
+        dest = tmp_path / "sim_report.pdf"
+        saved = client.sessions.download_pdf_report(s.session_id, dest)
+        assert saved == dest.resolve()
+        assert dest.is_file()
+        assert dest.read_bytes().startswith(b"%PDF-")
+
+        with pytest.raises(FileExistsError):
+            client.sessions.download_pdf_report(s.session_id, dest, force=False)
+
+        saved_force = client.sessions.download_pdf_report(s.session_id, dest, force=True)
+        assert saved_force == dest.resolve()
 
 
 class TestSimulatedAsyncDidit:
@@ -733,6 +749,22 @@ class TestSimulatedAsyncDidit:
 
         with pytest.raises(ValueError, match="session_id must not be empty"):
             await client.sessions.generate_pdf_report("")
+
+    @pytest.mark.asyncio
+    async def test_async_simulation_download_pdf_report(self, tmp_path: Path) -> None:
+        client = SimulatedAsyncDidit()
+        s = await client.sessions.create(vendor_data="pdf_sim_async_dl", workflow_id="wf")
+        dest = tmp_path / "sim_async_report.pdf"
+        saved = await client.sessions.download_pdf_report(s.session_id, dest)
+        assert saved == dest.resolve()
+        assert dest.is_file()
+        assert dest.read_bytes().startswith(b"%PDF-")
+
+        with pytest.raises(FileExistsError):
+            await client.sessions.download_pdf_report(s.session_id, dest, force=False)
+
+        saved_force = await client.sessions.adownload_pdf_report(s.session_id, dest, force=True)
+        assert saved_force == dest.resolve()
 
     def test_simulation_resubmit_and_update_status(self) -> None:
         client = SimulatedDidit()

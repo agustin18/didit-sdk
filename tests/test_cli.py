@@ -242,6 +242,62 @@ class TestDiditCLI:
         assert "[WARN] API Connection: Healthcheck unavailable" in captured.out
         assert "[OK] Authentication: API key verified" in captured.out
 
+    @respx.mock
+    def test_cli_doctor_strict_failure(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("DIDIT_API_KEY", "test_key")
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
+            return_value=Response(503, json={"detail": "Service unavailable"})
+        )
+        respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
+            return_value=Response(404, json={"detail": "Not found"})
+        )
+
+        exit_code = main(["doctor", "--strict"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Healthcheck probe unavailable" in captured.err
+
+    @respx.mock
+    def test_cli_doctor_strict_failure_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("DIDIT_API_KEY", "test_key")
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
+            return_value=Response(503, json={"detail": "Service unavailable"})
+        )
+        respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
+            return_value=Response(404, json={"detail": "Not found"})
+        )
+
+        exit_code = main(["doctor", "--strict", "--json"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "error"
+        assert data["error"]["code"] == "CONNECTIVITY_UNAVAILABLE"
+
+    @respx.mock
+    def test_cli_doctor_strict_success(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("DIDIT_API_KEY", "test_key")
+        monkeypatch.setenv("DIDIT_WEBHOOK_SECRET", "test_secret")
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
+            return_value=Response(200, json={"status": "ok"})
+        )
+        respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
+            return_value=Response(404, json={"detail": "Not found"})
+        )
+
+        exit_code = main(["doctor", "--strict", "--json"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "ok"
+        assert data["connectivity"] == "ok"
+
     # -------------------------------------------------------------------------
     # didit webhook verify
     # -------------------------------------------------------------------------

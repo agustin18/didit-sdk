@@ -8,12 +8,10 @@ and sandbox scenario exploration.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import re
 import sys
-import tempfile
 import time
 import traceback
 import urllib.parse
@@ -34,6 +32,7 @@ from didit.errors import (
     DiditPermissionError,
     DiditSignatureError,
 )
+from didit.resources.sessions import _secure_write_bytes as _secure_write_bytes
 from didit.webhooks import parse_webhook_payload
 
 SANDBOX_SCENARIOS: list[dict[str, str]] = [
@@ -199,35 +198,6 @@ def _resolve_body(args: argparse.Namespace) -> str:
     return sys.stdin.read()
 
 
-def _secure_write_bytes(dest_path: Path, data: bytes, *, force: bool = False) -> None:
-    """Atomically write binary data to disk enforcing 0600 private permissions."""
-    if dest_path.exists() and not force:
-        raise FileExistsError(f"File '{dest_path}' already exists. Use --force to overwrite.")
-
-    dest_dir = dest_path.parent
-    dest_dir.mkdir(parents=True, exist_ok=True)
-
-    tmp_fd, tmp_path_str = tempfile.mkstemp(dir=dest_dir, prefix=".didit_tmp_")
-    tmp_path = Path(tmp_path_str)
-    fd_closed = False
-    try:
-        with contextlib.suppress(AttributeError, OSError):
-            os.fchmod(tmp_fd, 0o600)
-        with os.fdopen(tmp_fd, "wb") as f:
-            fd_closed = True
-            f.write(data)
-        tmp_path.replace(dest_path)
-        with contextlib.suppress(AttributeError, OSError):
-            os.chmod(dest_path, 0o600)
-    except Exception:
-        if not fd_closed:
-            with contextlib.suppress(OSError):
-                os.close(tmp_fd)
-        with contextlib.suppress(OSError):
-            tmp_path.unlink(missing_ok=True)
-        raise
-
-
 def _get_client(args: argparse.Namespace) -> Didit:
     """Instantiate a synchronous Didit client resolving configuration safely."""
     api_key = _resolve_api_key(args)
@@ -318,6 +288,14 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             "PROBE_FAILED",
             "Authentication verification probe failed.",
             is_json=is_json,
+        )
+
+    if getattr(args, "strict", False) and not conn_ok:
+        return _emit_error(
+            "CONNECTIVITY_UNAVAILABLE",
+            f"Healthcheck probe unavailable at {health_url}",
+            is_json=is_json,
+            exit_code=1,
         )
 
     payload: dict[str, Any] = {
@@ -787,6 +765,12 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument(
         "--secret-file",
         help="Path to file containing webhook secret to inspect (defaults to DIDIT_WEBHOOK_SECRET)",
+    )
+    doctor_parser.add_argument(
+        "--strict",
+        action="store_true",
+        default=False,
+        help="Fail with non-zero exit code if healthcheck or latency probe is unavailable",
     )
     doctor_parser.set_defaults(func=_cmd_doctor)
 

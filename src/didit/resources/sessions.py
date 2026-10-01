@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
+import os
 import random
+import tempfile
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from didit.errors import (
@@ -72,6 +76,36 @@ def _validate_manual_status(new_status: ManualSessionStatus | SessionStatus | st
             "Allowed transitions are: Approved, Declined, Resubmitted"
         )
     return new_status.value if isinstance(new_status, SessionStatus) else str(new_status)
+
+
+def _secure_write_bytes(dest_path: Path, data: bytes, *, force: bool = False) -> None:
+    """Atomically write binary data to disk enforcing 0600 private permissions."""
+    if dest_path.exists() and not force:
+        raise FileExistsError(f"File '{dest_path}' already exists. Use --force to overwrite.")
+
+    dest_dir = dest_path.parent
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    tmp_fd, tmp_path_str = tempfile.mkstemp(dir=dest_dir, prefix=".didit_tmp_")
+    tmp_path = Path(tmp_path_str)
+    fd_closed = False
+    try:
+        with contextlib.suppress(AttributeError, OSError):
+            os.fchmod(tmp_fd, 0o600)
+        with os.fdopen(tmp_fd, "wb") as f:
+            fd_closed = True
+            f.write(data)
+
+        tmp_path.replace(dest_path)
+        with contextlib.suppress(AttributeError, OSError):
+            os.chmod(dest_path, 0o600)
+    except Exception:
+        if not fd_closed:
+            with contextlib.suppress(OSError):
+                os.close(tmp_fd)
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _validate_session_list_filters(
@@ -252,7 +286,9 @@ class SessionsResource:
 
         Args:
             session_id: The unique identifier of the verification session.
-            nodes_to_resubmit: Optional list of workflow step/node keys to resubmit.
+            nodes_to_resubmit: Optional list of upstream workflow step node IDs to resubmit
+                (e.g. ['document-verification-node', 'face-liveness-node']), matching
+                workflow studio step keys or decision warnings.
             options: Optional per-request HTTP options.
 
         Returns:
@@ -597,6 +633,39 @@ class SessionsResource:
 
     get_pdf_report = generate_pdf_report
 
+    def download_pdf_report(
+        self,
+        session_id: str,
+        destination: Path | str,
+        *,
+        force: bool = False,
+        options: RequestOptions | None = None,
+    ) -> Path:
+        """Download compliance PDF report and save securely to disk with private permissions.
+
+        Invokes GET /v3/session/{session_id}/generate-pdf/ and atomically writes
+        binary content to destination enforcing private (0600 on POSIX) permissions.
+
+        Args:
+            session_id: The unique identifier of the verification session.
+            destination: Target file path on disk.
+            force: If True, overwrite target file if it already exists.
+            options: Optional per-request HTTP options.
+
+        Returns:
+            Path: The resolved destination path of the saved PDF file.
+
+        Raises:
+            ValueError: If session_id is empty or whitespace.
+            FileExistsError: If destination file exists and force is False.
+            DiditNotFoundError: If session does not exist.
+            DiditAPIError: If remote endpoint returns an error or invalid PDF format.
+        """
+        dest_path = Path(destination).resolve()
+        pdf_bytes = self.generate_pdf_report(session_id, options=options)
+        _secure_write_bytes(dest_path, pdf_bytes, force=force)
+        return dest_path
+
     def poll_decision(
         self,
         session_id: str,
@@ -781,6 +850,16 @@ class AsyncSessionsResource:
         """Request document or biometric resubmission for an existing session asynchronously.
 
         Invokes PATCH /v3/session/{session_id}/update-status/ with status 'Resubmitted'.
+
+        Args:
+            session_id: The unique identifier of the verification session.
+            nodes_to_resubmit: Optional list of upstream workflow step node IDs to resubmit
+                (e.g. ['document-verification-node', 'face-liveness-node']), matching
+                workflow studio step keys or decision warnings.
+            options: Optional per-request HTTP options.
+
+        Returns:
+            SessionResponse: The updated session with requires_resubmission=True.
         """
         return await self.update_status(
             session_id,
@@ -1111,6 +1190,41 @@ class AsyncSessionsResource:
         return resp.content
 
     get_pdf_report = generate_pdf_report
+
+    async def download_pdf_report(
+        self,
+        session_id: str,
+        destination: Path | str,
+        *,
+        force: bool = False,
+        options: RequestOptions | None = None,
+    ) -> Path:
+        """Download compliance PDF report asynchronously and save securely to disk.
+
+        Invokes GET /v3/session/{session_id}/generate-pdf/ and atomically writes
+        binary content to destination enforcing private (0600 on POSIX) permissions.
+
+        Args:
+            session_id: The unique identifier of the verification session.
+            destination: Target file path on disk.
+            force: If True, overwrite target file if it already exists.
+            options: Optional per-request HTTP options.
+
+        Returns:
+            Path: The resolved destination path of the saved PDF file.
+
+        Raises:
+            ValueError: If session_id is empty or whitespace.
+            FileExistsError: If destination file exists and force is False.
+            DiditNotFoundError: If session does not exist.
+            DiditAPIError: If remote endpoint returns an error or invalid PDF format.
+        """
+        dest_path = Path(destination).resolve()
+        pdf_bytes = await self.generate_pdf_report(session_id, options=options)
+        await asyncio.to_thread(_secure_write_bytes, dest_path, pdf_bytes, force=force)
+        return dest_path
+
+    adownload_pdf_report = download_pdf_report
 
     async def poll_decision(
         self,

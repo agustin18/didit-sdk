@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1538,4 +1539,47 @@ class TestAsyncDiditClient:
         with pytest.raises(DiditAPIError) as exc_info:
             await async_client.sessions.generate_pdf_report("sess_async_pdf_bad_mime")
         assert exc_info.value.status_code == 502
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_download_pdf_report_success_and_force(
+        self, async_client: AsyncDidit, base_url: str, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "async_reports" / "compliance.pdf"
+        pdf_content = b"%PDF-1.4 official async compliance report binary content"
+        respx.get(f"{base_url}/session/sess_async_pdf_dl/generate-pdf/").mock(
+            return_value=Response(
+                200,
+                content=pdf_content,
+                headers={"Content-Type": "application/pdf"},
+            )
+        )
+
+        # 1. Successful download to new file
+        saved = await async_client.sessions.download_pdf_report("sess_async_pdf_dl", target)
+        assert saved == target.resolve()
+        assert target.is_file()
+        assert target.read_bytes() == pdf_content
+
+        # 2. Re-download with force=False raises FileExistsError
+        with pytest.raises(FileExistsError, match="already exists"):
+            await async_client.sessions.download_pdf_report(
+                "sess_async_pdf_dl", target, force=False
+            )
+
+        # 3. Re-download with force=True succeeds and overwrites via adownload_pdf_report alias
+        new_pdf_content = b"%PDF-1.4 updated async compliance report binary content"
+        respx.get(f"{base_url}/session/sess_async_pdf_dl_overwrite/generate-pdf/").mock(
+            return_value=Response(
+                200,
+                content=new_pdf_content,
+                headers={"Content-Type": "application/pdf"},
+            )
+        )
+        saved_overwrite = await async_client.sessions.adownload_pdf_report(
+            "sess_async_pdf_dl_overwrite", target, force=True
+        )
+        assert saved_overwrite == target.resolve()
+        assert target.read_bytes() == new_pdf_content
         await async_client.aclose()

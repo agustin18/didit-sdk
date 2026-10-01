@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1373,3 +1374,42 @@ class TestDiditSyncClient:
         with pytest.raises(DiditAPIError) as exc_info:
             client.sessions.generate_pdf_report("sess_pdf_bad_mime")
         assert exc_info.value.status_code == 502
+
+    @respx.mock
+    def test_download_pdf_report_success_and_force(
+        self, client: Didit, base_url: str, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "reports" / "compliance.pdf"
+        pdf_content = b"%PDF-1.4 official compliance report binary content"
+        respx.get(f"{base_url}/session/sess_pdf_dl/generate-pdf/").mock(
+            return_value=Response(
+                200,
+                content=pdf_content,
+                headers={"Content-Type": "application/pdf"},
+            )
+        )
+
+        # 1. Successful download to new file
+        saved = client.sessions.download_pdf_report("sess_pdf_dl", target)
+        assert saved == target.resolve()
+        assert target.is_file()
+        assert target.read_bytes() == pdf_content
+
+        # 2. Re-download with force=False raises FileExistsError
+        with pytest.raises(FileExistsError, match="already exists"):
+            client.sessions.download_pdf_report("sess_pdf_dl", target, force=False)
+
+        # 3. Re-download with force=True succeeds and overwrites
+        new_pdf_content = b"%PDF-1.4 updated compliance report binary content"
+        respx.get(f"{base_url}/session/sess_pdf_dl_overwrite/generate-pdf/").mock(
+            return_value=Response(
+                200,
+                content=new_pdf_content,
+                headers={"Content-Type": "application/pdf"},
+            )
+        )
+        saved_overwrite = client.sessions.download_pdf_report(
+            "sess_pdf_dl_overwrite", target, force=True
+        )
+        assert saved_overwrite == target.resolve()
+        assert target.read_bytes() == new_pdf_content
