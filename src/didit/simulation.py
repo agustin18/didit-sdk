@@ -28,11 +28,12 @@ from didit.models.decision import (
     ReviewData,
     VerificationWarning,
 )
-from didit.models.enums import Language, SessionStatus
+from didit.models.enums import ALLOWED_MANUAL_STATUSES, Language, ManualSessionStatus, SessionStatus
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
     ObservedSessionState,
+    ResubmitInfo,
     SessionListItem,
     SessionListPage,
     SessionReconciliationReport,
@@ -398,7 +399,7 @@ class _SimulatedStorage:
     def update_status(
         self,
         session_id: str,
-        new_status: str | SessionStatus,
+        new_status: ManualSessionStatus | SessionStatus | str,
         nodes_to_resubmit: list[str] | None = None,
         *,
         options: Any = None,
@@ -410,17 +411,28 @@ class _SimulatedStorage:
         if clean_id not in self.sessions:
             raise DiditNotFoundError(f"Simulated session '{clean_id}' not found", status_code=404)
 
+        if new_status not in ALLOWED_MANUAL_STATUSES:
+            raise ValueError(
+                f"Invalid manual status transition '{new_status}'. "
+                "Allowed transitions are: Approved, Declined, Resubmitted"
+            )
+
         status_enum = (
             new_status if isinstance(new_status, SessionStatus) else SessionStatus(str(new_status))
         )
         session = self.sessions[clean_id]
         session.status = status_enum
-        if nodes_to_resubmit is not None:
-            session.resubmit_info = {"nodes": nodes_to_resubmit}
+        resub_model = (
+            ResubmitInfo(nodes=nodes_to_resubmit)
+            if nodes_to_resubmit is not None
+            else (ResubmitInfo() if status_enum == SessionStatus.RESUBMITTED else None)
+        )
+        session.resubmit_info = resub_model
 
         decision = self.decisions.get(clean_id)
         if decision:
             decision.status = status_enum
+            decision.resubmit_info = resub_model
 
         return session.model_copy(deep=True)
 

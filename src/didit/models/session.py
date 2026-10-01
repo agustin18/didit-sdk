@@ -34,6 +34,33 @@ class CreateSessionRequest(BaseModel):
     )
 
 
+class ResubmitInfo(BaseModel):
+    """Metadata regarding requested verification resubmission."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    nodes: list[str] = Field(
+        default_factory=list,
+        description="Workflow node keys or check steps requiring resubmission",
+    )
+    available_attempts: int | None = Field(
+        default=None,
+        description="Number of remaining allowed resubmission attempts",
+    )
+    max_attempts: int | None = Field(
+        default=None,
+        description="Maximum total resubmission attempts configured",
+    )
+
+    def redacted_dump(self) -> dict[str, Any]:
+        """Privacy-safe dump preserving only structured non-PII attributes."""
+        return {
+            "nodes": list(self.nodes),
+            "available_attempts": self.available_attempts,
+            "max_attempts": self.max_attempts,
+        }
+
+
 class SessionResponse(BaseModel):
     """Data returned by Didit when a session is created or fetched."""
 
@@ -51,9 +78,9 @@ class SessionResponse(BaseModel):
     workflow_id: str | None = Field(default=None, description="Associated workflow identifier")
     vendor_data: str | None = Field(default=None, description="Echoed vendor reference")
     callback: str | None = Field(default=None, description="Echoed callback URL")
-    resubmit_info: dict[str, Any] | None = Field(
+    resubmit_info: ResubmitInfo | None = Field(
         default=None,
-        description="Optional metadata when resubmission of documents is requested",
+        description="Optional typed metadata when resubmission of documents is requested",
     )
 
     @property
@@ -84,7 +111,7 @@ class SessionResponse(BaseModel):
             "workflow_id": self.workflow_id,
             "vendor_data": self.vendor_data,
             "requires_resubmission": self.requires_resubmission,
-            "resubmit_info": self.resubmit_info,
+            "resubmit_info": self.resubmit_info.redacted_dump() if self.resubmit_info else None,
         }
 
 

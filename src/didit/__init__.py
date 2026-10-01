@@ -65,12 +65,13 @@ from didit.models.decision import (
     ReviewData,
     VerificationWarning,
 )
-from didit.models.enums import Language, SessionStatus
+from didit.models.enums import Language, ManualSessionStatus, SessionStatus
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
     CreateSessionRequest,
     ObservedSessionState,
+    ResubmitInfo,
     SessionListItem,
     SessionListPage,
     SessionReconciliationReport,
@@ -122,6 +123,7 @@ __all__ = [
     "InMemoryWebhookReservationStore",
     "Language",
     "LivenessResult",
+    "ManualSessionStatus",
     "ObservedSessionState",
     "RateLimitObserved",
     "ReconciliationDriftObserved",
@@ -131,6 +133,7 @@ __all__ = [
     "RequestRetryScheduled",
     "ReservationAttempt",
     "ReservationState",
+    "ResubmitInfo",
     "RetryPolicy",
     "ReviewData",
     "SessionListItem",

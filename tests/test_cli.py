@@ -78,7 +78,7 @@ class TestDiditCLI:
         key_file.write_text("file_api_key_xyz\n", encoding="utf-8")
 
         with respx.mock:
-            respx.get("https://verification.didit.me/v3/system/healthcheck/").mock(
+            respx.get("https://verification.didit.me/system/healthcheck/").mock(
                 return_value=Response(200, json={"status": "ok"})
             )
             respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
@@ -119,7 +119,7 @@ class TestDiditCLI:
         secret_file.write_text("whsec_test_secret_123", encoding="utf-8")
         monkeypatch.setenv("DIDIT_API_KEY", "test_api_key_123")
 
-        respx.get("https://verification.didit.me/v3/system/healthcheck/").mock(
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
             return_value=Response(200, json={"status": "ok"})
         )
         respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
@@ -141,7 +141,7 @@ class TestDiditCLI:
         monkeypatch.setenv("DIDIT_API_KEY", "test_api_key_123")
         monkeypatch.delenv("DIDIT_WEBHOOK_SECRET", raising=False)
 
-        respx.get("https://verification.didit.me/v3/system/healthcheck/").mock(
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
             return_value=Response(200, json={"status": "ok"})
         )
         respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
@@ -162,21 +162,21 @@ class TestDiditCLI:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.setenv("DIDIT_API_KEY", "valid_key")
-        respx.get("https://verification.didit.me/v3/system/healthcheck/").mock(
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
             side_effect=ConnectError("Connection refused")
         )
 
         exit_code = main(["doctor"])
         assert exit_code == 1
         captured = capsys.readouterr()
-        assert "Failed to connect to Didit API" in captured.err
+        assert "Failed to connect to Didit system" in captured.err
 
     @respx.mock
     def test_cli_doctor_connection_failure_json(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.setenv("DIDIT_API_KEY", "valid_key")
-        respx.get("https://verification.didit.me/v3/system/healthcheck/").mock(
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
             side_effect=ConnectError("Connection refused")
         )
 
@@ -192,7 +192,7 @@ class TestDiditCLI:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.setenv("DIDIT_API_KEY", "invalid_key")
-        respx.get("https://verification.didit.me/v3/system/healthcheck/").mock(
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
             return_value=Response(200, json={"status": "ok"})
         )
         respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
@@ -209,7 +209,7 @@ class TestDiditCLI:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.setenv("DIDIT_API_KEY", "key_no_session_perms")
-        respx.get("https://verification.didit.me/v3/system/healthcheck/").mock(
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
             return_value=Response(200, json={"status": "ok"})
         )
         respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
@@ -229,7 +229,7 @@ class TestDiditCLI:
     ) -> None:
         monkeypatch.setenv("DIDIT_API_KEY", "test_key")
         # Healthcheck endpoint returns 404 (custom gateway without healthcheck)
-        respx.get("https://verification.didit.me/v3/system/healthcheck/").mock(
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
             return_value=Response(404, json={"detail": "Not found"})
         )
         respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
@@ -239,6 +239,7 @@ class TestDiditCLI:
         exit_code = main(["doctor"])
         assert exit_code == 0
         captured = capsys.readouterr()
+        assert "[WARN] API Connection: Healthcheck unavailable" in captured.out
         assert "[OK] Authentication: API key verified" in captured.out
 
     # -------------------------------------------------------------------------
@@ -575,7 +576,24 @@ class TestDiditCLI:
         assert exit_code == 0
         captured = capsys.readouterr()
         assert "Session ID: sess_c1" in captured.out
-        assert "https://verify.didit.me/sess_c1" in captured.out
+        assert "Hosted URL: [REDACTED] (use --include-sensitive to view)" in captured.out
+        assert "https://verify.didit.me/sess_c1" not in captured.out
+
+        # With --include-sensitive
+        exit_code_sens = main(
+            [
+                "session",
+                "create",
+                "--workflow-id",
+                "wf_123",
+                "--vendor-data",
+                "u_123",
+                "--include-sensitive",
+            ]
+        )
+        assert exit_code_sens == 0
+        captured_sens = capsys.readouterr()
+        assert "Hosted URL: https://verify.didit.me/sess_c1" in captured_sens.out
 
     # -------------------------------------------------------------------------
     # didit session resubmit
@@ -917,7 +935,7 @@ class TestDiditCLI:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.setenv("DIDIT_API_KEY", "test_key")
-        respx.get("https://verification.didit.me/v3/system/healthcheck/").mock(
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
             return_value=Response(200, json={"status": "ok"})
         )
         respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
@@ -933,7 +951,7 @@ class TestDiditCLI:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.setenv("DIDIT_API_KEY", "test_key")
-        respx.get("https://verification.didit.me/v3/system/healthcheck/").mock(
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
             return_value=Response(200, json={"status": "ok"})
         )
         respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
@@ -1124,7 +1142,7 @@ class TestDiditCLI:
                 json={
                     "session_id": "sess_r_text",
                     "status": "Resubmitted",
-                    "resubmit_info": {"nodes": ["document"]},
+                    "resubmit_info": {"nodes": ["document"], "available_attempts": 2},
                 },
             )
         )
@@ -1134,7 +1152,8 @@ class TestDiditCLI:
         assert "Session ID:             sess_r_text" in captured.out
         assert "Status:                 Resubmitted" in captured.out
         assert "Requires Resubmission:  True" in captured.out
-        assert "Resubmit Details:       {'nodes': ['document']}" in captured.out
+        assert "Resubmit Steps:         document" in captured.out
+        assert "Remaining Attempts:     2" in captured.out
 
     @respx.mock
     def test_cli_session_resubmit_text_mode_no_info(
@@ -1248,7 +1267,11 @@ class TestDiditCLI:
     ) -> None:
         monkeypatch.setenv("DIDIT_API_KEY", "test_key")
         respx.get("https://verification.didit.me/v3/session/sess_pdf_io/generate-pdf/").mock(
-            return_value=Response(200, content=b"%PDF-1.4 valid")
+            return_value=Response(
+                200,
+                content=b"%PDF-1.4 valid",
+                headers={"Content-Type": "application/pdf"},
+            )
         )
 
         def mock_secure_write(*args: Any, **kwargs: Any) -> None:
@@ -1292,3 +1315,194 @@ class TestDiditCLI:
         assert data["status"] == "error"
         assert data["error"]["code"] == expected_code
         assert "Simulated error message" in data["error"]["message"]
+
+    @respx.mock
+    def test_cli_doctor_healthcheck_unexpected_exception(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("DIDIT_API_KEY", "test_key")
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
+            side_effect=RuntimeError("unexpected socket crash")
+        )
+        respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
+            return_value=Response(404, json={"detail": "Not found"})
+        )
+        exit_code = main(["doctor"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "[WARN] API Connection: Healthcheck unavailable" in captured.out
+        assert "[OK] Authentication: API key verified" in captured.out
+
+    @respx.mock
+    def test_cli_session_resubmit_text_mode_no_available_attempts(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("DIDIT_API_KEY", "test_key")
+        respx.patch("https://verification.didit.me/v3/session/sess_no_att/update-status/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "session_id": "sess_no_att",
+                    "status": "Resubmitted",
+                    "resubmit_info": {"nodes": ["document"]},
+                },
+            )
+        )
+        exit_code = main(["session", "resubmit", "sess_no_att", "--nodes", "document"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Session ID:             sess_no_att" in captured.out
+        assert "Resubmit Steps:         document" in captured.out
+        assert "Remaining Attempts:" not in captured.out
+
+    @pytest.mark.parametrize(
+        ("args_list", "expected_msg"),
+        [
+            (
+                ["session", "list", "--max-sessions", "0", "--json"],
+                "--max-sessions must be a positive integer greater than zero.",
+            ),
+            (
+                ["session", "list", "--max-sessions", "-5", "--json"],
+                "--max-sessions must be a positive integer greater than zero.",
+            ),
+            (
+                ["session", "list", "--limit", "0", "--json"],
+                "--limit must be a positive integer greater than zero.",
+            ),
+            (
+                ["session", "list", "--limit", "-1", "--json"],
+                "--limit must be a positive integer greater than zero.",
+            ),
+            (
+                ["session", "list", "--offset", "-1", "--json"],
+                "--offset must be greater than or equal to zero.",
+            ),
+        ],
+    )
+    def test_cli_session_list_invalid_pagination_bounds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        args_list: list[str],
+        expected_msg: str,
+    ) -> None:
+        monkeypatch.setenv("DIDIT_API_KEY", "test_key")
+        exit_code = main(args_list)
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "error"
+        assert data["error"]["code"] == "INVALID_ARGUMENT"
+        assert data["error"]["message"] == expected_msg
+
+    @respx.mock
+    def test_cli_sandbox_scenarios_live_list(self, capsys: pytest.CaptureFixture[str]) -> None:
+        respx.get("https://verification.didit.me/v1/sandbox/scenarios/").mock(
+            return_value=Response(
+                200,
+                json=[
+                    {
+                        "slug": "custom_live_scenario",
+                        "category": "document",
+                        "description": "custom desc",
+                    }
+                ],
+            )
+        )
+        exit_code = main(["sandbox", "scenarios", "--json"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "ok"
+        assert data["count"] == 1
+        assert data["scenarios"][0]["slug"] == "custom_live_scenario"
+
+    @respx.mock
+    def test_cli_sandbox_scenarios_live_dict_wrapper(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        respx.get("https://verification.didit.me/v1/sandbox/scenarios/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "scenarios": [
+                        {
+                            "slug": "dict_live_scenario",
+                            "category": "fraud",
+                            "description": "fraud desc",
+                        }
+                    ]
+                },
+            )
+        )
+        exit_code = main(["sandbox", "scenarios", "--json"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "ok"
+        assert data["count"] == 1
+        assert data["scenarios"][0]["slug"] == "dict_live_scenario"
+
+    @respx.mock
+    def test_cli_sandbox_scenarios_live_unexpected_json_fallback(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        respx.get("https://verification.didit.me/v1/sandbox/scenarios/").mock(
+            return_value=Response(
+                200,
+                json={"unexpected_key": "unexpected_value"},
+            )
+        )
+        exit_code = main(["sandbox", "scenarios", "--json"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "ok"
+        assert data["count"] == 16
+
+    @respx.mock
+    def test_cli_sandbox_scenarios_live_error_fallback(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        respx.get("https://verification.didit.me/v1/sandbox/scenarios/").mock(
+            side_effect=ConnectError("Could not reach sandbox service")
+        )
+        exit_code = main(["sandbox", "scenarios", "--json"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "ok"
+        assert data["count"] == 16
+
+    def test_cli_json_aware_argument_parser_with_json(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        exit_code = main(["session", "list", "--limit", "not_a_number", "--json"])
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "error"
+        assert data["error"]["code"] == "INVALID_ARGUMENT"
+        assert "invalid int value" in data["error"]["message"]
+
+    def test_cli_argument_parser_without_json(self, capsys: pytest.CaptureFixture[str]) -> None:
+        exit_code = main(["session", "list", "--limit", "not_a_number"])
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        assert "invalid int value" in captured.err
+
+    def test_cli_main_missing_command_json(self, capsys: pytest.CaptureFixture[str]) -> None:
+        exit_code = main(["--json"])
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "error"
+        assert data["error"]["code"] == "MISSING_COMMAND"
+        assert "No subcommand provided" in data["error"]["message"]
+
+    def test_cli_main_missing_command_help(self, capsys: pytest.CaptureFixture[str]) -> None:
+        exit_code = main([])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "usage:" in captured.out

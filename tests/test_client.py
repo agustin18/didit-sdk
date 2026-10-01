@@ -1291,24 +1291,85 @@ class TestDiditSyncClient:
                 200,
                 json={
                     "session_id": "sess_custom_status",
-                    "status": "In Review",
+                    "status": "Declined",
                 },
             )
         )
 
-        res = client.sessions.update_status("sess_custom_status", SessionStatus.IN_REVIEW)
-        assert res.status == SessionStatus.IN_REVIEW
+        res = client.sessions.update_status("sess_custom_status", SessionStatus.DECLINED)
+        assert res.status == SessionStatus.DECLINED
         sent = json.loads(route.calls[0].request.content)
-        assert sent["new_status"] == "In Review"
+        assert sent["new_status"] == "Declined"
+
+    @pytest.mark.parametrize(
+        "invalid_status",
+        [
+            "In Review",
+            "In Progress",
+            SessionStatus.IN_REVIEW,
+            SessionStatus.NOT_STARTED,
+            SessionStatus.EXPIRED,
+            "Unknown",
+        ],
+    )
+    def test_update_status_invalid_manual_status(self, client: Didit, invalid_status: Any) -> None:
+        with pytest.raises(ValueError, match="Invalid manual status transition"):
+            client.sessions.update_status("sess_invalid", invalid_status)
 
     @respx.mock
     def test_pdf_report_options_timeout_none(self, client: Didit, base_url: str) -> None:
         from didit.transport import RequestOptions
 
         respx.get(f"{base_url}/session/sess_pdf_opt/generate-pdf/").mock(
-            return_value=Response(200, content=b"%PDF-1.4 sample content")
+            return_value=Response(
+                200,
+                content=b"%PDF-1.4 sample content",
+                headers={"Content-Type": "application/pdf"},
+            )
         )
         pdf = client.sessions.generate_pdf_report(
             "sess_pdf_opt", options=RequestOptions(timeout=None)
         )
         assert pdf.startswith(b"%PDF-")
+
+    @respx.mock
+    def test_generate_pdf_report_octet_stream(self, client: Didit, base_url: str) -> None:
+        respx.get(f"{base_url}/session/sess_pdf_bin/generate-pdf/").mock(
+            return_value=Response(
+                200,
+                content=b"%PDF-1.4 binary octet",
+                headers={"Content-Type": "application/octet-stream"},
+            )
+        )
+        pdf = client.sessions.generate_pdf_report("sess_pdf_bin")
+        assert pdf == b"%PDF-1.4 binary octet"
+
+    @respx.mock
+    def test_generate_pdf_report_invalid_magic_with_pdf_mime(
+        self, client: Didit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/sess_pdf_bad_magic/generate-pdf/").mock(
+            return_value=Response(
+                200,
+                content=b"CORRUPTED_NOT_PDF_HEADER",
+                headers={"Content-Type": "application/pdf"},
+            )
+        )
+        with pytest.raises(DiditAPIError) as exc_info:
+            client.sessions.generate_pdf_report("sess_pdf_bad_magic")
+        assert exc_info.value.status_code == 502
+
+    @respx.mock
+    def test_generate_pdf_report_valid_magic_with_invalid_mime(
+        self, client: Didit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/sess_pdf_bad_mime/generate-pdf/").mock(
+            return_value=Response(
+                200,
+                content=b"%PDF-1.4 valid magic header",
+                headers={"Content-Type": "text/html"},
+            )
+        )
+        with pytest.raises(DiditAPIError) as exc_info:
+            client.sessions.generate_pdf_report("sess_pdf_bad_mime")
+        assert exc_info.value.status_code == 502

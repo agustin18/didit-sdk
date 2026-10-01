@@ -20,7 +20,12 @@ from didit.errors import (
 )
 from didit.events import DiditEventSink, ReconciliationDriftObserved, safe_emit
 from didit.models.decision import DecisionResponse
-from didit.models.enums import Language, SessionStatus
+from didit.models.enums import (
+    ALLOWED_MANUAL_STATUSES,
+    Language,
+    ManualSessionStatus,
+    SessionStatus,
+)
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
@@ -57,6 +62,16 @@ def _validate_timestamp(val: datetime | str | None, param_name: str) -> datetime
             )
         return dt
     raise ValueError(f"{param_name} must be a datetime or ISO-8601 string")
+
+
+def _validate_manual_status(new_status: ManualSessionStatus | SessionStatus | str) -> str:
+    """Validate manual status transition against allowed upstream Didit statuses."""
+    if new_status not in ALLOWED_MANUAL_STATUSES:
+        raise ValueError(
+            f"Invalid manual status transition '{new_status}'. "
+            "Allowed transitions are: Approved, Declined, Resubmitted"
+        )
+    return new_status.value if isinstance(new_status, SessionStatus) else str(new_status)
 
 
 def _validate_session_list_filters(
@@ -188,17 +203,21 @@ class SessionsResource:
     def update_status(
         self,
         session_id: str,
-        new_status: str | SessionStatus,
+        new_status: ManualSessionStatus | SessionStatus | str,
         nodes_to_resubmit: list[str] | None = None,
         *,
         options: RequestOptions | None = None,
     ) -> SessionResponse:
         """Update status of an existing session (PATCH /v3/session/{session_id}/update-status/).
 
+        Restricted by upstream Didit contract to manual reviewer transitions:
+        'Approved', 'Declined', or 'Resubmitted'.
+
         Args:
             session_id: The unique identifier of the verification session.
-            new_status: The target status (e.g. 'Resubmitted' or SessionStatus.RESUBMITTED).
-            nodes_to_resubmit: Optional list of workflow step/node keys to resubmit.
+            new_status: The target status ('Approved', 'Declined', 'Resubmitted',
+                or SessionStatus enum).
+            nodes_to_resubmit: Optional list of upstream workflow node IDs to resubmit.
             options: Optional per-request HTTP options.
 
         Returns:
@@ -207,7 +226,7 @@ class SessionsResource:
         if not session_id or not session_id.strip():
             raise ValueError("session_id must not be empty")
 
-        status_val = new_status.value if isinstance(new_status, SessionStatus) else str(new_status)
+        status_val = _validate_manual_status(new_status)
         payload: dict[str, Any] = {"new_status": status_val}
         if nodes_to_resubmit is not None:
             payload["nodes_to_resubmit"] = nodes_to_resubmit
@@ -563,13 +582,17 @@ class SessionsResource:
         resp = self._requestor.request(
             "GET", f"/session/{session_id.strip()}/generate-pdf/", options=eff_options
         )
-        content_type = resp.headers.get("content-type", "")
-        if not (
-            resp.content.startswith(b"%PDF-")
-            or "application/pdf" in content_type.lower()
-            or "application/octet-stream" in content_type.lower()
-        ):
-            raise DiditAPIError("Invalid PDF report response received from server")
+        magic_ok = resp.content.startswith(b"%PDF-")
+        content_type_lower = resp.headers.get("content-type", "").lower()
+        mime_ok = (
+            "application/pdf" in content_type_lower
+            or "application/octet-stream" in content_type_lower
+        )
+        if not (magic_ok and mime_ok):
+            raise DiditAPIError(
+                "Invalid PDF report response received from server",
+                status_code=502,
+            )
         return resp.content
 
     get_pdf_report = generate_pdf_report
@@ -721,19 +744,21 @@ class AsyncSessionsResource:
     async def update_status(
         self,
         session_id: str,
-        new_status: str | SessionStatus,
+        new_status: ManualSessionStatus | SessionStatus | str,
         nodes_to_resubmit: list[str] | None = None,
         *,
         options: RequestOptions | None = None,
     ) -> SessionResponse:
         """Update status of an existing session asynchronously.
 
-        PATCH /v3/session/{session_id}/update-status/
+        Endpoint: PATCH /v3/session/{session_id}/update-status/
+        Restricted by upstream Didit contract to manual reviewer transitions:
+        'Approved', 'Declined', or 'Resubmitted'.
         """
         if not session_id or not session_id.strip():
             raise ValueError("session_id must not be empty")
 
-        status_val = new_status.value if isinstance(new_status, SessionStatus) else str(new_status)
+        status_val = _validate_manual_status(new_status)
         payload: dict[str, Any] = {"new_status": status_val}
         if nodes_to_resubmit is not None:
             payload["nodes_to_resubmit"] = nodes_to_resubmit
@@ -1072,13 +1097,17 @@ class AsyncSessionsResource:
         resp = await self._requestor.request(
             "GET", f"/session/{session_id.strip()}/generate-pdf/", options=eff_options
         )
-        content_type = resp.headers.get("content-type", "")
-        if not (
-            resp.content.startswith(b"%PDF-")
-            or "application/pdf" in content_type.lower()
-            or "application/octet-stream" in content_type.lower()
-        ):
-            raise DiditAPIError("Invalid PDF report response received from server")
+        magic_ok = resp.content.startswith(b"%PDF-")
+        content_type_lower = resp.headers.get("content-type", "").lower()
+        mime_ok = (
+            "application/pdf" in content_type_lower
+            or "application/octet-stream" in content_type_lower
+        )
+        if not (magic_ok and mime_ok):
+            raise DiditAPIError(
+                "Invalid PDF report response received from server",
+                status_code=502,
+            )
         return resp.content
 
     get_pdf_report = generate_pdf_report

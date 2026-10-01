@@ -8,6 +8,7 @@ import pytest
 from didit.errors import DiditAPIError, DiditNotFoundError
 from didit.models.decision import DocumentData
 from didit.models.enums import SessionStatus
+from didit.models.session import ResubmitInfo
 from didit.simulation import SimulatedAsyncDidit, SimulatedDidit
 from didit.webhooks import verify_webhook_signature
 
@@ -746,12 +747,16 @@ class TestSimulatedAsyncDidit:
         # Test resubmit with nodes
         res2 = client.sessions.resubmit(s.session_id, nodes_to_resubmit=["document", "face"])
         assert res2.status == SessionStatus.RESUBMITTED
-        assert res2.resubmit_info == {"nodes": ["document", "face"]}
+        assert res2.resubmit_info == ResubmitInfo(nodes=["document", "face"])
         assert res2.requires_resubmission is True
 
-        # Test update_status with custom status
-        res3 = client.sessions.update_status(s.session_id, "In Review")
-        assert res3.status == SessionStatus.IN_REVIEW
+        # Test update_status with allowed manual status
+        res3 = client.sessions.update_status(s.session_id, "Declined")
+        assert res3.status == SessionStatus.DECLINED
+
+        # Test invalid status raises ValueError
+        with pytest.raises(ValueError, match="Invalid manual status transition"):
+            client.sessions.update_status(s.session_id, "In Review")
 
         # Decision is None branch in update_status
         client.sessions._storage.decisions.pop(s.session_id, None)
@@ -773,7 +778,10 @@ class TestSimulatedAsyncDidit:
         res = await client.sessions.resubmit(s.session_id, nodes_to_resubmit=["liveness"])
         assert res.status == SessionStatus.RESUBMITTED
         assert res.requires_resubmission is True
-        assert res.resubmit_info == {"nodes": ["liveness"]}
+        assert res.resubmit_info == ResubmitInfo(nodes=["liveness"])
 
         res_update = await client.sessions.update_status(s.session_id, SessionStatus.APPROVED)
         assert res_update.status == SessionStatus.APPROVED
+
+        with pytest.raises(ValueError, match="Invalid manual status transition"):
+            await client.sessions.update_status(s.session_id, "In Review")

@@ -24,7 +24,7 @@ Unofficial, community-maintained Python client for the [Didit](https://didit.me)
 - **Didit V3 API Alignment**: Full fidelity to upstream V3 schemas (`id_verifications[]`, `liveness_checks[]`, `face_matches[]`, `aml_screenings[]`, `reviews[]`, `warnings[]`) with forward compatibility (`extra="allow"`), verification warnings helper (`decision.has_warning(...)`), and backward-compatible property accessors.
 - **Complete Session Lifecycle**: Covers all 10 documented Didit session statuses (`Not Started`, `In Progress`, `In Review`, `Approved`, `Declined`, `Expired`, `Abandoned`, `Kyc Expired`, `Resubmitted`, `Awaiting User`) with granular state inspection (`is_decided`, `is_closed`, `requires_review`, `requires_user_action`, `requires_resubmission`).
 - **Resubmission & Manual Review**: Full resubmission support (`client.sessions.resubmit()`) and review status transitions (`client.sessions.update_status()`).
-- **Official Compliance PDF Reports**: Stream and validate tamper-evident verification audit reports (`client.sessions.generate_pdf_report()`) with MIME and `%PDF-` validation.
+- **Official Compliance PDF Reports**: Download verification audit reports (`client.sessions.generate_pdf_report()`) with binary header (`%PDF-`) and MIME format validation.
 - **Production CLI (`didit`)**: Inspect sessions, download PDF reports, verify webhook signatures, query sandbox scenarios, and run diagnostic health checks with zero-credential exposure in command arguments.
 - **Cryptographic Security & DoS Defense**: Constant-time HMAC-SHA256 signature verification (`X-Signature-V2` & `X-Signature`), full UTF-8 Unicode canonical JSON support (`ensure_ascii=False`, `allow_nan=False`), authoritative signed body anti-replay verification with strict header matching, and bounded body limits (HTTP 413) to prevent memory exhaustion.
 - **Webhook Deduplication**: Thread-safe in-memory and atomic Redis deduplication stores (`InMemoryWebhookDedupStore`, `RedisWebhookDedupStore`, `AsyncRedisWebhookDedupStore`) with configurable duplicate actions (`respond_ok`, `pass`, `raise`).
@@ -201,7 +201,7 @@ client = Didit(event_sink=MetricsEventSink())
 
 ### 6. Session Resubmission & Lifecycle Updates
 
-Handle customer resubmission workflows when a verification session has expired or been declined, or perform manual review status transitions:
+Handle customer resubmission workflows when a verification session requires document or biometric resubmission, or perform manual reviewer status transitions:
 
 ```python
 from didit import Didit, SessionStatus
@@ -210,25 +210,26 @@ client = Didit()
 
 # Inspect whether a decision requires user resubmission
 decision = client.sessions.get_decision("sess_12345")
-if decision.requires_resubmission:
-    print(f"Resubmit available: {decision.resubmit_info.available_attempts} attempts left")
+if decision.requires_resubmission and decision.resubmit_info:
+    print(f"Resubmit steps: {decision.resubmit_info.nodes}")
+    if decision.resubmit_info.available_attempts is not None:
+        print(f"Attempts remaining: {decision.resubmit_info.available_attempts}")
 
-    # Generate a resubmission session
+    # Request resubmission for specific failed check nodes
     resubmitted = client.sessions.resubmit(
         "sess_12345",
-        workflow_id="wf_retry_v2",
-        callback="https://yourapp.com/kyc/resubmit-callback",
+        nodes_to_resubmit=["document"],
     )
-    print(f"New verification URL: {resubmitted.url}")
+    print(f"Session status: {resubmitted.status}")
 
-# Update session status (e.g. during manual KYC review queue workflows)
-updated = client.sessions.update_status("sess_12345", status=SessionStatus.IN_REVIEW)
+# Update session status (manual review transitions: 'Approved', 'Declined', 'Resubmitted')
+updated = client.sessions.update_status("sess_12345", new_status=SessionStatus.APPROVED)
 print(f"Session status updated to: {updated.status}")
 ```
 
 ### 7. Compliance PDF Reports
 
-Download official, tamper-evident verification audit PDF reports with strict MIME (`application/pdf`) and magic header (`%PDF-`) validation:
+Download official verification audit PDF reports with strict binary header (`%PDF-`) and MIME (`application/pdf`) format validation:
 
 ```python
 from didit import Didit

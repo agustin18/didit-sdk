@@ -1438,17 +1438,36 @@ class TestAsyncDiditClient:
                 200,
                 json={
                     "session_id": "sess_async_custom_status",
-                    "status": "In Review",
+                    "status": "Declined",
                 },
             )
         )
 
         res = await async_client.sessions.update_status(
-            "sess_async_custom_status", SessionStatus.IN_REVIEW
+            "sess_async_custom_status", SessionStatus.DECLINED
         )
-        assert res.status == SessionStatus.IN_REVIEW
+        assert res.status == SessionStatus.DECLINED
         sent = json.loads(route.calls[0].request.content)
-        assert sent["new_status"] == "In Review"
+        assert sent["new_status"] == "Declined"
+        await async_client.aclose()
+
+    @pytest.mark.parametrize(
+        "invalid_status",
+        [
+            "In Review",
+            "In Progress",
+            SessionStatus.IN_REVIEW,
+            SessionStatus.NOT_STARTED,
+            SessionStatus.EXPIRED,
+            "Unknown",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_async_update_status_invalid_manual_status(
+        self, async_client: AsyncDidit, invalid_status: Any
+    ) -> None:
+        with pytest.raises(ValueError, match="Invalid manual status transition"):
+            await async_client.sessions.update_status("sess_async_invalid", invalid_status)
         await async_client.aclose()
 
     @pytest.mark.asyncio
@@ -1459,10 +1478,64 @@ class TestAsyncDiditClient:
         from didit.transport import RequestOptions
 
         respx.get(f"{base_url}/session/sess_async_pdf_opt/generate-pdf/").mock(
-            return_value=Response(200, content=b"%PDF-1.4 sample content")
+            return_value=Response(
+                200,
+                content=b"%PDF-1.4 sample content",
+                headers={"Content-Type": "application/pdf"},
+            )
         )
         pdf = await async_client.sessions.generate_pdf_report(
             "sess_async_pdf_opt", options=RequestOptions(timeout=None)
         )
         assert pdf.startswith(b"%PDF-")
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_generate_pdf_report_octet_stream(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/sess_async_pdf_bin/generate-pdf/").mock(
+            return_value=Response(
+                200,
+                content=b"%PDF-1.4 binary octet",
+                headers={"Content-Type": "application/octet-stream"},
+            )
+        )
+        pdf = await async_client.sessions.generate_pdf_report("sess_async_pdf_bin")
+        assert pdf == b"%PDF-1.4 binary octet"
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_generate_pdf_report_invalid_magic_with_pdf_mime(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/sess_async_pdf_bad_magic/generate-pdf/").mock(
+            return_value=Response(
+                200,
+                content=b"CORRUPTED_NOT_PDF_HEADER",
+                headers={"Content-Type": "application/pdf"},
+            )
+        )
+        with pytest.raises(DiditAPIError) as exc_info:
+            await async_client.sessions.generate_pdf_report("sess_async_pdf_bad_magic")
+        assert exc_info.value.status_code == 502
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_generate_pdf_report_valid_magic_with_invalid_mime(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/sess_async_pdf_bad_mime/generate-pdf/").mock(
+            return_value=Response(
+                200,
+                content=b"%PDF-1.4 valid magic header",
+                headers={"Content-Type": "text/html"},
+            )
+        )
+        with pytest.raises(DiditAPIError) as exc_info:
+            await async_client.sessions.generate_pdf_report("sess_async_pdf_bad_mime")
+        assert exc_info.value.status_code == 502
         await async_client.aclose()

@@ -16,8 +16,9 @@ import sys
 import tempfile
 import time
 import traceback
+import urllib.parse
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 
@@ -72,9 +73,34 @@ SANDBOX_SCENARIOS: list[dict[str, str]] = [
         "description": "Presentation or biometric spoofing attack detected.",
     },
     {
-        "slug": "decline_aml_sanction",
+        "slug": "decline_aml_hit",
         "category": "decline",
-        "description": "User matched against global sanction watchlists.",
+        "description": "User matched against global sanction or AML watchlists.",
+    },
+    {
+        "slug": "decline_ip_blocklist",
+        "category": "decline",
+        "description": "Client IP address flagged on security blocklist.",
+    },
+    {
+        "slug": "decline_poa_address_mismatch",
+        "category": "decline",
+        "description": "Proof of address document does not match submitted address.",
+    },
+    {
+        "slug": "decline_nfc_chip_not_verified",
+        "category": "decline",
+        "description": "NFC chip cryptographic authentication failed.",
+    },
+    {
+        "slug": "decline_database_no_match",
+        "category": "decline",
+        "description": "No record found in authoritative identity database.",
+    },
+    {
+        "slug": "decline_kyb_registry_mismatch",
+        "category": "decline",
+        "description": "Company registry data mismatch during business verification.",
     },
     {
         "slug": "review_aml_possible_match",
@@ -90,16 +116,6 @@ SANDBOX_SCENARIOS: list[dict[str, str]] = [
         "slug": "review_poa_partial_match",
         "category": "review",
         "description": "Proof of address partially matches provided profile.",
-    },
-    {
-        "slug": "resubmit_document",
-        "category": "resubmit",
-        "description": "Document image blurred or glare detected, prompting resubmission.",
-    },
-    {
-        "slug": "resubmit_face",
-        "category": "resubmit",
-        "description": "Selfie lighting insufficient, prompting biometric resubmission.",
     },
 ]
 
@@ -249,22 +265,27 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
     client = Didit(api_key=api_key, base_url=base_url)
 
-    # 1. Connectivity & Latency Probe via dedicated /system/healthcheck
+    # 1. Connectivity & Latency Probe via dedicated root origin /system/healthcheck/
+    parsed_base = urllib.parse.urlsplit(base_url)
+    origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
+    health_url = f"{origin}/system/healthcheck/"
+
+    conn_ok = False
     start_time = time.monotonic()
     try:
-        health_resp = client.requestor.request("GET", "/system/healthcheck/")
-        latency_ms = (time.monotonic() - start_time) * 1000.0
-        conn_ok = health_resp.is_success
-    except (DiditConnectionError, httpx.ConnectError):
+        with httpx.Client(timeout=10.0) as http_client:
+            health_resp = http_client.get(health_url)
+            latency_ms = (time.monotonic() - start_time) * 1000.0
+            conn_ok = health_resp.is_success
+    except (httpx.ConnectError, httpx.TimeoutException):
         return _emit_error(
             "CONNECTION_ERROR",
-            f"Failed to connect to Didit API at {base_url}. Check network connectivity.",
+            f"Failed to connect to Didit system at {origin}. Check network connectivity.",
             is_json=is_json,
         )
     except Exception:
-        # Fall back if healthcheck path differs
         latency_ms = (time.monotonic() - start_time) * 1000.0
-        conn_ok = True
+        conn_ok = False
 
     # 2. Authentication Probe (verifying permissions without reading user KYC data)
     try:
@@ -302,12 +323,17 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     payload: dict[str, Any] = {
         "base_url": base_url,
         "latency_ms": round(latency_ms, 2),
-        "connectivity": "ok" if conn_ok else "unknown",
+        "connectivity": "ok" if conn_ok else "unavailable",
         "authenticated": True,
         "webhook_secret_configured": bool(webhook_secret),
     }
+    conn_text = (
+        f"[OK] API Connection: Connected to {origin} (latency: {latency_ms:.1f}ms)"
+        if conn_ok
+        else f"[WARN] API Connection: Healthcheck unavailable at {health_url}"
+    )
     text_lines = [
-        f"[OK] API Connection: Connected to {base_url} (latency: {latency_ms:.1f}ms)",
+        conn_text,
         "[OK] Authentication: API key verified",
     ]
     if webhook_secret:
@@ -469,8 +495,10 @@ def _cmd_session_create(args: argparse.Namespace) -> int:
         f"Session ID: {session.session_id}",
         f"Status:     {session.status.value}",
     ]
-    if session.url:
+    if include_sensitive and session.url:
         text_lines.append(f"Hosted URL: {session.url}")
+    elif session.url:
+        text_lines.append("Hosted URL: [REDACTED] (use --include-sensitive to view)")
 
     return _emit_success({}, is_json=False, text_lines=text_lines)
 
@@ -502,7 +530,10 @@ def _cmd_session_resubmit(args: argparse.Namespace) -> int:
         f"Requires Resubmission:  {session.requires_resubmission}",
     ]
     if session.resubmit_info:
-        text_lines.append(f"Resubmit Details:       {session.resubmit_info}")
+        nodes_str = ", ".join(session.resubmit_info.nodes) if session.resubmit_info.nodes else "all"
+        text_lines.append(f"Resubmit Steps:         {nodes_str}")
+        if session.resubmit_info.available_attempts is not None:
+            text_lines.append(f"Remaining Attempts:     {session.resubmit_info.available_attempts}")
 
     return _emit_success({}, is_json=False, text_lines=text_lines)
 
@@ -517,6 +548,30 @@ def _cmd_session_list(args: argparse.Namespace) -> int:
     max_sessions = getattr(args, "max_sessions", 500)
     current_offset = getattr(args, "offset", 0)
     page_limit = getattr(args, "limit", 10)
+
+    if max_sessions is not None and max_sessions <= 0:
+        return _emit_error(
+            "INVALID_ARGUMENT",
+            "--max-sessions must be a positive integer greater than zero.",
+            is_json=is_json,
+            exit_code=2,
+        )
+
+    if page_limit <= 0:
+        return _emit_error(
+            "INVALID_ARGUMENT",
+            "--limit must be a positive integer greater than zero.",
+            is_json=is_json,
+            exit_code=2,
+        )
+
+    if current_offset < 0:
+        return _emit_error(
+            "INVALID_ARGUMENT",
+            "--offset must be greater than or equal to zero.",
+            is_json=is_json,
+            exit_code=2,
+        )
 
     if fetch_all:
         collected: list[Any] = []
@@ -604,13 +659,15 @@ def _cmd_session_pdf(args: argparse.Namespace) -> int:
             is_json=is_json,
         )
 
+    perms = "0600" if sys.platform != "win32" else "private"
     data = {
         "saved_to": str(out_path),
         "bytes": len(pdf_bytes),
         "session_id": args.session_id,
-        "permissions": "0600",
+        "permissions": perms,
     }
-    text_lines = [f"Report saved to {out_path} ({len(pdf_bytes)} bytes, mode: 0600)"]
+    mode_text = "mode: 0600" if sys.platform != "win32" else "permissions: private"
+    text_lines = [f"Report saved to {out_path} ({len(pdf_bytes)} bytes, {mode_text})"]
     return _emit_success(data, is_json=is_json, text_lines=text_lines)
 
 
@@ -618,7 +675,31 @@ def _cmd_sandbox_scenarios(args: argparse.Namespace) -> int:
     """List available Didit sandbox testing scenarios."""
     is_json = getattr(args, "json", False)
     category = getattr(args, "category", None)
+
+    base_url = (
+        getattr(args, "base_url", None) or os.environ.get("DIDIT_BASE_URL") or DEFAULT_BASE_URL
+    )
+    parsed_base = urllib.parse.urlsplit(base_url)
+    origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
+    live_url = f"{origin}/v1/sandbox/scenarios/"
+
     scenarios = SANDBOX_SCENARIOS
+    try:
+        with httpx.Client(timeout=5.0) as http_client:
+            resp = http_client.get(live_url)
+            if resp.is_success:
+                data = resp.json()
+                if isinstance(data, list):
+                    scenarios = data
+                elif (
+                    isinstance(data, dict)
+                    and "scenarios" in data
+                    and isinstance(data["scenarios"], list)
+                ):
+                    scenarios = data["scenarios"]
+    except Exception:
+        scenarios = SANDBOX_SCENARIOS
+
     if category:
         scenarios = [s for s in scenarios if s.get("category") == category]
 
@@ -627,15 +708,29 @@ def _cmd_sandbox_scenarios(args: argparse.Namespace) -> int:
 
     text_lines = [f"Available Didit Sandbox Scenarios ({len(scenarios)}):"]
     for s in scenarios:
-        cat_badge = f"[{s['category'].upper()}]"
-        text_lines.append(f"  • {s['slug']:<36} {cat_badge:<10} {s['description']}")
+        cat = s.get("category", "scenario")
+        cat_badge = f"[{cat.upper()}]"
+        desc = s.get("description", "")
+        text_lines.append(f"  • {s['slug']:<36} {cat_badge:<10} {desc}")
 
     return _emit_success({}, is_json=False, text_lines=text_lines)
 
 
+class JSONAwareArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser that emits structured JSON envelopes on error when --json is passed."""
+
+    _active_argv: list[str] = []
+
+    def error(self, message: str) -> NoReturn:
+        if "--json" in getattr(JSONAwareArgumentParser, "_active_argv", []):
+            _emit_error("INVALID_ARGUMENT", message, is_json=True, exit_code=2)
+            sys.exit(2)
+        super().error(message)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line argument parser with inherited common options."""
-    common_parser = argparse.ArgumentParser(add_help=False)
+    common_parser = JSONAwareArgumentParser(add_help=False)
     common_parser.add_argument(
         "--api-key-file",
         default=argparse.SUPPRESS,
@@ -667,7 +762,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show full stack traces on unhandled errors",
     )
 
-    parser = argparse.ArgumentParser(
+    parser = JSONAwareArgumentParser(
         prog="didit",
         description="Didit Identity Verification CLI Utilities",
         parents=[common_parser],
@@ -679,7 +774,9 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"didit-sdk {__version__}",
     )
 
-    subparsers = parser.add_subparsers(dest="subcommand", help="Available subcommands")
+    subparsers = parser.add_subparsers(
+        dest="subcommand", help="Available subcommands", parser_class=JSONAwareArgumentParser
+    )
 
     # didit doctor
     doctor_parser = subparsers.add_parser(
@@ -697,7 +794,9 @@ def build_parser() -> argparse.ArgumentParser:
     webhook_parser = subparsers.add_parser(
         "webhook", help="Webhook inspection and verification", parents=[common_parser]
     )
-    webhook_subparsers = webhook_parser.add_subparsers(dest="webhook_subcommand")
+    webhook_subparsers = webhook_parser.add_subparsers(
+        dest="webhook_subcommand", parser_class=JSONAwareArgumentParser
+    )
 
     webhook_verify = webhook_subparsers.add_parser(
         "verify", help="Verify raw webhook signature and timestamp", parents=[common_parser]
@@ -737,7 +836,9 @@ def build_parser() -> argparse.ArgumentParser:
     session_parser = subparsers.add_parser(
         "session", help="Verification session operations", parents=[common_parser]
     )
-    session_subparsers = session_parser.add_subparsers(dest="session_subcommand")
+    session_subparsers = session_parser.add_subparsers(
+        dest="session_subcommand", parser_class=JSONAwareArgumentParser
+    )
 
     # didit session get
     session_get = session_subparsers.add_parser(
@@ -824,7 +925,9 @@ def build_parser() -> argparse.ArgumentParser:
     sandbox_parser = subparsers.add_parser(
         "sandbox", help="Sandbox testing and scenario catalog", parents=[common_parser]
     )
-    sandbox_subparsers = sandbox_parser.add_subparsers(dest="sandbox_subcommand")
+    sandbox_subparsers = sandbox_parser.add_subparsers(
+        dest="sandbox_subcommand", parser_class=JSONAwareArgumentParser
+    )
 
     # didit sandbox scenarios
     sandbox_scenarios = sandbox_subparsers.add_parser(
@@ -834,7 +937,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sandbox_scenarios.add_argument(
         "--category",
-        choices=["success", "decline", "review", "resubmit"],
+        choices=["success", "decline", "review"],
         help="Filter scenarios by category outcome",
     )
     sandbox_scenarios.set_defaults(func=_cmd_sandbox_scenarios)
@@ -844,6 +947,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     """Main CLI entry point with universal error and JSON handling."""
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    JSONAwareArgumentParser._active_argv = raw_argv
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
@@ -851,6 +956,13 @@ def main(argv: list[str] | None = None) -> int:
         return int(exc.code) if isinstance(exc.code, int) else 0
 
     if not hasattr(args, "func"):
+        if "--json" in raw_argv:
+            return _emit_error(
+                "MISSING_COMMAND",
+                "No subcommand provided. Use --help for usage details.",
+                is_json=True,
+                exit_code=2,
+            )
         parser.print_help()
         return 0
 

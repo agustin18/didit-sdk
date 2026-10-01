@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from didit.models.enums import SessionStatus
+from didit.models.session import ResubmitInfo
 
 
 def _legacy_bool(status: str | None) -> bool | None:
@@ -278,6 +279,9 @@ class DecisionResponse(BaseModel):
     warnings: list[VerificationWarning] = Field(
         default_factory=list, description="Non-fatal verification warnings and diagnostics"
     )
+    resubmit_info: ResubmitInfo | None = Field(
+        default=None, description="Optional metadata when resubmission of documents is requested"
+    )
     raw_data: dict[str, Any] | None = Field(
         default=None, description="Raw JSON payload received from Didit"
     )
@@ -346,12 +350,19 @@ class DecisionResponse(BaseModel):
 
     __str__ = __repr__
 
+    @property
+    def requires_resubmission(self) -> bool:
+        """Return True if decision requires user resubmission of documents/biometrics."""
+        return self.status.requires_resubmission or bool(self.resubmit_info)
+
     def redacted_dump(self, *, include_scores: bool = False) -> dict[str, Any]:
         """Return a privacy-sanitized dictionary omitting PII for telemetry/logging."""
         return {
             "session_id": self.session_id,
             "status": self.status.value,
             "workflow_id": self.workflow_id,
+            "requires_resubmission": self.requires_resubmission,
+            "resubmit_info": self.resubmit_info.redacted_dump() if self.resubmit_info else None,
             "id_verifications": [
                 {
                     "node_id": v.node_id,
