@@ -498,7 +498,8 @@ class _SyncRequestor:
 
         def _execute_stream(eff_timeout: float | httpx.Timeout | None) -> httpx.Response:
             while staged_paths:
-                staged_paths.pop().unlink(missing_ok=True)
+                with contextlib.suppress(OSError):
+                    staged_paths.pop().unlink(missing_ok=True)
 
             tmp_fd, tmp_path_str = tempfile.mkstemp(dir=dest_dir, prefix=".didit_tmp_")
             tmp_path = Path(tmp_path_str)
@@ -556,9 +557,6 @@ class _SyncRequestor:
                             os.fsync(f.fileno())
 
                     return response
-            except Exception:
-                tmp_path.unlink(missing_ok=True)
-                raise
             finally:
                 if not fd_closed:
                     with contextlib.suppress(OSError):
@@ -573,7 +571,8 @@ class _SyncRequestor:
             return dest_path
         finally:
             while staged_paths:
-                staged_paths.pop().unlink(missing_ok=True)
+                with contextlib.suppress(OSError):
+                    staged_paths.pop().unlink(missing_ok=True)
 
 
 class _AsyncRequestor:
@@ -886,7 +885,8 @@ class _AsyncRequestor:
 
         async def _execute_astream(eff_timeout: float | httpx.Timeout | None) -> httpx.Response:
             while staged_paths:
-                staged_paths.pop().unlink(missing_ok=True)
+                with contextlib.suppress(OSError):
+                    staged_paths.pop().unlink(missing_ok=True)
 
             tmp_fd, tmp_path_str = tempfile.mkstemp(dir=dest_dir, prefix=".didit_tmp_")
             tmp_path = Path(tmp_path_str)
@@ -944,9 +944,6 @@ class _AsyncRequestor:
                             os.fsync(f.fileno())
 
                     return response
-            except Exception:
-                tmp_path.unlink(missing_ok=True)
-                raise
             finally:
                 if not fd_closed:
                     with contextlib.suppress(OSError):
@@ -963,4 +960,5 @@ class _AsyncRequestor:
             return dest_path
         finally:
             while staged_paths:
-                staged_paths.pop().unlink(missing_ok=True)
+                with contextlib.suppress(OSError):
+                    staged_paths.pop().unlink(missing_ok=True)
