@@ -61,6 +61,32 @@ class SessionResponse(BaseModel):
         """Return True if session requires user resubmission of documents/biometrics."""
         return self.status.requires_resubmission or bool(self.resubmit_info)
 
+    def __repr__(self) -> str:
+        token_repr = "'[REDACTED]'" if self.session_token else "None"
+        return (
+            f"SessionResponse(session_id={self.session_id!r}, "
+            f"status={self.status.value!r}, "
+            f"workflow_id={self.workflow_id!r}, "
+            f"session_token={token_repr})"
+        )
+
+    __str__ = __repr__
+
+    def redacted_dump(self) -> dict[str, Any]:
+        """Dump model dictionary with session_token and sensitive URLs redacted.
+
+        Uses a strict allowlist to guarantee privacy defaults.
+        """
+        return {
+            "session_id": self.session_id,
+            "status": self.status.value if isinstance(self.status, SessionStatus) else self.status,
+            "session_token": "[REDACTED]" if self.session_token else None,
+            "workflow_id": self.workflow_id,
+            "vendor_data": self.vendor_data,
+            "requires_resubmission": self.requires_resubmission,
+            "resubmit_info": self.resubmit_info,
+        }
+
 
 class SessionListItem(BaseModel):
     """Item representation in session listing response."""

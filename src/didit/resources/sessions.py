@@ -185,6 +185,67 @@ class SessionsResource:
         resp = self._requestor.request("GET", f"/session/{session_id}/", options=options)
         return SessionResponse.model_validate(resp.json())
 
+    def update_status(
+        self,
+        session_id: str,
+        new_status: str | SessionStatus,
+        nodes_to_resubmit: list[str] | None = None,
+        *,
+        options: RequestOptions | None = None,
+    ) -> SessionResponse:
+        """Update status of an existing session (PATCH /v3/session/{session_id}/update-status/).
+
+        Args:
+            session_id: The unique identifier of the verification session.
+            new_status: The target status (e.g. 'Resubmitted' or SessionStatus.RESUBMITTED).
+            nodes_to_resubmit: Optional list of workflow step/node keys to resubmit.
+            options: Optional per-request HTTP options.
+
+        Returns:
+            SessionResponse: The updated verification session.
+        """
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty")
+
+        status_val = new_status.value if isinstance(new_status, SessionStatus) else str(new_status)
+        payload: dict[str, Any] = {"new_status": status_val}
+        if nodes_to_resubmit is not None:
+            payload["nodes_to_resubmit"] = nodes_to_resubmit
+
+        resp = self._requestor.request(
+            "PATCH",
+            f"/session/{session_id.strip()}/update-status/",
+            json=payload,
+            options=options,
+        )
+        return SessionResponse.model_validate(resp.json())
+
+    def resubmit(
+        self,
+        session_id: str,
+        nodes_to_resubmit: list[str] | None = None,
+        *,
+        options: RequestOptions | None = None,
+    ) -> SessionResponse:
+        """Request document or biometric resubmission for an existing verification session.
+
+        Invokes PATCH /v3/session/{session_id}/update-status/ with status 'Resubmitted'.
+
+        Args:
+            session_id: The unique identifier of the verification session.
+            nodes_to_resubmit: Optional list of workflow step/node keys to resubmit.
+            options: Optional per-request HTTP options.
+
+        Returns:
+            SessionResponse: The updated session with requires_resubmission=True.
+        """
+        return self.update_status(
+            session_id,
+            SessionStatus.RESUBMITTED,
+            nodes_to_resubmit=nodes_to_resubmit,
+            options=options,
+        )
+
     def list(
         self,
         *,
@@ -469,6 +530,7 @@ class SessionsResource:
         """Download compliance PDF report for a verification session.
 
         Invokes GET /v3/session/{session_id}/generate-pdf/ returning raw binary PDF content.
+        Uses a default 60-second read timeout per upstream recommendation for media rendering.
 
         Args:
             session_id: The unique identifier of the verification session.
@@ -480,13 +542,34 @@ class SessionsResource:
         Raises:
             ValueError: If session_id is empty or whitespace.
             DiditNotFoundError: If the session does not exist.
-            DiditAPIError: If the remote endpoint returns an error.
+            DiditAPIError: If the remote endpoint returns an error or invalid PDF format.
         """
         if not session_id or not session_id.strip():
             raise ValueError("session_id must not be empty")
+
+        if options is None:
+            eff_options = RequestOptions(timeout=60.0)
+        elif options.timeout is None:
+            eff_options = RequestOptions(
+                idempotency_key=options.idempotency_key,
+                timeout=60.0,
+                max_retries=options.max_retries,
+                headers=options.headers,
+                deadline=options.deadline,
+            )
+        else:
+            eff_options = options
+
         resp = self._requestor.request(
-            "GET", f"/session/{session_id.strip()}/generate-pdf/", options=options
+            "GET", f"/session/{session_id.strip()}/generate-pdf/", options=eff_options
         )
+        content_type = resp.headers.get("content-type", "")
+        if not (
+            resp.content.startswith(b"%PDF-")
+            or "application/pdf" in content_type.lower()
+            or "application/octet-stream" in content_type.lower()
+        ):
+            raise DiditAPIError("Invalid PDF report response received from server")
         return resp.content
 
     get_pdf_report = generate_pdf_report
@@ -634,6 +717,52 @@ class AsyncSessionsResource:
         """Retrieve session status asynchronously."""
         resp = await self._requestor.request("GET", f"/session/{session_id}/", options=options)
         return SessionResponse.model_validate(resp.json())
+
+    async def update_status(
+        self,
+        session_id: str,
+        new_status: str | SessionStatus,
+        nodes_to_resubmit: list[str] | None = None,
+        *,
+        options: RequestOptions | None = None,
+    ) -> SessionResponse:
+        """Update status of an existing session asynchronously.
+
+        PATCH /v3/session/{session_id}/update-status/
+        """
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty")
+
+        status_val = new_status.value if isinstance(new_status, SessionStatus) else str(new_status)
+        payload: dict[str, Any] = {"new_status": status_val}
+        if nodes_to_resubmit is not None:
+            payload["nodes_to_resubmit"] = nodes_to_resubmit
+
+        resp = await self._requestor.request(
+            "PATCH",
+            f"/session/{session_id.strip()}/update-status/",
+            json=payload,
+            options=options,
+        )
+        return SessionResponse.model_validate(resp.json())
+
+    async def resubmit(
+        self,
+        session_id: str,
+        nodes_to_resubmit: list[str] | None = None,
+        *,
+        options: RequestOptions | None = None,
+    ) -> SessionResponse:
+        """Request document or biometric resubmission for an existing session asynchronously.
+
+        Invokes PATCH /v3/session/{session_id}/update-status/ with status 'Resubmitted'.
+        """
+        return await self.update_status(
+            session_id,
+            SessionStatus.RESUBMITTED,
+            nodes_to_resubmit=nodes_to_resubmit,
+            options=options,
+        )
 
     async def list(
         self,
@@ -910,6 +1039,7 @@ class AsyncSessionsResource:
         """Download compliance PDF report for a verification session asynchronously.
 
         Invokes GET /v3/session/{session_id}/generate-pdf/ returning raw binary PDF content.
+        Uses a default 60-second read timeout per upstream recommendation for media rendering.
 
         Args:
             session_id: The unique identifier of the verification session.
@@ -921,13 +1051,34 @@ class AsyncSessionsResource:
         Raises:
             ValueError: If session_id is empty or whitespace.
             DiditNotFoundError: If the session does not exist.
-            DiditAPIError: If the remote endpoint returns an error.
+            DiditAPIError: If the remote endpoint returns an error or invalid PDF format.
         """
         if not session_id or not session_id.strip():
             raise ValueError("session_id must not be empty")
+
+        if options is None:
+            eff_options = RequestOptions(timeout=60.0)
+        elif options.timeout is None:
+            eff_options = RequestOptions(
+                idempotency_key=options.idempotency_key,
+                timeout=60.0,
+                max_retries=options.max_retries,
+                headers=options.headers,
+                deadline=options.deadline,
+            )
+        else:
+            eff_options = options
+
         resp = await self._requestor.request(
-            "GET", f"/session/{session_id.strip()}/generate-pdf/", options=options
+            "GET", f"/session/{session_id.strip()}/generate-pdf/", options=eff_options
         )
+        content_type = resp.headers.get("content-type", "")
+        if not (
+            resp.content.startswith(b"%PDF-")
+            or "application/pdf" in content_type.lower()
+            or "application/octet-stream" in content_type.lower()
+        ):
+            raise DiditAPIError("Invalid PDF report response received from server")
         return resp.content
 
     get_pdf_report = generate_pdf_report

@@ -732,3 +732,48 @@ class TestSimulatedAsyncDidit:
 
         with pytest.raises(ValueError, match="session_id must not be empty"):
             await client.sessions.generate_pdf_report("")
+
+    def test_simulation_resubmit_and_update_status(self) -> None:
+        client = SimulatedDidit()
+        s = client.sessions.create(vendor_data="sim_resub_test", workflow_id="wf_sim")
+
+        # Test resubmit without nodes
+        res1 = client.sessions.resubmit(s.session_id)
+        assert res1.session_id == s.session_id
+        assert res1.status == SessionStatus.RESUBMITTED
+        assert res1.requires_resubmission is True
+
+        # Test resubmit with nodes
+        res2 = client.sessions.resubmit(s.session_id, nodes_to_resubmit=["document", "face"])
+        assert res2.status == SessionStatus.RESUBMITTED
+        assert res2.resubmit_info == {"nodes": ["document", "face"]}
+        assert res2.requires_resubmission is True
+
+        # Test update_status with custom status
+        res3 = client.sessions.update_status(s.session_id, "In Review")
+        assert res3.status == SessionStatus.IN_REVIEW
+
+        # Decision is None branch in update_status
+        client.sessions._storage.decisions.pop(s.session_id, None)
+        res4 = client.sessions.update_status(s.session_id, SessionStatus.APPROVED)
+        assert res4.status == SessionStatus.APPROVED
+
+        # Error cases
+        with pytest.raises(ValueError, match="session_id must not be empty"):
+            client.sessions.resubmit("")
+
+        with pytest.raises(DiditNotFoundError):
+            client.sessions.resubmit("nonexistent_id")
+
+    @pytest.mark.asyncio
+    async def test_async_simulation_resubmit_and_update_status(self) -> None:
+        client = SimulatedAsyncDidit()
+        s = await client.sessions.create(vendor_data="async_sim_resub", workflow_id="wf_sim_async")
+
+        res = await client.sessions.resubmit(s.session_id, nodes_to_resubmit=["liveness"])
+        assert res.status == SessionStatus.RESUBMITTED
+        assert res.requires_resubmission is True
+        assert res.resubmit_info == {"nodes": ["liveness"]}
+
+        res_update = await client.sessions.update_status(s.session_id, SessionStatus.APPROVED)
+        assert res_update.status == SessionStatus.APPROVED

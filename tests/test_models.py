@@ -901,3 +901,38 @@ class TestSessionListAndReconciliationModels:
             resubmit_info={"steps": ["face"]},
         )
         assert s4.requires_resubmission is True
+
+    def test_session_response_privacy_repr_and_redacted_dump(self) -> None:
+        """Verify that SessionResponse redacts sensitive tokens in repr and redacted_dump."""
+        session = SessionResponse(
+            session_id="sess_safe_123",
+            session_token="secret_client_token_xyz",
+            url="https://verify.didit.me/sess_safe_123",
+            status=SessionStatus.AWAITING_USER,
+            workflow_id="wf_456",
+            vendor_data="user_789",
+            resubmit_info={"nodes": ["document"]},
+            extra_upstream_field="sensitive_leak",
+        )
+
+        repr_str = repr(session)
+        assert "secret_client_token_xyz" not in repr_str
+        assert "[REDACTED]" in repr_str
+        assert str(session) == repr_str
+
+        session_no_token = SessionResponse(
+            session_id="sess_no_token",
+            status=SessionStatus.APPROVED,
+        )
+        assert "session_token=None" in repr(session_no_token)
+
+        redacted = session.redacted_dump()
+        assert redacted["session_id"] == "sess_safe_123"
+        assert redacted["status"] == "Awaiting User"
+        assert redacted["session_token"] == "[REDACTED]"
+        assert redacted["workflow_id"] == "wf_456"
+        assert redacted["vendor_data"] == "user_789"
+        assert redacted["requires_resubmission"] is True
+        assert redacted["resubmit_info"] == {"nodes": ["document"]}
+        assert "extra_upstream_field" not in redacted
+        assert "url" not in redacted

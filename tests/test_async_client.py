@@ -1334,3 +1334,135 @@ class TestAsyncDiditClient:
         with pytest.raises(ValueError, match="session_id must not be empty"):
             await async_client.sessions.generate_pdf_report(invalid_id)
         await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_generate_pdf_report_invalid_mime_and_magic(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        respx.get(f"{base_url}/session/sess_bad_pdf_async/generate-pdf/").mock(
+            return_value=Response(
+                200, content=b"<html>Server error</html>", headers={"Content-Type": "text/html"}
+            )
+        )
+        with pytest.raises(DiditAPIError, match="Invalid PDF report response"):
+            await async_client.sessions.generate_pdf_report("sess_bad_pdf_async")
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_generate_pdf_report_custom_timeout(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        from didit.transport import RequestOptions
+
+        pdf_bytes = b"%PDF-1.4 async custom timeout pdf"
+        route = respx.get(f"{base_url}/session/sess_async_custom_timeout/generate-pdf/").mock(
+            return_value=Response(
+                200, content=pdf_bytes, headers={"Content-Type": "application/pdf"}
+            )
+        )
+        opts = RequestOptions(timeout=120.0)
+        res = await async_client.sessions.generate_pdf_report(
+            "sess_async_custom_timeout", options=opts
+        )
+        assert res == pdf_bytes
+        assert route.called
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_resubmit_success(self, async_client: AsyncDidit, base_url: str) -> None:
+        route = respx.patch(f"{base_url}/session/sess_async_resub_1/update-status/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "session_id": "sess_async_resub_1",
+                    "status": "Resubmitted",
+                    "resubmit_info": {"steps": ["document"]},
+                },
+            )
+        )
+
+        res = await async_client.sessions.resubmit("sess_async_resub_1")
+        assert res.session_id == "sess_async_resub_1"
+        assert res.status == SessionStatus.RESUBMITTED
+        assert res.requires_resubmission is True
+        assert route.called
+        sent = json.loads(route.calls[0].request.content)
+        assert sent["new_status"] == "Resubmitted"
+        assert "nodes_to_resubmit" not in sent
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_resubmit_with_nodes(self, async_client: AsyncDidit, base_url: str) -> None:
+        route = respx.patch(f"{base_url}/session/sess_async_resub_2/update-status/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "session_id": "sess_async_resub_2",
+                    "status": "Resubmitted",
+                    "resubmit_info": {"nodes": ["document", "liveness"]},
+                },
+            )
+        )
+
+        res = await async_client.sessions.resubmit(
+            "sess_async_resub_2", nodes_to_resubmit=["document", "liveness"]
+        )
+        assert res.session_id == "sess_async_resub_2"
+        assert res.status == SessionStatus.RESUBMITTED
+        assert res.requires_resubmission is True
+        sent = json.loads(route.calls[0].request.content)
+        assert sent["new_status"] == "Resubmitted"
+        assert sent["nodes_to_resubmit"] == ["document", "liveness"]
+        await async_client.aclose()
+
+    @pytest.mark.parametrize("invalid_id", ["", "   "])
+    @pytest.mark.asyncio
+    async def test_async_resubmit_invalid_session_id(
+        self, async_client: AsyncDidit, invalid_id: str
+    ) -> None:
+        with pytest.raises(ValueError, match="session_id must not be empty"):
+            await async_client.sessions.resubmit(invalid_id)
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_update_status_custom(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        route = respx.patch(f"{base_url}/session/sess_async_custom_status/update-status/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "session_id": "sess_async_custom_status",
+                    "status": "In Review",
+                },
+            )
+        )
+
+        res = await async_client.sessions.update_status(
+            "sess_async_custom_status", SessionStatus.IN_REVIEW
+        )
+        assert res.status == SessionStatus.IN_REVIEW
+        sent = json.loads(route.calls[0].request.content)
+        assert sent["new_status"] == "In Review"
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_pdf_report_options_timeout_none(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        from didit.transport import RequestOptions
+
+        respx.get(f"{base_url}/session/sess_async_pdf_opt/generate-pdf/").mock(
+            return_value=Response(200, content=b"%PDF-1.4 sample content")
+        )
+        pdf = await async_client.sessions.generate_pdf_report(
+            "sess_async_pdf_opt", options=RequestOptions(timeout=None)
+        )
+        assert pdf.startswith(b"%PDF-")
+        await async_client.aclose()

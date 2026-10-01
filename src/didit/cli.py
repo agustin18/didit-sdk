@@ -1,40 +1,218 @@
 """Developer CLI utilities for Didit Identity Verification.
 
 Provides operational tools for configuration inspection (doctor),
-webhook signature debugging, session inspection, and compliance report downloads.
+webhook signature debugging, session inspection, compliance report downloads,
+and sandbox scenario exploration.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
+import re
 import sys
+import tempfile
 import time
 import traceback
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from didit._version import __version__
 from didit.client import Didit
 from didit.config import DEFAULT_BASE_URL, DEFAULT_WEBHOOK_MAX_AGE_SECONDS
 from didit.errors import (
+    DiditAPIError,
     DiditAuthenticationError,
     DiditConfigurationError,
     DiditConnectionError,
     DiditNotFoundError,
+    DiditPermissionError,
     DiditSignatureError,
 )
 from didit.webhooks import parse_webhook_payload
 
+SANDBOX_SCENARIOS: list[dict[str, str]] = [
+    {
+        "slug": "approve",
+        "category": "success",
+        "description": "Happy path verification resulting in Approved status.",
+    },
+    {
+        "slug": "decline_document_expired",
+        "category": "decline",
+        "description": "Identification document expiration date is in the past.",
+    },
+    {
+        "slug": "decline_could_not_recognize_document",
+        "category": "decline",
+        "description": "Document format or features could not be identified.",
+    },
+    {
+        "slug": "decline_mrz_validation",
+        "category": "decline",
+        "description": "Machine Readable Zone (MRZ) checksum validation failed.",
+    },
+    {
+        "slug": "decline_minimum_age",
+        "category": "decline",
+        "description": "Calculated user age is below the workflow minimum threshold.",
+    },
+    {
+        "slug": "decline_face_match_low_similarity",
+        "category": "decline",
+        "description": "Facial similarity between selfie and ID photo is below threshold.",
+    },
+    {
+        "slug": "decline_liveness_attack",
+        "category": "decline",
+        "description": "Presentation or biometric spoofing attack detected.",
+    },
+    {
+        "slug": "decline_aml_sanction",
+        "category": "decline",
+        "description": "User matched against global sanction watchlists.",
+    },
+    {
+        "slug": "review_aml_possible_match",
+        "category": "review",
+        "description": "Potential PEP or AML match requiring manual compliance review.",
+    },
+    {
+        "slug": "review_face_match_borderline",
+        "category": "review",
+        "description": "Biometric similarity score is borderline, flagged for human inspection.",
+    },
+    {
+        "slug": "review_poa_partial_match",
+        "category": "review",
+        "description": "Proof of address partially matches provided profile.",
+    },
+    {
+        "slug": "resubmit_document",
+        "category": "resubmit",
+        "description": "Document image blurred or glare detected, prompting resubmission.",
+    },
+    {
+        "slug": "resubmit_face",
+        "category": "resubmit",
+        "description": "Selfie lighting insufficient, prompting biometric resubmission.",
+    },
+]
+
+
+def _emit_success(
+    payload: dict[str, Any],
+    is_json: bool,
+    text_lines: list[str] | None = None,
+) -> int:
+    """Emit successful command output conforming to formatting contract."""
+    if is_json:
+        result: dict[str, Any] = {"status": "ok"}
+        for k, v in payload.items():
+            if k == "status":
+                result["session_status"] = v
+            else:
+                result[k] = v
+        print(json.dumps(result, indent=2))
+    else:
+        for line in text_lines or []:
+            print(line)
+    return 0
+
+
+def _emit_error(
+    code: str,
+    message: str,
+    is_json: bool,
+    exit_code: int = 1,
+    details: dict[str, Any] | None = None,
+) -> int:
+    """Emit structured or human-readable error conforming to formatting contract."""
+    if is_json:
+        err_dict: dict[str, Any] = {"code": code, "message": message}
+        if details:
+            err_dict["details"] = details
+        out = {"status": "error", "error": err_dict}
+        print(json.dumps(out, indent=2))
+    else:
+        sys.stderr.write(f"Error: {message}\n")
+    return exit_code
+
+
+def _resolve_api_key(args: argparse.Namespace) -> str | None:
+    """Resolve API key strictly from file or environment to prevent argv leakage."""
+    api_key_file = getattr(args, "api_key_file", None)
+    if api_key_file:
+        try:
+            return Path(api_key_file).read_text(encoding="utf-8").strip()
+        except Exception as exc:
+            raise DiditConfigurationError(
+                f"Error reading API key file '{api_key_file}': {exc}"
+            ) from exc
+    return os.environ.get("DIDIT_API_KEY")
+
+
+def _resolve_webhook_secret(args: argparse.Namespace) -> str | None:
+    """Resolve webhook secret strictly from file or environment to prevent argv leakage."""
+    secret_file = getattr(args, "secret_file", None)
+    if secret_file:
+        try:
+            return Path(secret_file).read_text(encoding="utf-8").strip()
+        except Exception as exc:
+            raise DiditConfigurationError(
+                f"Error reading webhook secret file '{secret_file}': {exc}"
+            ) from exc
+    return os.environ.get("DIDIT_WEBHOOK_SECRET")
+
+
+def _resolve_body(args: argparse.Namespace) -> str:
+    """Resolve webhook payload body strictly from file or stdin to prevent argv leakage."""
+    body_file = getattr(args, "body_file", None)
+    use_stdin = getattr(args, "stdin", False)
+    if not body_file and not use_stdin:
+        raise DiditConfigurationError("Must provide webhook body via --body-file or --stdin")
+    if body_file:
+        try:
+            return Path(body_file).read_text(encoding="utf-8")
+        except Exception as exc:
+            raise DiditConfigurationError(f"Error reading body file '{body_file}': {exc}") from exc
+    return sys.stdin.read()
+
+
+def _secure_write_bytes(dest_path: Path, data: bytes, *, force: bool = False) -> None:
+    """Atomically write binary data to disk enforcing 0600 private permissions."""
+    if dest_path.exists() and not force:
+        raise FileExistsError(f"File '{dest_path}' already exists. Use --force to overwrite.")
+
+    dest_dir = dest_path.parent
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    tmp_fd, tmp_path_str = tempfile.mkstemp(dir=dest_dir, prefix=".didit_tmp_")
+    tmp_path = Path(tmp_path_str)
+    try:
+        with contextlib.suppress(AttributeError, OSError):
+            os.fchmod(tmp_fd, 0o600)
+        with os.fdopen(tmp_fd, "wb") as f:
+            f.write(data)
+        tmp_path.replace(dest_path)
+        with contextlib.suppress(AttributeError, OSError):
+            os.chmod(dest_path, 0o600)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
 
 def _get_client(args: argparse.Namespace) -> Didit:
-    """Instantiate a synchronous Didit client resolving arguments and environment."""
-    api_key = getattr(args, "api_key", None) or os.environ.get("DIDIT_API_KEY")
+    """Instantiate a synchronous Didit client resolving configuration safely."""
+    api_key = _resolve_api_key(args)
     if not api_key:
         raise DiditConfigurationError(
-            "Missing Didit API key. Provide --api-key or set the "
-            "DIDIT_API_KEY environment variable."
+            "Missing Didit API key. Set the DIDIT_API_KEY environment variable "
+            "or provide --api-key-file."
         )
 
     base_url = (
@@ -46,98 +224,129 @@ def _get_client(args: argparse.Namespace) -> Didit:
 def _cmd_doctor(args: argparse.Namespace) -> int:
     """Diagnose API credentials, network connectivity, latency, and webhook secret."""
     is_json = getattr(args, "json", False)
-    api_key = getattr(args, "api_key", None) or os.environ.get("DIDIT_API_KEY")
+    try:
+        api_key = _resolve_api_key(args)
+        webhook_secret = _resolve_webhook_secret(args)
+    except DiditConfigurationError as exc:
+        return _emit_error("CONFIGURATION_ERROR", str(exc), is_json=is_json)
+
     if not api_key:
-        error_msg = (
-            "Missing Didit API key. Provide --api-key or set the "
-            "DIDIT_API_KEY environment variable."
+        return _emit_error(
+            "MISSING_API_KEY",
+            "Missing Didit API key. Set DIDIT_API_KEY or provide --api-key-file.",
+            is_json=is_json,
         )
-        if is_json:
-            print(json.dumps({"status": "error", "error": error_msg}))
-        else:
-            sys.stderr.write(f"Error: {error_msg}\n")
-        return 1
 
     base_url = (
         getattr(args, "base_url", None) or os.environ.get("DIDIT_BASE_URL") or DEFAULT_BASE_URL
     )
-    webhook_secret = getattr(args, "secret", None) or os.environ.get("DIDIT_WEBHOOK_SECRET")
 
+    client = Didit(api_key=api_key, base_url=base_url)
+
+    # 1. Connectivity & Latency Probe via dedicated /system/healthcheck
     start_time = time.monotonic()
     try:
-        client = Didit(api_key=api_key, base_url=base_url)
-        # Probe remote API using minimal session list query
-        client.sessions.list(limit=1)
+        health_resp = client.requestor.request("GET", "/system/healthcheck/")
         latency_ms = (time.monotonic() - start_time) * 1000.0
+        conn_ok = health_resp.is_success
+    except (DiditConnectionError, httpx.ConnectError):
+        return _emit_error(
+            "CONNECTION_ERROR",
+            f"Failed to connect to Didit API at {base_url}. Check network connectivity.",
+            is_json=is_json,
+        )
+    except Exception:
+        # Fall back if healthcheck path differs
+        latency_ms = (time.monotonic() - start_time) * 1000.0
+        conn_ok = True
+
+    # 2. Authentication Probe (verifying permissions without reading user KYC data)
+    try:
+        client.requestor.request("GET", "/session/auth-probe-check/")
     except DiditAuthenticationError:
-        if is_json:
-            print(
-                json.dumps(
-                    {
-                        "status": "error",
-                        "error": "Invalid or unauthorized API key (HTTP 401)",
-                    }
-                )
-            )
-        else:
-            sys.stderr.write("[FAIL] Authentication: Invalid or unauthorized API key (HTTP 401)\n")
-        return 1
-    except (DiditConnectionError, Exception) as exc:
-        if is_json:
-            print(
-                json.dumps(
-                    {
-                        "status": "error",
-                        "error": f"Network or connection error: {exc}",
-                    }
-                )
-            )
-        else:
-            sys.stderr.write("[FAIL] API Connection: Network or connection error\n")
-        return 1
+        return _emit_error(
+            "AUTHENTICATION_FAILED",
+            "Invalid or unauthorized API key (HTTP 401).",
+            is_json=is_json,
+        )
+    except DiditPermissionError:
+        return _emit_error(
+            "PERMISSION_DENIED",
+            "API key lacks permissions to access sessions resource (HTTP 403).",
+            is_json=is_json,
+        )
+    except DiditNotFoundError:
+        # 404 on non-existent probe ID proves credentials and routing are valid
+        pass
+    except (DiditConnectionError, httpx.ConnectError):
+        return _emit_error(
+            "CONNECTION_ERROR",
+            "Failed to connect to Didit API during authentication check.",
+            is_json=is_json,
+        )
+    except Exception:
+        if getattr(args, "debug", False):
+            raise
+        return _emit_error(
+            "PROBE_FAILED",
+            "Authentication verification probe failed.",
+            is_json=is_json,
+        )
 
-    if is_json:
-        payload: dict[str, Any] = {
-            "status": "ok",
-            "base_url": base_url,
-            "latency_ms": round(latency_ms, 2),
-            "authenticated": True,
-            "webhook_secret_configured": bool(webhook_secret),
-        }
-        print(json.dumps(payload, indent=2))
+    payload: dict[str, Any] = {
+        "base_url": base_url,
+        "latency_ms": round(latency_ms, 2),
+        "connectivity": "ok" if conn_ok else "unknown",
+        "authenticated": True,
+        "webhook_secret_configured": bool(webhook_secret),
+    }
+    text_lines = [
+        f"[OK] API Connection: Connected to {base_url} (latency: {latency_ms:.1f}ms)",
+        "[OK] Authentication: API key verified",
+    ]
+    if webhook_secret:
+        text_lines.append("[OK] Webhook Secret: Configured")
     else:
-        print(f"[OK] API Connection: Connected to {base_url} (latency: {latency_ms:.1f}ms)")
-        print("[OK] Authentication: API key verified")
-        if webhook_secret:
-            print(f"[OK] Webhook Secret: Configured (length: {len(webhook_secret)} chars)")
-        else:
-            print("[INFO] Webhook Secret: Not configured (optional)")
+        text_lines.append("[INFO] Webhook Secret: Not configured (optional)")
 
-    return 0
+    return _emit_success(payload, is_json=is_json, text_lines=text_lines)
 
 
 def _cmd_webhook_verify(args: argparse.Namespace) -> int:
     """Verify an incoming webhook signature against secret, timestamp, and body."""
     is_json = getattr(args, "json", False)
-    if not args.body and not args.body_file:
-        sys.stderr.write("Error: Must provide either --body or --body-file\n")
-        return 2
 
-    if args.body_file:
-        try:
-            body = Path(args.body_file).read_text(encoding="utf-8")
-        except Exception as exc:
-            sys.stderr.write(f"Error reading body file '{args.body_file}': {exc}\n")
-            return 1
-    else:
-        body = args.body
+    tolerance = getattr(args, "tolerance", DEFAULT_WEBHOOK_MAX_AGE_SECONDS)
+    if tolerance < 1:
+        return _emit_error(
+            "INVALID_TOLERANCE",
+            "--tolerance must be a positive integer greater than zero.",
+            is_json=is_json,
+            exit_code=2,
+        )
 
-    tolerance_val = getattr(args, "tolerance", None)
-    tolerance = int(tolerance_val) if tolerance_val is not None else None
-    if tolerance is not None and tolerance <= 0:
-        max_age = 315360000  # 10 years
-    else:
-        max_age = tolerance or DEFAULT_WEBHOOK_MAX_AGE_SECONDS
+    try:
+        secret = _resolve_webhook_secret(args)
+    except DiditConfigurationError as exc:
+        return _emit_error("CONFIGURATION_ERROR", str(exc), is_json=is_json)
+
+    if not secret:
+        return _emit_error(
+            "MISSING_WEBHOOK_SECRET",
+            "Missing webhook secret. Set DIDIT_WEBHOOK_SECRET or provide --secret-file.",
+            is_json=is_json,
+        )
+
+    try:
+        body = _resolve_body(args)
+    except DiditConfigurationError as exc:
+        return _emit_error("INVALID_INPUT", str(exc), is_json=is_json, exit_code=2)
+
+    skip_freshness = getattr(args, "skip_freshness_check", False)
+    if skip_freshness:
+        sys.stderr.write(
+            "WARNING: Freshness validation disabled; verifying signature authenticity only.\n"
+        )
 
     headers = {
         "X-Signature-V2": args.signature,
@@ -149,89 +358,94 @@ def _cmd_webhook_verify(args: argparse.Namespace) -> int:
         payload = parse_webhook_payload(
             raw_bytes,
             headers,
-            args.secret,
-            max_age_seconds=max_age,
+            secret,
+            max_age_seconds=tolerance,
+            verify_freshness=not skip_freshness,
         )
         event_id = payload.event_id or "unknown"
-        if is_json:
-            print(
-                json.dumps(
-                    {
-                        "valid": True,
-                        "event_id": event_id,
-                        "session_id": payload.session_id,
-                        "status": payload.status.value,
-                    }
-                )
-            )
-        else:
-            print("[OK] Webhook signature verified successfully")
-            print(f"Event ID:   {event_id}")
-            print(f"Session ID: {payload.session_id}")
-            print(f"Status:     {payload.status.value}")
-        return 0
+        data = {
+            "valid": True,
+            "event_id": event_id,
+            "session_id": payload.session_id,
+            "session_status": payload.status.value,
+        }
+        text_lines = [
+            "[OK] Webhook signature verified successfully",
+            f"Event ID:   {event_id}",
+            f"Session ID: {payload.session_id}",
+            f"Status:     {payload.status.value}",
+        ]
+        return _emit_success(data, is_json=is_json, text_lines=text_lines)
     except DiditSignatureError as exc:
-        if is_json:
-            print(json.dumps({"valid": False, "error": str(exc)}))
-        else:
-            sys.stderr.write(f"[FAIL] Webhook verification failed: {exc}\n")
-        return 1
+        return _emit_error(
+            "SIGNATURE_VERIFICATION_FAILED",
+            f"Webhook verification failed: {exc}",
+            is_json=is_json,
+        )
 
 
 def _cmd_session_get(args: argparse.Namespace) -> int:
     """Fetch status and optional decision details for a session."""
     is_json = getattr(args, "json", False)
+    include_sensitive = getattr(args, "include_sensitive", False)
     client = _get_client(args)
     try:
         session = client.sessions.get(args.session_id)
     except DiditNotFoundError:
-        sys.stderr.write(f"Error: Session '{args.session_id}' not found\n")
-        return 1
+        return _emit_error(
+            "SESSION_NOT_FOUND",
+            f"Session '{args.session_id}' not found",
+            is_json=is_json,
+        )
 
     decision_data: dict[str, Any] | None = None
     if getattr(args, "decision", False):
         try:
             decision = client.sessions.get_decision(args.session_id)
-            decision_data = decision.model_dump()
+            decision_data = decision.model_dump() if include_sensitive else decision.redacted_dump()
         except DiditNotFoundError:
             decision_data = None
 
     if is_json:
-        out = session.model_dump()
+        sess_dict = session.model_dump() if include_sensitive else session.redacted_dump()
         if decision_data is not None:
-            out["decision"] = decision_data
-        print(json.dumps(out, indent=2))
-    else:
-        print(f"Session ID:  {session.session_id}")
-        print(f"Status:      {session.status.value}")
-        if session.url:
-            print(f"Hosted URL:  {session.url}")
-        if session.workflow_id:
-            print(f"Workflow ID: {session.workflow_id}")
-        if session.vendor_data:
-            print(f"Vendor Data: {session.vendor_data}")
-        if decision_data:
-            dec_status = decision_data.get("status")
-            dec_status_val = (
-                getattr(dec_status, "value", str(dec_status))
-                if dec_status is not None
-                else "UNKNOWN"
-            )
-            print(f"Decision Outcome: {dec_status_val}")
-            warnings = decision_data.get("warnings", [])
-            if warnings:
-                print("Warnings:")
-                for w in warnings:
-                    code = w.get("code") or w.get("risk") or "UNKNOWN"
-                    msg = w.get("message") or ""
-                    print(f"  - [{code}] {msg}")
+            sess_dict["decision"] = decision_data
+        return _emit_success(sess_dict, is_json=True)
 
-    return 0
+    text_lines = [
+        f"Session ID:  {session.session_id}",
+        f"Status:      {session.status.value}",
+    ]
+    if session.url and include_sensitive:
+        text_lines.append(f"Hosted URL:  {session.url}")
+    if session.workflow_id:
+        text_lines.append(f"Workflow ID: {session.workflow_id}")
+    if session.vendor_data:
+        text_lines.append(f"Vendor Data: {session.vendor_data}")
+    if session.requires_resubmission:
+        text_lines.append("Resubmission Required: True")
+
+    if decision_data:
+        dec_status = decision_data.get("status")
+        dec_status_val = (
+            getattr(dec_status, "value", str(dec_status)) if dec_status is not None else "UNKNOWN"
+        )
+        text_lines.append(f"Decision Outcome: {dec_status_val}")
+        warnings = decision_data.get("warnings") or []
+        if warnings:
+            text_lines.append("Warnings:")
+            for w in warnings:
+                code = w.get("code") or w.get("risk") or "UNKNOWN"
+                msg = w.get("message") or ""
+                text_lines.append(f"  - [{code}] {msg}".rstrip())
+
+    return _emit_success({}, is_json=False, text_lines=text_lines)
 
 
 def _cmd_session_create(args: argparse.Namespace) -> int:
     """Create a new verification session."""
     is_json = getattr(args, "json", False)
+    include_sensitive = getattr(args, "include_sensitive", False)
     client = _get_client(args)
     session = client.sessions.create(
         workflow_id=args.workflow_id,
@@ -242,22 +456,101 @@ def _cmd_session_create(args: argparse.Namespace) -> int:
     )
 
     if is_json:
-        print(json.dumps(session.model_dump(), indent=2))
-    else:
-        print(f"Session ID: {session.session_id}")
-        print(f"Status:     {session.status.value}")
-        if session.url:
-            print(f"Hosted URL: {session.url}")
+        sess_dict = session.model_dump() if include_sensitive else session.redacted_dump()
+        return _emit_success(sess_dict, is_json=True)
 
-    return 0
+    text_lines = [
+        f"Session ID: {session.session_id}",
+        f"Status:     {session.status.value}",
+    ]
+    if session.url:
+        text_lines.append(f"Hosted URL: {session.url}")
+
+    return _emit_success({}, is_json=False, text_lines=text_lines)
+
+
+def _cmd_session_resubmit(args: argparse.Namespace) -> int:
+    """Request document or biometric resubmission for an existing session."""
+    is_json = getattr(args, "json", False)
+    include_sensitive = getattr(args, "include_sensitive", False)
+    client = _get_client(args)
+    try:
+        session = client.sessions.resubmit(
+            args.session_id,
+            nodes_to_resubmit=args.nodes,
+        )
+    except DiditNotFoundError:
+        return _emit_error(
+            "SESSION_NOT_FOUND",
+            f"Session '{args.session_id}' not found",
+            is_json=is_json,
+        )
+
+    if is_json:
+        sess_dict = session.model_dump() if include_sensitive else session.redacted_dump()
+        return _emit_success(sess_dict, is_json=True)
+
+    text_lines = [
+        f"Session ID:             {session.session_id}",
+        f"Status:                 {session.status.value}",
+        f"Requires Resubmission:  {session.requires_resubmission}",
+    ]
+    if session.resubmit_info:
+        text_lines.append(f"Resubmit Details:       {session.resubmit_info}")
+
+    return _emit_success({}, is_json=False, text_lines=text_lines)
 
 
 def _cmd_session_list(args: argparse.Namespace) -> int:
-    """List sessions with optional filtering."""
+    """List sessions with filtering and full CLI pagination."""
     is_json = getattr(args, "json", False)
+    include_sensitive = getattr(args, "include_sensitive", False)
     client = _get_client(args)
+
+    fetch_all = getattr(args, "all", False)
+    max_sessions = getattr(args, "max_sessions", 500)
+    current_offset = getattr(args, "offset", 0)
+    page_limit = getattr(args, "limit", 10)
+
+    if fetch_all:
+        collected: list[Any] = []
+        total_count = 0
+        while len(collected) < max_sessions:
+            page = client.sessions.list(
+                limit=min(50, max_sessions - len(collected)),
+                offset=current_offset,
+                status=args.status,
+                country=args.country,
+                vendor_data=args.vendor_data,
+                workflow_id=args.workflow_id,
+            )
+            total_count = page.count
+            if not page.results:
+                break
+            collected.extend(page.results)
+            current_offset += len(page.results)
+            if page.next is None:
+                break
+
+        if is_json:
+            results_dump = [
+                (item.model_dump() if include_sensitive else item.redacted_dump())
+                for item in collected
+            ]
+            return _emit_success(
+                {"count": total_count, "results": results_dump, "collected": len(collected)},
+                is_json=True,
+            )
+
+        text_lines = [f"Total sessions: {total_count} (collected {len(collected)})"]
+        for item in collected:
+            vendor_str = f" ({item.vendor_data})" if item.vendor_data else ""
+            text_lines.append(f"  - {item.session_id} [{item.status.value}]{vendor_str}")
+        return _emit_success({}, is_json=False, text_lines=text_lines)
+
     page = client.sessions.list(
-        limit=args.limit,
+        limit=page_limit,
+        offset=current_offset,
         status=args.status,
         country=args.country,
         vendor_data=args.vendor_data,
@@ -265,43 +558,84 @@ def _cmd_session_list(args: argparse.Namespace) -> int:
     )
 
     if is_json:
-        print(json.dumps(page.model_dump(), indent=2))
-    else:
-        print(f"Total sessions: {page.count} (showing {len(page.results)})")
-        for item in page.results:
-            vendor_str = f" ({item.vendor_data})" if item.vendor_data else ""
-            print(f"  - {item.session_id} [{item.status.value}]{vendor_str}")
+        dump_data = page.model_dump() if include_sensitive else page.redacted_dump()
+        return _emit_success(dump_data, is_json=True)
 
-    return 0
+    text_lines = [f"Total sessions: {page.count} (showing {len(page.results)})"]
+    for item in page.results:
+        vendor_str = f" ({item.vendor_data})" if item.vendor_data else ""
+        text_lines.append(f"  - {item.session_id} [{item.status.value}]{vendor_str}")
+
+    return _emit_success({}, is_json=False, text_lines=text_lines)
 
 
 def _cmd_session_pdf(args: argparse.Namespace) -> int:
-    """Download the compliance PDF report for a session."""
+    """Download compliance PDF report for a session and save privately to disk."""
+    is_json = getattr(args, "json", False)
     client = _get_client(args)
     try:
         pdf_bytes = client.sessions.generate_pdf_report(args.session_id)
     except DiditNotFoundError:
-        sys.stderr.write(f"Error: Session '{args.session_id}' not found\n")
-        return 1
+        return _emit_error(
+            "SESSION_NOT_FOUND",
+            f"Session '{args.session_id}' not found",
+            is_json=is_json,
+        )
+    except DiditAPIError as exc:
+        return _emit_error("API_ERROR", str(exc), is_json=is_json)
 
-    default_name = f"{args.session_id}.pdf"
-    out_path = Path(args.output).resolve() if args.output else Path(default_name).resolve()
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "", args.session_id) + ".pdf"
+    out_path = Path(args.output).resolve() if args.output else Path(safe_name).resolve()
+
     try:
-        out_path.write_bytes(pdf_bytes)
-        print(f"Report saved to {out_path} ({len(pdf_bytes)} bytes)")
-        return 0
+        _secure_write_bytes(out_path, pdf_bytes, force=getattr(args, "force", False))
+    except FileExistsError as exc:
+        return _emit_error("FILE_EXISTS", str(exc), is_json=is_json)
     except Exception as exc:
-        sys.stderr.write(f"Error saving PDF report to '{out_path}': {exc}\n")
-        return 1
+        return _emit_error(
+            "IO_ERROR",
+            f"Error saving PDF report to '{out_path}': {exc}",
+            is_json=is_json,
+        )
+
+    data = {
+        "saved_to": str(out_path),
+        "bytes": len(pdf_bytes),
+        "session_id": args.session_id,
+        "permissions": "0600",
+    }
+    text_lines = [f"Report saved to {out_path} ({len(pdf_bytes)} bytes, mode: 0600)"]
+    return _emit_success(data, is_json=is_json, text_lines=text_lines)
+
+
+def _cmd_sandbox_scenarios(args: argparse.Namespace) -> int:
+    """List available Didit sandbox testing scenarios."""
+    is_json = getattr(args, "json", False)
+    category = getattr(args, "category", None)
+    scenarios = SANDBOX_SCENARIOS
+    if category:
+        scenarios = [s for s in scenarios if s.get("category") == category]
+
+    if is_json:
+        return _emit_success({"count": len(scenarios), "scenarios": scenarios}, is_json=True)
+
+    text_lines = [f"Available Didit Sandbox Scenarios ({len(scenarios)}):"]
+    for s in scenarios:
+        cat_badge = f"[{s['category'].upper()}]"
+        text_lines.append(f"  • {s['slug']:<36} {cat_badge:<10} {s['description']}")
+
+    return _emit_success({}, is_json=False, text_lines=text_lines)
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line argument parser with inherited common options."""
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument(
-        "--api-key",
+        "--api-key-file",
         default=argparse.SUPPRESS,
-        help="Didit API key (defaults to DIDIT_API_KEY environment variable)",
+        help=(
+            "Path to file containing Didit API key (defaults to DIDIT_API_KEY environment variable)"
+        ),
     )
     common_parser.add_argument(
         "--base-url",
@@ -312,7 +646,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="Format output as JSON",
+        help="Format output as parseable JSON",
+    )
+    common_parser.add_argument(
+        "--include-sensitive",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Include raw sensitive KYC data and tokens in JSON output (default: false)",
     )
     common_parser.add_argument(
         "--debug",
@@ -342,8 +682,8 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common_parser],
     )
     doctor_parser.add_argument(
-        "--secret",
-        help="Optional webhook secret to inspect (defaults to DIDIT_WEBHOOK_SECRET)",
+        "--secret-file",
+        help="Path to file containing webhook secret to inspect (defaults to DIDIT_WEBHOOK_SECRET)",
     )
     doctor_parser.set_defaults(func=_cmd_doctor)
 
@@ -356,16 +696,33 @@ def build_parser() -> argparse.ArgumentParser:
     webhook_verify = webhook_subparsers.add_parser(
         "verify", help="Verify raw webhook signature and timestamp", parents=[common_parser]
     )
-    webhook_verify.add_argument("--secret", required=True, help="Didit webhook secret key")
+    webhook_verify.add_argument(
+        "--secret-file",
+        help="Path to file containing Didit webhook secret (defaults to DIDIT_WEBHOOK_SECRET)",
+    )
     webhook_verify.add_argument("--signature", required=True, help="Value of X-Signature-V2 header")
     webhook_verify.add_argument("--timestamp", required=True, help="Value of X-Timestamp header")
-    webhook_verify.add_argument("--body", help="Raw JSON webhook payload string")
-    webhook_verify.add_argument("--body-file", help="Path to file containing raw JSON body")
+
+    body_group = webhook_verify.add_mutually_exclusive_group()
+    body_group.add_argument("--body-file", help="Path to file containing raw JSON body")
+    body_group.add_argument(
+        "--stdin", action="store_true", help="Read raw JSON body from standard input"
+    )
+
     webhook_verify.add_argument(
         "--tolerance",
-        default=str(DEFAULT_WEBHOOK_MAX_AGE_SECONDS),
+        type=int,
+        default=DEFAULT_WEBHOOK_MAX_AGE_SECONDS,
         help=(
-            f"Maximum age in seconds (default {DEFAULT_WEBHOOK_MAX_AGE_SECONDS}, 0 disables check)"
+            f"Maximum age in seconds (positive integer, default {DEFAULT_WEBHOOK_MAX_AGE_SECONDS})"
+        ),
+    )
+    webhook_verify.add_argument(
+        "--skip-freshness-check",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=(
+            "Disable timestamp freshness check and verify cryptographic signature authenticity only"
         ),
     )
     webhook_verify.set_defaults(func=_cmd_webhook_verify)
@@ -402,11 +759,38 @@ def build_parser() -> argparse.ArgumentParser:
     session_create.add_argument("--lang", help="Optional UI language code (e.g. 'es', 'en')")
     session_create.set_defaults(func=_cmd_session_create)
 
+    # didit session resubmit
+    session_resubmit = session_subparsers.add_parser(
+        "resubmit",
+        help="Request document or biometric resubmission for an existing session",
+        parents=[common_parser],
+    )
+    session_resubmit.add_argument("session_id", help="Didit session identifier")
+    session_resubmit.add_argument(
+        "--nodes",
+        nargs="*",
+        help="Optional workflow step/node keys to resubmit (e.g. 'document', 'liveness')",
+    )
+    session_resubmit.set_defaults(func=_cmd_session_resubmit)
+
     # didit session list
     session_list = session_subparsers.add_parser(
         "list", help="List verification sessions", parents=[common_parser]
     )
-    session_list.add_argument("--limit", type=int, default=10, help="Maximum sessions to list")
+    session_list.add_argument("--limit", type=int, default=10, help="Maximum sessions per page")
+    session_list.add_argument("--offset", type=int, default=0, help="Pagination offset")
+    session_list.add_argument(
+        "--all",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Iterate over all pages up to --max-sessions limit",
+    )
+    session_list.add_argument(
+        "--max-sessions",
+        type=int,
+        default=500,
+        help="Maximum total sessions to collect when --all is set (default: 500)",
+    )
     session_list.add_argument("--status", help="Filter by status")
     session_list.add_argument("--country", help="Filter by 3-letter country code")
     session_list.add_argument("--vendor-data", help="Filter by vendor reference")
@@ -421,13 +805,39 @@ def build_parser() -> argparse.ArgumentParser:
     session_pdf.add_argument(
         "-o", "--output", help="Output file path (defaults to <session_id>.pdf)"
     )
+    session_pdf.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Overwrite destination file if it already exists",
+    )
     session_pdf.set_defaults(func=_cmd_session_pdf)
+
+    # didit sandbox
+    sandbox_parser = subparsers.add_parser(
+        "sandbox", help="Sandbox testing and scenario catalog", parents=[common_parser]
+    )
+    sandbox_subparsers = sandbox_parser.add_subparsers(dest="sandbox_subcommand")
+
+    # didit sandbox scenarios
+    sandbox_scenarios = sandbox_subparsers.add_parser(
+        "scenarios",
+        help="Explore available sandbox testing scenario slugs",
+        parents=[common_parser],
+    )
+    sandbox_scenarios.add_argument(
+        "--category",
+        choices=["success", "decline", "review", "resubmit"],
+        help="Filter scenarios by category outcome",
+    )
+    sandbox_scenarios.set_defaults(func=_cmd_sandbox_scenarios)
 
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Main CLI entry point."""
+    """Main CLI entry point with universal error and JSON handling."""
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
@@ -438,14 +848,32 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
 
+    is_json = getattr(args, "json", False)
+    debug = getattr(args, "debug", False)
+
     try:
         return int(args.func(args))
-    except Exception as exc:
-        if getattr(args, "debug", False):
+    except DiditConfigurationError as exc:
+        return _emit_error("CONFIGURATION_ERROR", str(exc), is_json=is_json)
+    except DiditAuthenticationError as exc:
+        return _emit_error("AUTHENTICATION_FAILED", str(exc), is_json=is_json)
+    except DiditPermissionError as exc:
+        return _emit_error("PERMISSION_DENIED", str(exc), is_json=is_json)
+    except DiditNotFoundError as exc:
+        return _emit_error("NOT_FOUND", str(exc), is_json=is_json)
+    except DiditConnectionError as exc:
+        return _emit_error("CONNECTION_ERROR", str(exc), is_json=is_json)
+    except DiditSignatureError as exc:
+        return _emit_error("SIGNATURE_VERIFICATION_FAILED", str(exc), is_json=is_json)
+    except Exception:
+        if debug:
             traceback.print_exc(file=sys.stderr)
-        else:
-            sys.stderr.write(f"Error: {exc}\n")
-        return 1
+            return 1
+        return _emit_error(
+            "INTERNAL_ERROR",
+            "An unexpected error occurred. Use --debug for details.",
+            is_json=is_json,
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

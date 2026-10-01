@@ -1209,3 +1209,106 @@ class TestDiditSyncClient:
     def test_generate_pdf_report_invalid_session_id(self, client: Didit, invalid_id: str) -> None:
         with pytest.raises(ValueError, match="session_id must not be empty"):
             client.sessions.generate_pdf_report(invalid_id)
+
+    @respx.mock
+    def test_generate_pdf_report_invalid_mime_and_magic(self, client: Didit, base_url: str) -> None:
+        # Server returns 200 HTML error page instead of PDF
+        respx.get(f"{base_url}/session/sess_bad_pdf/generate-pdf/").mock(
+            return_value=Response(
+                200, content=b"<html>Error occurred</html>", headers={"Content-Type": "text/html"}
+            )
+        )
+        with pytest.raises(DiditAPIError, match="Invalid PDF report response"):
+            client.sessions.generate_pdf_report("sess_bad_pdf")
+
+    @respx.mock
+    def test_generate_pdf_report_custom_timeout(self, client: Didit, base_url: str) -> None:
+        from didit.transport import RequestOptions
+
+        pdf_bytes = b"%PDF-1.4 custom timeout pdf"
+        route = respx.get(f"{base_url}/session/sess_custom_timeout/generate-pdf/").mock(
+            return_value=Response(
+                200, content=pdf_bytes, headers={"Content-Type": "application/pdf"}
+            )
+        )
+        opts = RequestOptions(timeout=120.0)
+        res = client.sessions.generate_pdf_report("sess_custom_timeout", options=opts)
+        assert res == pdf_bytes
+        assert route.called
+
+    @respx.mock
+    def test_resubmit_success(self, client: Didit, base_url: str) -> None:
+        route = respx.patch(f"{base_url}/session/sess_resub_1/update-status/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "session_id": "sess_resub_1",
+                    "status": "Resubmitted",
+                    "resubmit_info": {"steps": ["document"]},
+                },
+            )
+        )
+
+        res = client.sessions.resubmit("sess_resub_1")
+        assert res.session_id == "sess_resub_1"
+        assert res.status == SessionStatus.RESUBMITTED
+        assert res.requires_resubmission is True
+        assert route.called
+        sent = json.loads(route.calls[0].request.content)
+        assert sent["new_status"] == "Resubmitted"
+        assert "nodes_to_resubmit" not in sent
+
+    @respx.mock
+    def test_resubmit_with_nodes(self, client: Didit, base_url: str) -> None:
+        route = respx.patch(f"{base_url}/session/sess_resub_2/update-status/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "session_id": "sess_resub_2",
+                    "status": "Resubmitted",
+                    "resubmit_info": {"nodes": ["document", "liveness"]},
+                },
+            )
+        )
+
+        res = client.sessions.resubmit("sess_resub_2", nodes_to_resubmit=["document", "liveness"])
+        assert res.session_id == "sess_resub_2"
+        assert res.status == SessionStatus.RESUBMITTED
+        assert res.requires_resubmission is True
+        sent = json.loads(route.calls[0].request.content)
+        assert sent["new_status"] == "Resubmitted"
+        assert sent["nodes_to_resubmit"] == ["document", "liveness"]
+
+    @pytest.mark.parametrize("invalid_id", ["", "   "])
+    def test_resubmit_invalid_session_id(self, client: Didit, invalid_id: str) -> None:
+        with pytest.raises(ValueError, match="session_id must not be empty"):
+            client.sessions.resubmit(invalid_id)
+
+    @respx.mock
+    def test_update_status_custom(self, client: Didit, base_url: str) -> None:
+        route = respx.patch(f"{base_url}/session/sess_custom_status/update-status/").mock(
+            return_value=Response(
+                200,
+                json={
+                    "session_id": "sess_custom_status",
+                    "status": "In Review",
+                },
+            )
+        )
+
+        res = client.sessions.update_status("sess_custom_status", SessionStatus.IN_REVIEW)
+        assert res.status == SessionStatus.IN_REVIEW
+        sent = json.loads(route.calls[0].request.content)
+        assert sent["new_status"] == "In Review"
+
+    @respx.mock
+    def test_pdf_report_options_timeout_none(self, client: Didit, base_url: str) -> None:
+        from didit.transport import RequestOptions
+
+        respx.get(f"{base_url}/session/sess_pdf_opt/generate-pdf/").mock(
+            return_value=Response(200, content=b"%PDF-1.4 sample content")
+        )
+        pdf = client.sessions.generate_pdf_report(
+            "sess_pdf_opt", options=RequestOptions(timeout=None)
+        )
+        assert pdf.startswith(b"%PDF-")
