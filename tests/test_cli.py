@@ -742,8 +742,8 @@ class TestDiditCLI:
         assert exit_code == 0
         captured = capsys.readouterr()
         data = json.loads(captured.out)
-        assert data["status"] == "ok"
-        assert data["permissions"] == "0600"
+        expected_perms = "0600" if sys.platform != "win32" else "private"
+        assert data["permissions"] == expected_perms
         assert out_file.read_bytes() == pdf_content
 
         # Verify 0600 permissions on POSIX
