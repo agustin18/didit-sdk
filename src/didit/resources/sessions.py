@@ -40,7 +40,7 @@ from didit.models.session import (
     SessionResponse,
     SessionStateSource,
 )
-from didit.transport import RequestOptions, _AsyncRequestor, _SyncRequestor
+from didit.transport import RequestOptions, _AsyncRequestor, _atomic_publish, _SyncRequestor
 
 if TYPE_CHECKING:
     import httpx
@@ -95,8 +95,11 @@ def _secure_write_bytes(dest_path: Path, data: bytes, *, force: bool = False) ->
         with os.fdopen(tmp_fd, "wb") as f:
             fd_closed = True
             f.write(data)
+            f.flush()
+            with contextlib.suppress(AttributeError, OSError):
+                os.fsync(f.fileno())
 
-        tmp_path.replace(dest_path)
+        _atomic_publish(tmp_path, dest_path, force=force)
         with contextlib.suppress(AttributeError, OSError):
             os.chmod(dest_path, 0o600)
     except Exception:
@@ -251,7 +254,10 @@ class SessionsResource:
             session_id: The unique identifier of the verification session.
             new_status: The target status ('Approved', 'Declined', 'Resubmitted',
                 or SessionStatus enum).
-            nodes_to_resubmit: Optional list of upstream workflow node IDs to resubmit.
+            nodes_to_resubmit: Optional list of exact upstream workflow node IDs to resubmit
+                as returned by Didit for the session (e.g. ['document-verification-node',
+                'face-liveness-node']). Warning codes, risk labels, or descriptions are NOT
+                valid node IDs.
             options: Optional per-request HTTP options.
 
         Returns:
@@ -286,9 +292,10 @@ class SessionsResource:
 
         Args:
             session_id: The unique identifier of the verification session.
-            nodes_to_resubmit: Optional list of upstream workflow step node IDs to resubmit
-                (e.g. ['document-verification-node', 'face-liveness-node']), matching
-                workflow studio step keys or decision warnings.
+            nodes_to_resubmit: Optional list of exact upstream workflow node IDs to resubmit
+                as returned by Didit for the session (e.g. ['document-verification-node',
+                'face-liveness-node']). Warning codes, risk labels, or descriptions are NOT
+                valid node IDs; supply the exact IDs returned for the session.
             options: Optional per-request HTTP options.
 
         Returns:
@@ -641,10 +648,11 @@ class SessionsResource:
         force: bool = False,
         options: RequestOptions | None = None,
     ) -> Path:
-        """Download compliance PDF report and save securely to disk with private permissions.
+        """Download compliance PDF report directly to disk via streaming with private permissions.
 
-        Invokes GET /v3/session/{session_id}/generate-pdf/ and atomically writes
-        binary content to destination enforcing private (0600 on POSIX) permissions.
+        Streams chunks directly from GET /v3/session/{session_id}/generate-pdf/ to an atomic
+        temporary file, validating format headers and enforcing private (0600 on POSIX)
+        permissions without buffering the entire document in memory.
 
         Args:
             session_id: The unique identifier of the verification session.
@@ -661,10 +669,33 @@ class SessionsResource:
             DiditNotFoundError: If session does not exist.
             DiditAPIError: If remote endpoint returns an error or invalid PDF format.
         """
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty or whitespace.")
+
         dest_path = Path(destination).resolve()
-        pdf_bytes = self.generate_pdf_report(session_id, options=options)
-        _secure_write_bytes(dest_path, pdf_bytes, force=force)
-        return dest_path
+        if dest_path.exists() and not force:
+            raise FileExistsError(f"File '{dest_path}' already exists. Use --force to overwrite.")
+
+        if options is None:
+            eff_options = RequestOptions(timeout=60.0)
+        elif options.timeout is None:
+            eff_options = RequestOptions(
+                idempotency_key=options.idempotency_key,
+                timeout=60.0,
+                max_retries=options.max_retries,
+                headers=options.headers,
+                deadline=options.deadline,
+            )
+        else:
+            eff_options = options
+
+        return self._requestor.stream_download(
+            f"/session/{session_id.strip()}/generate-pdf/",
+            dest_path,
+            force=force,
+            options=eff_options,
+            validate_pdf=True,
+        )
 
     def poll_decision(
         self,
@@ -823,6 +854,16 @@ class AsyncSessionsResource:
         Endpoint: PATCH /v3/session/{session_id}/update-status/
         Restricted by upstream Didit contract to manual reviewer transitions:
         'Approved', 'Declined', or 'Resubmitted'.
+
+        Args:
+            session_id: The unique identifier of the verification session.
+            new_status: The target status ('Approved', 'Declined', 'Resubmitted',
+                or SessionStatus enum).
+            nodes_to_resubmit: Optional list of exact upstream workflow node IDs to resubmit
+                as returned by Didit for the session (e.g. ['document-verification-node',
+                'face-liveness-node']). Warning codes, risk labels, or descriptions are NOT
+                valid node IDs.
+            options: Optional per-request HTTP options.
         """
         if not session_id or not session_id.strip():
             raise ValueError("session_id must not be empty")
@@ -853,9 +894,10 @@ class AsyncSessionsResource:
 
         Args:
             session_id: The unique identifier of the verification session.
-            nodes_to_resubmit: Optional list of upstream workflow step node IDs to resubmit
-                (e.g. ['document-verification-node', 'face-liveness-node']), matching
-                workflow studio step keys or decision warnings.
+            nodes_to_resubmit: Optional list of exact upstream workflow node IDs to resubmit
+                as returned by Didit for the session (e.g. ['document-verification-node',
+                'face-liveness-node']). Warning codes, risk labels, or descriptions are NOT
+                valid node IDs; supply the exact IDs returned for the session.
             options: Optional per-request HTTP options.
 
         Returns:
@@ -1199,10 +1241,11 @@ class AsyncSessionsResource:
         force: bool = False,
         options: RequestOptions | None = None,
     ) -> Path:
-        """Download compliance PDF report asynchronously and save securely to disk.
+        """Download compliance PDF report asynchronously directly to disk via streaming.
 
-        Invokes GET /v3/session/{session_id}/generate-pdf/ and atomically writes
-        binary content to destination enforcing private (0600 on POSIX) permissions.
+        Streams chunks directly from GET /v3/session/{session_id}/generate-pdf/ to an atomic
+        temporary file, validating format headers and enforcing private (0600 on POSIX)
+        permissions without buffering the entire document in memory.
 
         Args:
             session_id: The unique identifier of the verification session.
@@ -1219,10 +1262,33 @@ class AsyncSessionsResource:
             DiditNotFoundError: If session does not exist.
             DiditAPIError: If remote endpoint returns an error or invalid PDF format.
         """
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty or whitespace.")
+
         dest_path = Path(destination).resolve()
-        pdf_bytes = await self.generate_pdf_report(session_id, options=options)
-        await asyncio.to_thread(_secure_write_bytes, dest_path, pdf_bytes, force=force)
-        return dest_path
+        if dest_path.exists() and not force:
+            raise FileExistsError(f"File '{dest_path}' already exists. Use --force to overwrite.")
+
+        if options is None:
+            eff_options = RequestOptions(timeout=60.0)
+        elif options.timeout is None:
+            eff_options = RequestOptions(
+                idempotency_key=options.idempotency_key,
+                timeout=60.0,
+                max_retries=options.max_retries,
+                headers=options.headers,
+                deadline=options.deadline,
+            )
+        else:
+            eff_options = options
+
+        return await self._requestor.astream_download(
+            f"/session/{session_id.strip()}/generate-pdf/",
+            dest_path,
+            force=force,
+            options=eff_options,
+            validate_pdf=True,
+        )
 
     adownload_pdf_report = download_pdf_report
 

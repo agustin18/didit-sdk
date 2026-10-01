@@ -591,8 +591,11 @@ class TestDiditSyncClient:
     )
     def test_client_config_mutual_exclusivity(self, kwargs: dict[str, object]) -> None:
         cfg = DiditConfig(api_key="cfg_key")
-        with pytest.raises(DiditConfigurationError, match="Cannot combine `config`"):
-            Didit(config=cfg, **kwargs)
+        with pytest.deprecated_call(
+            match="Passing explicit configuration arguments alongside `config`"
+        ):
+            client = Didit(config=cfg, **kwargs)
+        assert client.config.api_key == "cfg_key"
 
     @respx.mock
     def test_rate_limit_error_retry_after(self, client: Didit, base_url: str) -> None:
@@ -1413,3 +1416,26 @@ class TestDiditSyncClient:
         )
         assert saved_overwrite == target.resolve()
         assert target.read_bytes() == new_pdf_content
+
+        # 4. Empty/whitespace session_id raises ValueError
+        with pytest.raises(ValueError, match="session_id must not be empty or whitespace"):
+            client.sessions.download_pdf_report("", target)
+        with pytest.raises(ValueError, match="session_id must not be empty or whitespace"):
+            client.sessions.download_pdf_report("   ", target)
+
+        # 5. Options branches (timeout=None and explicit timeout)
+        target_opt1 = tmp_path / "opt1.pdf"
+        target_opt2 = tmp_path / "opt2.pdf"
+        respx.get(f"{base_url}/session/sess_opt/generate-pdf/").mock(
+            return_value=Response(
+                200, content=pdf_content, headers={"Content-Type": "application/pdf"}
+            )
+        )
+        client.sessions.download_pdf_report(
+            "sess_opt", target_opt1, options=RequestOptions(idempotency_key="opt_key")
+        )
+        client.sessions.download_pdf_report(
+            "sess_opt", target_opt2, options=RequestOptions(timeout=25.0)
+        )
+        assert target_opt1.is_file()
+        assert target_opt2.is_file()

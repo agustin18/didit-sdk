@@ -1,6 +1,12 @@
 name: Live Contract & Sandbox Matrix
 
 on:
+  pull_request:
+    paths:
+      - "src/didit/**"
+      - "tests/test_contract_matrix.py"
+      - "tests/test_v020_compatibility.py"
+      - ".github/workflows/live-contract.yml"
   workflow_dispatch:
     inputs:
       scenario:
@@ -36,7 +42,21 @@ jobs:
         run: uv sync --extra dev
 
       - name: Run Contract Matrix Tests
-        run: uv run pytest tests/test_contract_matrix.py tests/test_v020_compatibility.py -v
+        env:
+          DIDIT_SCENARIO_INPUT: ${{ github.event.inputs.scenario || 'all' }}
+        run: |
+          if [ "${DIDIT_SCENARIO_INPUT}" != "all" ] && [ -n "${DIDIT_SCENARIO_INPUT}" ]; then
+            uv run pytest tests/test_contract_matrix.py tests/test_v020_compatibility.py -k "${DIDIT_SCENARIO_INPUT}" -v
+          else
+            uv run pytest tests/test_contract_matrix.py tests/test_v020_compatibility.py -v
+          fi
 
       - name: Verify CLI Sandbox Scenarios
-        run: uv run didit sandbox scenarios --json
+        env:
+          DIDIT_API_KEY: ${{ secrets.DIDIT_API_KEY }}
+        run: |
+          if [ -n "${DIDIT_API_KEY}" ]; then
+            uv run didit sandbox scenarios --strict --json
+          else
+            uv run didit sandbox scenarios --json
+          fi

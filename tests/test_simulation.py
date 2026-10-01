@@ -172,6 +172,11 @@ class TestSimulatedDidit:
         with pytest.raises(FileExistsError):
             client.sessions.download_pdf_report(s.session_id, dest, force=False)
 
+        with pytest.raises(ValueError, match="session_id must not be empty"):
+            client.sessions.download_pdf_report("", dest)
+        with pytest.raises(ValueError, match="session_id must not be empty"):
+            client.sessions.download_pdf_report("   ", dest)
+
         saved_force = client.sessions.download_pdf_report(s.session_id, dest, force=True)
         assert saved_force == dest.resolve()
 
@@ -762,6 +767,11 @@ class TestSimulatedAsyncDidit:
 
         with pytest.raises(FileExistsError):
             await client.sessions.download_pdf_report(s.session_id, dest, force=False)
+
+        with pytest.raises(ValueError, match="session_id must not be empty"):
+            await client.sessions.download_pdf_report("", dest)
+        with pytest.raises(ValueError, match="session_id must not be empty"):
+            await client.sessions.download_pdf_report("   ", dest)
 
         saved_force = await client.sessions.adownload_pdf_report(s.session_id, dest, force=True)
         assert saved_force == dest.resolve()

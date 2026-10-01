@@ -241,21 +241,35 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     health_url = f"{origin}/system/healthcheck/"
 
     conn_ok = False
+    conn_err_reason: str | None = None
     start_time = time.monotonic()
     try:
         with httpx.Client(timeout=10.0) as http_client:
             health_resp = http_client.get(health_url)
             latency_ms = (time.monotonic() - start_time) * 1000.0
-            conn_ok = health_resp.is_success
-    except (httpx.ConnectError, httpx.TimeoutException):
-        return _emit_error(
-            "CONNECTION_ERROR",
-            f"Failed to connect to Didit system at {origin}. Check network connectivity.",
-            is_json=is_json,
-        )
-    except Exception:
+            if health_resp.status_code == 200:
+                conn_ok = True
+            else:
+                conn_ok = False
+                conn_err_reason = f"HTTP {health_resp.status_code}"
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
         latency_ms = (time.monotonic() - start_time) * 1000.0
         conn_ok = False
+        conn_err_reason = str(exc) or "Network connection failed"
+    except Exception as exc:
+        latency_ms = (time.monotonic() - start_time) * 1000.0
+        conn_ok = False
+        conn_err_reason = str(exc) or "Unexpected healthcheck error"
+
+    strict = getattr(args, "strict", False)
+    if strict and not conn_ok:
+        msg = f"Healthcheck probe unavailable at {health_url} ({conn_err_reason})"
+        return _emit_error(
+            "CONNECTIVITY_UNAVAILABLE",
+            msg,
+            is_json=is_json,
+            exit_code=1,
+        )
 
     # 2. Authentication Probe (verifying permissions without reading user KYC data)
     try:
@@ -288,14 +302,6 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             "PROBE_FAILED",
             "Authentication verification probe failed.",
             is_json=is_json,
-        )
-
-    if getattr(args, "strict", False) and not conn_ok:
-        return _emit_error(
-            "CONNECTIVITY_UNAVAILABLE",
-            f"Healthcheck probe unavailable at {health_url}",
-            is_json=is_json,
-            exit_code=1,
         )
 
     payload: dict[str, Any] = {
@@ -653,6 +659,7 @@ def _cmd_sandbox_scenarios(args: argparse.Namespace) -> int:
     """List available Didit sandbox testing scenarios."""
     is_json = getattr(args, "json", False)
     category = getattr(args, "category", None)
+    strict = getattr(args, "strict", False)
 
     base_url = (
         getattr(args, "base_url", None) or os.environ.get("DIDIT_BASE_URL") or DEFAULT_BASE_URL
@@ -661,10 +668,21 @@ def _cmd_sandbox_scenarios(args: argparse.Namespace) -> int:
     origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
     live_url = f"{origin}/v1/sandbox/scenarios/"
 
+    api_key: str | None = None
+    try:
+        api_key = _resolve_api_key(args)
+    except DiditConfigurationError:
+        api_key = None
+
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
     scenarios = SANDBOX_SCENARIOS
+    remote_error: str | None = None
     try:
         with httpx.Client(timeout=5.0) as http_client:
-            resp = http_client.get(live_url)
+            resp = http_client.get(live_url, headers=headers)
             if resp.is_success:
                 data = resp.json()
                 if isinstance(data, list):
@@ -675,8 +693,20 @@ def _cmd_sandbox_scenarios(args: argparse.Namespace) -> int:
                     and isinstance(data["scenarios"], list)
                 ):
                     scenarios = data["scenarios"]
-    except Exception:
-        scenarios = SANDBOX_SCENARIOS
+                else:
+                    remote_error = "Invalid format returned by remote sandbox scenarios endpoint"
+            else:
+                remote_error = f"HTTP {resp.status_code} returned by remote endpoint"
+    except Exception as exc:
+        remote_error = str(exc) or "Network connection failed"
+
+    if strict and remote_error:
+        return _emit_error(
+            "CONNECTIVITY_UNAVAILABLE",
+            f"Remote sandbox scenarios catalog unavailable at {live_url}: {remote_error}",
+            is_json=is_json,
+            exit_code=1,
+        )
 
     if category:
         scenarios = [s for s in scenarios if s.get("category") == category]
@@ -860,7 +890,10 @@ def build_parser() -> argparse.ArgumentParser:
     session_resubmit.add_argument(
         "--nodes",
         nargs="*",
-        help="Optional workflow step/node keys to resubmit (e.g. 'document', 'liveness')",
+        help=(
+            "Optional exact upstream workflow node IDs to resubmit "
+            "(e.g. 'document-verification-node', 'face-liveness-node')"
+        ),
     )
     session_resubmit.set_defaults(func=_cmd_session_resubmit)
 
@@ -923,6 +956,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--category",
         choices=["success", "decline", "review"],
         help="Filter scenarios by category outcome",
+    )
+    sandbox_scenarios.add_argument(
+        "--strict",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Fail-closed if remote sandbox scenarios catalog is unreachable",
     )
     sandbox_scenarios.set_defaults(func=_cmd_sandbox_scenarios)
 

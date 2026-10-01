@@ -613,7 +613,11 @@ class SimulatedSessionsResource:
         options: Any = None,
     ) -> Path:
         """Download simulated compliance PDF report and save securely to disk."""
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty")
         dest_path = Path(destination).resolve()
+        if dest_path.exists() and not force:
+            raise FileExistsError(f"File '{dest_path}' already exists. Use --force to overwrite.")
         pdf_bytes = self.generate_pdf_report(session_id)
         _secure_write_bytes(dest_path, pdf_bytes, force=force)
         return dest_path
@@ -922,7 +926,11 @@ class SimulatedAsyncSessionsResource:
         options: Any = None,
     ) -> Path:
         """Download simulated compliance PDF report asynchronously and save securely to disk."""
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty")
         dest_path = Path(destination).resolve()
+        if dest_path.exists() and not force:
+            raise FileExistsError(f"File '{dest_path}' already exists. Use --force to overwrite.")
         pdf_bytes = await self.generate_pdf_report(session_id)
         await asyncio.to_thread(_secure_write_bytes, dest_path, pdf_bytes, force=force)
         return dest_path

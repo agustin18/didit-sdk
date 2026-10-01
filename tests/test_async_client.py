@@ -640,8 +640,11 @@ class TestAsyncDiditClient:
     )
     def test_async_client_config_mutual_exclusivity(self, kwargs: dict[str, object]) -> None:
         cfg = DiditConfig(api_key="cfg_key")
-        with pytest.raises(DiditConfigurationError, match="Cannot combine `config`"):
-            AsyncDidit(config=cfg, **kwargs)
+        with pytest.deprecated_call(
+            match="Passing explicit configuration arguments alongside `config`"
+        ):
+            async_client = AsyncDidit(config=cfg, **kwargs)
+        assert async_client.config.api_key == "cfg_key"
 
     @respx.mock
     async def test_rate_limit_error_retry_after(
@@ -1582,4 +1585,28 @@ class TestAsyncDiditClient:
         )
         assert saved_overwrite == target.resolve()
         assert target.read_bytes() == new_pdf_content
+
+        # 4. Empty/whitespace session_id raises ValueError
+        with pytest.raises(ValueError, match="session_id must not be empty or whitespace"):
+            await async_client.sessions.download_pdf_report("", target)
+        with pytest.raises(ValueError, match="session_id must not be empty or whitespace"):
+            await async_client.sessions.download_pdf_report("   ", target)
+
+        # 5. Options branches (timeout=None and explicit timeout)
+        target_opt1 = tmp_path / "async_opt1.pdf"
+        target_opt2 = tmp_path / "async_opt2.pdf"
+        respx.get(f"{base_url}/session/sess_async_opt/generate-pdf/").mock(
+            return_value=Response(
+                200, content=pdf_content, headers={"Content-Type": "application/pdf"}
+            )
+        )
+        await async_client.sessions.download_pdf_report(
+            "sess_async_opt", target_opt1, options=RequestOptions(idempotency_key="opt_key")
+        )
+        await async_client.sessions.download_pdf_report(
+            "sess_async_opt", target_opt2, options=RequestOptions(timeout=25.0)
+        )
+        assert target_opt1.is_file()
+        assert target_opt2.is_file()
+
         await async_client.aclose()

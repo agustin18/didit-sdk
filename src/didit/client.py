@@ -48,10 +48,13 @@ class Didit:
                 or webhook_secret is not None
                 or capture_sensitive_response is not None
             ):
-                raise DiditConfigurationError(
-                    "Cannot combine `config` with explicit configuration arguments "
-                    "(api_key, base_url, timeout, max_retries, webhook_secret, "
-                    "capture_sensitive_response). Pass either `config` or explicit arguments."
+                import warnings
+
+                warnings.warn(
+                    "Passing explicit configuration arguments alongside `config` is deprecated "
+                    "and ignored; `config` takes precedence.",
+                    DeprecationWarning,
+                    stacklevel=2,
                 )
             self._config = config
         else:
@@ -212,10 +215,13 @@ class AsyncDidit:
                 or webhook_secret is not None
                 or capture_sensitive_response is not None
             ):
-                raise DiditConfigurationError(
-                    "Cannot combine `config` with explicit configuration arguments "
-                    "(api_key, base_url, timeout, max_retries, webhook_secret, "
-                    "capture_sensitive_response). Pass either `config` or explicit arguments."
+                import warnings
+
+                warnings.warn(
+                    "Passing explicit configuration arguments alongside `config` is deprecated "
+                    "and ignored; `config` takes precedence.",
+                    DeprecationWarning,
+                    stacklevel=2,
                 )
             self._config = config
         else:

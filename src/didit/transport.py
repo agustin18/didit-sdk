@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
 import random
+import tempfile
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -14,6 +18,7 @@ import httpx
 
 from didit._version import __version__
 from didit.errors import (
+    DiditAPIError,
     DiditConfigurationError,
     DiditConnectionError,
     DiditPoolTimeoutError,
@@ -174,6 +179,29 @@ def _merge_options(
         headers=headers or None,
         deadline=override.deadline if override.deadline is not None else base.deadline,
     )
+
+
+def _atomic_publish(tmp_path: Path, dest_path: Path, *, force: bool = False) -> None:
+    """Atomically publish temporary file to destination path without TOCTOU overwrite."""
+    if force:
+        tmp_path.replace(dest_path)
+        return
+
+    try:
+        os.link(tmp_path, dest_path)
+        tmp_path.unlink(missing_ok=True)
+    except FileExistsError as err:
+        tmp_path.unlink(missing_ok=True)
+        raise FileExistsError(
+            f"File '{dest_path}' already exists. Use --force to overwrite."
+        ) from err
+    except (AttributeError, NotImplementedError, OSError) as exc:
+        if dest_path.exists():
+            tmp_path.unlink(missing_ok=True)
+            raise FileExistsError(
+                f"File '{dest_path}' already exists. Use --force to overwrite."
+            ) from exc
+        tmp_path.replace(dest_path)
 
 
 class _SyncRequestor:
@@ -421,6 +449,102 @@ class _SyncRequestor:
                 raise DiditConnectionError(
                     f"Network error during transmission: {exc}"
                 ) from _resolve_cause(exc, self._capture_sensitive_response)
+
+    def stream_download(
+        self,
+        path: str,
+        dest_path: Path,
+        *,
+        force: bool = False,
+        options: RequestOptions | None = None,
+        validate_pdf: bool = True,
+    ) -> Path:
+        """Stream HTTP GET response directly to disk enforcing bounded memory
+        and private permissions.
+        """
+        dest_path = dest_path.resolve()
+        if dest_path.exists() and not force:
+            raise FileExistsError(f"File '{dest_path}' already exists. Use --force to overwrite.")
+
+        dest_dir = dest_path.parent
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        effective_opts = _merge_options(self._default_options, options)
+        url = _resolve_url(self._base_url, path)
+        headers = _build_headers(self._api_key, effective_opts)
+        timeout = (
+            effective_opts.timeout
+            if (effective_opts and effective_opts.timeout is not None)
+            else self._default_timeout
+        )
+
+        tmp_fd, tmp_path_str = tempfile.mkstemp(dir=dest_dir, prefix=".didit_tmp_")
+        tmp_path = Path(tmp_path_str)
+        fd_closed = False
+        try:
+            with contextlib.suppress(AttributeError, OSError):
+                os.fchmod(tmp_fd, 0o600)
+
+            with self._client.stream(
+                "GET",
+                url,
+                headers=headers,
+                timeout=timeout,
+                follow_redirects=False,
+            ) as response:
+                if response.status_code >= 400:
+                    response.read()
+                    handle_http_error(
+                        response,
+                        capture_sensitive_response=self._capture_sensitive_response,
+                    )
+
+                if validate_pdf:
+                    content_type_lower = response.headers.get("content-type", "").lower()
+                    mime_ok = (
+                        "application/pdf" in content_type_lower
+                        or "application/octet-stream" in content_type_lower
+                    )
+                    if not mime_ok:
+                        raise DiditAPIError(
+                            "Invalid PDF report response received from server",
+                            status_code=502,
+                        )
+
+                with os.fdopen(tmp_fd, "wb") as f:
+                    fd_closed = True
+                    first_chunk = True
+                    for chunk in response.iter_bytes(chunk_size=65536):
+                        if first_chunk:
+                            if validate_pdf and not chunk.startswith(b"%PDF-"):
+                                raise DiditAPIError(
+                                    "Invalid PDF report response received from server",
+                                    status_code=502,
+                                )
+                            first_chunk = False
+                        f.write(chunk)
+
+                    if first_chunk and validate_pdf:
+                        raise DiditAPIError(
+                            "Invalid PDF report response received from server",
+                            status_code=502,
+                        )
+
+                    f.flush()
+                    with contextlib.suppress(AttributeError, OSError):
+                        os.fsync(f.fileno())
+
+            _atomic_publish(tmp_path, dest_path, force=force)
+            with contextlib.suppress(AttributeError, OSError):
+                os.chmod(dest_path, 0o600)
+            return dest_path
+        except Exception:
+            if not fd_closed:
+                with contextlib.suppress(OSError):
+                    os.close(tmp_fd)
+            with contextlib.suppress(OSError):
+                tmp_path.unlink(missing_ok=True)
+            raise
 
 
 class _AsyncRequestor:
@@ -685,3 +809,97 @@ class _AsyncRequestor:
                 raise DiditConnectionError(
                     f"Network error during transmission: {exc}"
                 ) from _resolve_cause(exc, self._capture_sensitive_response)
+
+    async def astream_download(
+        self,
+        path: str,
+        dest_path: Path,
+        *,
+        force: bool = False,
+        options: RequestOptions | None = None,
+        validate_pdf: bool = True,
+    ) -> Path:
+        """Stream HTTP GET response asynchronously directly to disk."""
+        dest_path = dest_path.resolve()
+        if dest_path.exists() and not force:
+            raise FileExistsError(f"File '{dest_path}' already exists. Use --force to overwrite.")
+
+        dest_dir = dest_path.parent
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        effective_opts = _merge_options(self._default_options, options)
+        url = _resolve_url(self._base_url, path)
+        headers = _build_headers(self._api_key, effective_opts)
+        timeout = (
+            effective_opts.timeout
+            if (effective_opts and effective_opts.timeout is not None)
+            else self._default_timeout
+        )
+
+        tmp_fd, tmp_path_str = tempfile.mkstemp(dir=dest_dir, prefix=".didit_tmp_")
+        tmp_path = Path(tmp_path_str)
+        fd_closed = False
+        try:
+            with contextlib.suppress(AttributeError, OSError):
+                os.fchmod(tmp_fd, 0o600)
+
+            async with self._client.stream(
+                "GET",
+                url,
+                headers=headers,
+                timeout=timeout,
+                follow_redirects=False,
+            ) as response:
+                if response.status_code >= 400:
+                    await response.aread()
+                    handle_http_error(
+                        response,
+                        capture_sensitive_response=self._capture_sensitive_response,
+                    )
+
+                if validate_pdf:
+                    content_type_lower = response.headers.get("content-type", "").lower()
+                    mime_ok = (
+                        "application/pdf" in content_type_lower
+                        or "application/octet-stream" in content_type_lower
+                    )
+                    if not mime_ok:
+                        raise DiditAPIError(
+                            "Invalid PDF report response received from server",
+                            status_code=502,
+                        )
+
+                with os.fdopen(tmp_fd, "wb") as f:
+                    fd_closed = True
+                    first_chunk = True
+                    async for chunk in response.aiter_bytes(chunk_size=65536):
+                        if first_chunk:
+                            if validate_pdf and not chunk.startswith(b"%PDF-"):
+                                raise DiditAPIError(
+                                    "Invalid PDF report response received from server",
+                                    status_code=502,
+                                )
+                            first_chunk = False
+                        f.write(chunk)
+
+                    if first_chunk and validate_pdf:
+                        raise DiditAPIError(
+                            "Invalid PDF report response received from server",
+                            status_code=502,
+                        )
+
+                    f.flush()
+                    with contextlib.suppress(AttributeError, OSError):
+                        os.fsync(f.fileno())
+
+            await asyncio.to_thread(_atomic_publish, tmp_path, dest_path, force=force)
+            with contextlib.suppress(AttributeError, OSError):
+                os.chmod(dest_path, 0o600)
+            return dest_path
+        except Exception:
+            if not fd_closed:
+                with contextlib.suppress(OSError):
+                    os.close(tmp_fd)
+            with contextlib.suppress(OSError):
+                tmp_path.unlink(missing_ok=True)
+            raise

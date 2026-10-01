@@ -216,9 +216,10 @@ if decision.requires_resubmission and decision.resubmit_info:
         print(f"Attempts remaining: {decision.resubmit_info.available_attempts}")
 
     # Request resubmission for specific failed check nodes
+    # Note: Use exact node IDs returned for the session (e.g. 'document-verification-node', 'face-liveness-node')
     resubmitted = client.sessions.resubmit(
         "sess_12345",
-        nodes_to_resubmit=["document"],
+        nodes_to_resubmit=["document-verification-node"],
     )
     print(f"Session status: {resubmitted.status}")
 

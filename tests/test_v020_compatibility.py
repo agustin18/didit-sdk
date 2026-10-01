@@ -174,34 +174,80 @@ class TestV020Compatibility:
 
     def test_webhook_verification_v020_contract(self) -> None:
         """Verify webhook signature verification and payload parsing as documented in v0.2.0."""
+        import time
+
         secret = "whsec_v020_secret"
-        payload_bytes = b'{"session_id":"s_100","status":"Approved","timestamp":1700000000}'
-        body_dict = {"session_id": "s_100", "status": "Approved", "timestamp": 1700000000}
+        now_ts = int(time.time())
+        payload_json = f'{{"session_id":"s_100","status":"Approved","timestamp":{now_ts}}}'
+        payload_bytes = payload_json.encode()
+        body_dict = {"session_id": "s_100", "status": "Approved", "timestamp": now_ts}
         sig = compute_signature(secret, body_dict, version="v2")
         headers = {
             "x-signature-v2": sig,
-            "x-timestamp": "1700000000",
+            "x-timestamp": str(now_ts),
         }
 
-        # Legacy verify_webhook_signature call
+        # Exact v0.2.0 verify_webhook_signature call (no verify_freshness parameter passed)
         is_valid = verify_webhook_signature(
             payload_bytes,
             headers,
             secret,
-            verify_freshness=False,
         )
         assert is_valid is True
 
-        # Parse payload call
+        # Exact v0.2.0 parse_webhook_payload call (no verify_freshness parameter passed)
         parsed = parse_webhook_payload(
             payload_bytes,
             headers,
             secret,
-            verify_freshness=False,
         )
         assert isinstance(parsed, WebhookPayload)
         assert parsed.session_id == "s_100"
         assert parsed.status == "Approved"
+
+    def test_v020_config_with_explicit_args_precedence(self) -> None:
+        """v0.2.0 allowed passing DiditConfig alongside explicit arguments without error."""
+        from didit import DiditConfig
+
+        cfg = DiditConfig(api_key="config_key", base_url="https://cfg.didit.me/v3")
+        with pytest.deprecated_call(
+            match="Passing explicit configuration arguments alongside `config`"
+        ):
+            client = Didit(config=cfg, api_key="ignored_key")
+        assert client.config.api_key == "config_key"
+        assert client.config.base_url == "https://cfg.didit.me/v3"
+
+        with pytest.deprecated_call(
+            match="Passing explicit configuration arguments alongside `config`"
+        ):
+            async_client = AsyncDidit(config=cfg, api_key="ignored_key")
+        assert async_client.config.api_key == "config_key"
+        assert async_client.config.base_url == "https://cfg.didit.me/v3"
+
+    def test_public_method_signatures_v020_frozen(self) -> None:
+        """Ensure core public methods have not changed or dropped parameters from v0.2.0."""
+        import inspect
+
+        from didit.resources.sessions import AsyncSessionsResource, SessionsResource
+
+        # SessionsResource.create signature
+        sig_create = inspect.signature(SessionsResource.create)
+        assert "workflow_id" in sig_create.parameters
+        assert "vendor_data" in sig_create.parameters
+        assert "callback" in sig_create.parameters
+
+        # SessionsResource.get signature
+        sig_get = inspect.signature(SessionsResource.get)
+        assert "session_id" in sig_get.parameters
+
+        # SessionsResource.get_decision signature
+        sig_decision = inspect.signature(SessionsResource.get_decision)
+        assert "session_id" in sig_decision.parameters
+
+        # Async parity
+        async_sig_create = inspect.signature(AsyncSessionsResource.create)
+        assert "workflow_id" in async_sig_create.parameters
+        assert "vendor_data" in async_sig_create.parameters
 
     def test_legacy_dedup_store_conformance(self) -> None:
         """Verify that InMemoryWebhookDedupStore supports legacy claim/release."""

@@ -14,11 +14,36 @@ from didit.models.session import SessionResponse
 from didit.models.webhook import WebhookPayload
 from didit.simulation import SUPPORTED_SANDBOX_SCENARIOS, SimulatedAsyncDidit, SimulatedDidit
 
+EXPECTED_SANDBOX_SCENARIOS: frozenset[str] = frozenset(
+    {
+        "approve",
+        "decline_document_expired",
+        "decline_could_not_recognize_document",
+        "decline_mrz_validation",
+        "decline_minimum_age",
+        "decline_face_match_low_similarity",
+        "decline_liveness_attack",
+        "decline_aml_hit",
+        "decline_ip_blocklist",
+        "decline_poa_address_mismatch",
+        "decline_nfc_chip_not_verified",
+        "decline_database_no_match",
+        "decline_kyb_registry_mismatch",
+        "review_aml_possible_match",
+        "review_face_match_borderline",
+        "review_poa_partial_match",
+    }
+)
+
 
 class TestSandboxScenarioContract:
     """Validate sandbox scenarios contract across sync and async simulation."""
 
-    @pytest.mark.parametrize("scenario", sorted(SUPPORTED_SANDBOX_SCENARIOS))
+    def test_sandbox_scenarios_match_independent_oracle(self) -> None:
+        """Supported sandbox scenarios in simulator must exactly match 16 oracle slugs."""
+        assert SUPPORTED_SANDBOX_SCENARIOS == EXPECTED_SANDBOX_SCENARIOS
+
+    @pytest.mark.parametrize("scenario", sorted(EXPECTED_SANDBOX_SCENARIOS))
     def test_sync_sandbox_scenario_execution(self, scenario: str) -> None:
         """Every supported scenario produces a valid session and expected decision status."""
         client = SimulatedDidit()
@@ -47,11 +72,9 @@ class TestSandboxScenarioContract:
             assert decision.status == SessionStatus.IN_REVIEW
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "scenario", ["approve", "decline_document_expired", "review_aml_possible_match"]
-    )
+    @pytest.mark.parametrize("scenario", sorted(EXPECTED_SANDBOX_SCENARIOS))
     async def test_async_sandbox_scenario_execution(self, scenario: str) -> None:
-        """Async simulated client handles sandbox scenarios identically."""
+        """Async simulated client handles sandbox scenarios identically across all 16 slugs."""
         client = SimulatedAsyncDidit()
         session = await client.sessions.create(
             vendor_data=f"async_{scenario}",
@@ -111,6 +134,16 @@ class TestAdditiveSchemaDriftContract:
         assert model.session_id == "sess_webhook_drift"
         assert model.status == "Approved"
         assert getattr(model, "cloud_origin_region", None) == "eu-west-1"
+
+    def test_verification_warning_accepts_unknown_fields(self) -> None:
+        raw: dict[str, Any] = {
+            "code": "ADVANCED_FACE_MORPH",
+            "future_anomaly_score": 0.992,
+            "synthetic_model_id": "synth_v4",
+        }
+        warning = VerificationWarning.model_validate(raw)
+        assert warning.warning_code == "ADVANCED_FACE_MORPH"
+        assert getattr(warning, "future_anomaly_score", None) == 0.992
 
 
 class TestWarningCodeCatalogContract:
