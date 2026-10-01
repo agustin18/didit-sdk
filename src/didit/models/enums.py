@@ -114,11 +114,76 @@ class Language(str, Enum):
     """Supported UI languages for Didit hosted verification pages."""
 
     EN = "en"
-    ES = "es"
-    FR = "fr"
-    DE = "de"
-    IT = "it"
-    PT = "pt"
+    AR = "ar"
+    BG = "bg"
+    BN = "bn"
+    BS = "bs"
     CA = "ca"
+    CNR = "cnr"
+    CS = "cs"
+    DA = "da"
+    DE = "de"
+    EL = "el"
+    ES = "es"
+    ET = "et"
     EU = "eu"
+    FA = "fa"
+    FI = "fi"
+    FR = "fr"
     GL = "gl"
+    HE = "he"
+    HI = "hi"
+    HR = "hr"
+    HU = "hu"
+    HY = "hy"
+    ID = "id"
+    IT = "it"
+    JA = "ja"
+    KA = "ka"
+    KK = "kk"
+    KO = "ko"
+    KY = "ky"
+    LT = "lt"
+    LV = "lv"
+    MK = "mk"
+    MN = "mn"
+    MS = "ms"
+    NL = "nl"
+    NO = "no"
+    PL = "pl"
+    PT_BR = "pt-BR"
+    PT = "pt"
+    RO = "ro"
+    RU = "ru"
+    SK = "sk"
+    SL = "sl"
+    SO = "so"
+    SQ = "sq"
+    SR = "sr"
+    SV = "sv"
+    TH = "th"
+    TR = "tr"
+    UK = "uk"
+    UZ = "uz"
+    VI = "vi"
+    ZH_CN = "zh-CN"
+    ZH_TW = "zh-TW"
+    ZH = "zh"
+
+
+CURRENT_DIDIT_LANGUAGES: frozenset[str] = frozenset(
+    lang.value for lang in Language if lang not in (Language.EU, Language.GL)
+)
+
+
+class CallbackMethod(str, Enum):
+    """Device handling redirect to callback URL according to Didit OpenAPI specification.
+
+    - initiator: Redirect only the device that started the verification flow (default).
+    - completer: Redirect the device that finishes the verification flow.
+    - both: Allow either device to trigger the callback redirect.
+    """
+
+    INITIATOR = "initiator"
+    COMPLETER = "completer"
+    BOTH = "both"

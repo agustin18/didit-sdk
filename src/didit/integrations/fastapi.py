@@ -20,7 +20,7 @@ from didit.dedup import (
     WebhookDedupStore,
     WebhookReservationStore,
     acomplete_webhook_event,
-    arelease_webhook_event,
+    arelease_webhook_reservation,
     areserve_webhook_event,
     compute_dedup_key,
 )
@@ -79,7 +79,7 @@ class DiditWebhookGuard:
         ) = None,
         lease_ttl_seconds: int = 30,
         completed_ttl_seconds: int = 86400,
-        dedup_ttl_seconds: int | None = None,
+        dedup_ttl_seconds: int = 86400,
         duplicate_action: Literal["respond_ok", "pass", "raise"] = "pass",
         processing_action: Literal["retry", "pass", "raise", "conflict"] = "retry",
         dedup_key_builder: Callable[[WebhookPayload, Request], str] | None = None,
@@ -110,7 +110,7 @@ class DiditWebhookGuard:
         self.completed_ttl_seconds = completed_ttl_seconds
         self.dedup_ttl_seconds = dedup_ttl_seconds
         self.effective_lease_ttl = lease_ttl_seconds
-        self.effective_legacy_ttl = dedup_ttl_seconds if dedup_ttl_seconds is not None else 86400
+        self.effective_legacy_ttl = dedup_ttl_seconds
         self.effective_completed_ttl = completed_ttl_seconds
         self.duplicate_action = duplicate_action
         self.processing_action = processing_action
@@ -270,15 +270,23 @@ class DiditWebhookGuard:
 
         return payload
 
-    async def release_claim(self, request: Request) -> bool:
-        """Release dedup claim or reservation associated with this request if processing failed."""
+    async def release_claim(self, request: Request) -> None:
+        """Release dedup claim or reservation associated with this request if processing failed.
+
+        Preserves 100% backward compatibility with v0.2.0 callers expecting a None return value.
+        For tokenized reservation CAS success checks, use release_reservation().
+        """
+        await self.release_reservation(request)
+
+    async def release_reservation(self, request: Request) -> bool:
+        """Release dedup claim or reservation for this request, returning CAS outcome."""
         if self.dedup_store is not None:
             key = getattr(request.state, "didit_dedup_key", None)
             claimed = getattr(request.state, "didit_claimed", False)
             res = getattr(request.state, "didit_reservation", None)
             token = res.token if res else None
             if key and claimed:
-                released = await arelease_webhook_event(self.dedup_store, key, token=token)
+                released = await arelease_webhook_reservation(self.dedup_store, key, token=token)
                 request.state.didit_claimed = False
                 if not released:
                     sink = (
@@ -320,15 +328,24 @@ class DiditWebhookGuard:
         return False
 
 
-async def release_didit_claim(request: Request) -> bool:
-    """Helper to release claim or reservation recorded on request.state if processing failed."""
+async def release_didit_claim(request: Request) -> None:
+    """Helper to release claim or reservation recorded on request.state if processing failed.
+
+    Preserves 100% backward compatibility with v0.2.0 callers expecting a None return value.
+    For tokenized reservation CAS success checks, use release_didit_reservation().
+    """
+    await release_didit_reservation(request)
+
+
+async def release_didit_reservation(request: Request) -> bool:
+    """Helper to release claim or reservation recorded on request.state, returning CAS outcome."""
     store = getattr(request.state, "didit_dedup_store", None)
     key = getattr(request.state, "didit_dedup_key", None)
     claimed = getattr(request.state, "didit_claimed", False)
     res = getattr(request.state, "didit_reservation", None)
     token = res.token if res else None
     if store and key and claimed:
-        released = await arelease_webhook_event(store, key, token=token)
+        released = await arelease_webhook_reservation(store, key, token=token)
         request.state.didit_claimed = False
         request.state.didit_reservation = None
         if not released:
@@ -479,7 +496,7 @@ def didit_webhook(
     ) = None,
     lease_ttl_seconds: int = 30,
     completed_ttl_seconds: int = 86400,
-    dedup_ttl_seconds: int | None = None,
+    dedup_ttl_seconds: int = 86400,
     duplicate_action: Literal["respond_ok", "pass", "raise"] = "pass",
     processing_action: Literal["retry", "pass", "raise", "conflict"] = "retry",
     dedup_key_builder: Callable[[WebhookPayload, Request], str] | None = None,
@@ -510,7 +527,7 @@ def didit_webhook(
         )
 
     effective_lease_ttl = lease_ttl_seconds
-    effective_legacy_ttl = dedup_ttl_seconds if dedup_ttl_seconds is not None else 86400
+    effective_legacy_ttl = dedup_ttl_seconds
     effective_completed_ttl = completed_ttl_seconds
 
     def decorator(view_func: Callable[..., Any]) -> Callable[..., Any]:
@@ -746,7 +763,7 @@ def didit_webhook(
                     evt_id = getattr(req_state, "didit_event_id", payload.event_id)
                     sess_id = getattr(req_state, "didit_session_id", payload.session_id)
                     try:
-                        released = await arelease_webhook_event(
+                        released = await arelease_webhook_reservation(
                             dedup_store, dedup_key, token=res_token
                         )
                         request.state.didit_claimed = False
@@ -819,7 +836,7 @@ def didit_webhook(
                         )
                     except Exception:
                         if dedup_store is not None and is_new:
-                            rel = await arelease_webhook_event(
+                            rel = await arelease_webhook_reservation(
                                 dedup_store, dedup_key, token=res_token
                             )
                             request.state.didit_claimed = False
@@ -845,7 +862,9 @@ def didit_webhook(
                         final_response.headers.raw.extend(response_param.headers.raw)
                 except Exception:
                     if dedup_store is not None and is_new:
-                        rel = await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                        rel = await arelease_webhook_reservation(
+                            dedup_store, dedup_key, token=res_token
+                        )
                         request.state.didit_claimed = False
                         request.state.didit_reservation = None
                         if not rel:
@@ -882,7 +901,9 @@ def didit_webhook(
                                 ),
                             )
                 else:
-                    rel = await arelease_webhook_event(dedup_store, dedup_key, token=res_token)
+                    rel = await arelease_webhook_reservation(
+                        dedup_store, dedup_key, token=res_token
+                    )
                     request.state.didit_claimed = False
                     request.state.didit_reservation = None
                     if not rel:

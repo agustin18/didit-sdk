@@ -5,9 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-10-01
 
 ### Added
+- **Direct-to-Disk PDF Report Download (`sessions.download_pdf_report()` / `sessions.adownload_pdf_report()`):**
+  - Streamlined compliance PDF download directly to filesystem paths with atomic temporary-swap write and private POSIX `0600` permissions.
+  - Implemented across sync, async, and in-memory simulated clients (`SimulatedDidit` / `SimulatedAsyncDidit`).
+  - Supports `--force` flag for explicit file overwrite control.
+- **Strict Diagnostic Probe Gate (`didit doctor --strict`):**
+  - Flag for automated CI/CD and deployment pipelines that exits with code 1 (`CONNECTIVITY_UNAVAILABLE`) if Didit upstream healthcheck or latency probes are unreachable.
+- **Zero-Degradation Compatibility & Live Contract Matrix:**
+  - Comprehensive backward-compatibility suite (`tests/test_v020_compatibility.py`) ensuring zero breaking changes across all 46 public symbols from v0.2.0.
+  - Automated sandbox contract matrix (`tests/test_contract_matrix.py`) validating all 16 Didit sandbox scenarios, additive schema drift resilience (`extra="allow"`), and warning code catalog normalization.
+  - Scheduled GitHub Actions workflow (`.github/workflows/live-contract.yml`) for periodic live contract verification.
+- **Contractual Precision & Upstream OpenAPI Drift Monitoring:**
+  - Enforced strict enum validation on `CallbackMethod` (`INITIATOR`, `COMPLETER`, `BOTH`) and `ResubmitFeature` (`OCR`, `LIVENESS`, `FACE_MATCH`), eliminating loose string union bypasses while preserving backward-compatible case normalization.
+  - Fail-closed normalization in `_normalize_nodes_to_resubmit()`: rejects unrecognized strings, malformed shorthand, and non-resubmittable organizational KYB steps across objects, dictionaries, and string shorthands.
+  - Arbitrary JSON metadata typing via `JsonValue` for session creation (`client.sessions.create(metadata=...)`), supporting dictionaries, primitives, and lists.
+  - Truthful `UpdateSessionStatusResponse` model preserving unconfirmed status (`status: None`) while recording intention in `requested_status` when Didit V3 returns only `{"session_id": ...}` without an immediate status confirmation.
+  - Full simulation fidelity: `SimulatedDidit` and `SimulatedAsyncDidit` retain `callback_method` and `metadata` on created `SessionResponse` objects.
+  - Dedicated upstream contract test suite (`tests/test_upstream_openapi_drift.py`) monitoring critical supported contracts against official live Didit OpenAPI definitions.
 - **Session Lifecycle Completeness (`client.sessions.resubmit()` / `async_client.sessions.resubmit()` & `update_status()`):**
   - Request document or biometric resubmission via `PATCH /v3/session/{session_id}/update-status/` with target status `Resubmitted` and optional `nodes_to_resubmit` list.
   - Update session status via `PATCH /v3/session/{session_id}/update-status/` with runtime validation restricting transitions to manual review statuses: `Approved`, `Declined`, or `Resubmitted` (`ManualSessionStatus`).

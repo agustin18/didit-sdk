@@ -29,11 +29,11 @@ from didit.dedup import (
     WebhookDedupStore,
     WebhookReservationStore,
     acomplete_webhook_event,
-    arelease_webhook_event,
+    arelease_webhook_reservation,
     areserve_webhook_event,
     complete_webhook_event,
     compute_dedup_key,
-    release_webhook_event,
+    release_webhook_reservation,
     reserve_webhook_event,
 )
 from didit.errors import (
@@ -146,7 +146,7 @@ def didit_webhook_view(
     ) = None,
     lease_ttl_seconds: int = 30,
     completed_ttl_seconds: int = 86400,
-    dedup_ttl_seconds: int | None = None,
+    dedup_ttl_seconds: int = 86400,
     duplicate_action: Literal["respond_ok", "pass", "raise"] = "pass",
     processing_action: Literal["retry", "pass", "raise", "conflict"] = "retry",
     dedup_key_builder: Callable[[WebhookPayload, HttpRequest], str] | None = None,
@@ -177,7 +177,7 @@ def didit_webhook_view(
         )
 
     effective_lease_ttl = lease_ttl_seconds
-    effective_legacy_ttl = dedup_ttl_seconds if dedup_ttl_seconds is not None else 86400
+    effective_legacy_ttl = dedup_ttl_seconds
     effective_completed_ttl = completed_ttl_seconds
 
     def decorator(view_func: Callable[..., Any]) -> Callable[..., Any]:
@@ -339,7 +339,7 @@ def didit_webhook_view(
                 except Exception:
                     if dedup_store is not None and is_new:
                         try:
-                            released = await arelease_webhook_event(
+                            released = await arelease_webhook_reservation(
                                 dedup_store, dedup_key, token=res_token
                             )
                             if not released:
@@ -382,7 +382,7 @@ def didit_webhook_view(
                                     ),
                                 )
                     else:
-                        released = await arelease_webhook_event(
+                        released = await arelease_webhook_reservation(
                             dedup_store, dedup_key, token=res_token
                         )
                         if not released:
@@ -580,7 +580,9 @@ def didit_webhook_view(
             except Exception:
                 if dedup_store is not None and is_new:
                     try:
-                        released = release_webhook_event(dedup_store, dedup_key, token=res_token)
+                        released = release_webhook_reservation(
+                            dedup_store, dedup_key, token=res_token
+                        )
                         if not released:
                             safe_emit(
                                 sink,
@@ -621,7 +623,7 @@ def didit_webhook_view(
                                 ),
                             )
                 else:
-                    released = release_webhook_event(dedup_store, dedup_key, token=res_token)
+                    released = release_webhook_reservation(dedup_store, dedup_key, token=res_token)
                     if not released:
                         safe_emit(
                             sink,

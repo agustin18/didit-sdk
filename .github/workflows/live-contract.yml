@@ -1,0 +1,128 @@
+name: Live Contract & Sandbox Matrix
+
+on:
+  pull_request:
+    paths:
+      - "src/didit/**"
+      - "tests/contracts/**"
+      - "tests/test_contract_matrix.py"
+      - "tests/test_v020_compatibility.py"
+      - "tests/test_openapi_contract_drift.py"
+      - "tests/test_upstream_openapi_drift.py"
+      - ".github/workflows/live-contract.yml"
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "Specific sandbox scenario to test (or 'all')"
+        required: false
+        default: "all"
+  schedule:
+    # Run weekly on Monday at 04:00 UTC
+    - cron: "0 4 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-contract-matrix:
+    name: Offline Contract Matrix & Compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run OpenAPI Contract Drift Tests
+        run: uv run pytest tests/test_openapi_contract_drift.py -v
+
+      - name: Run Live Upstream OpenAPI Drift Gate
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          DIDIT_CHECK_UPSTREAM_DRIFT: "1"
+        run: uv run pytest tests/test_upstream_openapi_drift.py -v
+
+      - name: Run Contract Matrix Tests
+        env:
+          DIDIT_SCENARIO_INPUT: ${{ github.event.inputs.scenario || 'all' }}
+        run: |
+          if [ "${DIDIT_SCENARIO_INPUT}" != "all" ] && [ -n "${DIDIT_SCENARIO_INPUT}" ]; then
+            uv run pytest tests/test_contract_matrix.py tests/test_v020_compatibility.py -k "${DIDIT_SCENARIO_INPUT}" -v
+          else
+            uv run pytest tests/test_contract_matrix.py tests/test_v020_compatibility.py -v
+          fi
+
+      - name: Verify Offline Sandbox Scenarios Catalog
+        run: uv run didit sandbox scenarios --json
+
+  live-contract-gate:
+    name: Live Didit Sandbox Contract Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Check Live Credentials Gate
+        id: check-creds
+        env:
+          DIDIT_API_KEY: ${{ secrets.DIDIT_API_KEY }}
+        run: |
+          if [ -z "${DIDIT_API_KEY}" ]; then
+            if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              echo "::error::DIDIT_API_KEY is missing on ${{ github.event_name }}. Failing closed."
+              exit 1
+            else
+              echo "DIDIT_API_KEY not configured in environment. Skipping live gate step (offline matrix validated)."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify Live Sandbox Scenarios Contract Against Oracle
+        if: steps.check-creds.outputs.skip != 'true'
+        env:
+          DIDIT_API_KEY: ${{ secrets.DIDIT_API_KEY }}
+        run: |
+          if [ -z "${DIDIT_API_KEY}" ]; then
+            echo "::error::DIDIT_API_KEY is required for live contract gate. Failing closed."
+            exit 1
+          fi
+
+          echo "Querying live Didit Sandbox Scenarios with strict verification..."
+          uv run didit sandbox scenarios --strict --json > /tmp/live_scenarios.json
+
+          uv run python -c "
+          import json
+          with open('/tmp/live_scenarios.json') as f:
+              data = json.load(f)
+          with open('tests/contracts/sandbox_scenarios.json') as f:
+              contract = json.load(f)
+          scenarios = {s['slug'] for s in data.get('scenarios', [])}
+          expected = set(contract['expected_slugs'])
+          assert expected.issubset(scenarios), f'Live sandbox scenarios missing expected slugs: {expected - scenarios}'
+          print(f'Successfully verified {len(expected)} live sandbox scenarios matching oracle!')
+          "

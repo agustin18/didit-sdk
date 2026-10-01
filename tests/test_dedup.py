@@ -1317,7 +1317,12 @@ class TestReservationDispatchHelpers:
 
     @pytest.mark.asyncio
     async def test_release_webhook_event_uninspectable_callables(self) -> None:
-        from didit.dedup import arelease_webhook_event, release_webhook_event
+        from didit.dedup import (
+            arelease_webhook_event,
+            arelease_webhook_reservation,
+            release_webhook_event,
+            release_webhook_reservation,
+        )
 
         # 1. Sync release with 2-arg (with reserve capability) and 1-arg uninspectable signatures
         class UninspectableSync2Arg:
@@ -1334,7 +1339,8 @@ class TestReservationDispatchHelpers:
             release.__signature__ = "invalid"
 
         sync_store = UninspectableSync2Arg()
-        assert release_webhook_event(sync_store, "e", token="t") is True
+        assert release_webhook_event(sync_store, "e", token="t") is None
+        assert release_webhook_reservation(sync_store, "e", token="t") is True
         assert sync_store.received_token == "t"
 
         class UninspectableSync1Arg:
@@ -1348,7 +1354,8 @@ class TestReservationDispatchHelpers:
             release.__signature__ = "invalid"
 
         sync_1arg_store = UninspectableSync1Arg()
-        assert release_webhook_event(sync_1arg_store, "e", token="t") is True
+        assert release_webhook_event(sync_1arg_store, "e", token="t") is None
+        assert release_webhook_reservation(sync_1arg_store, "e", token="t") is True
         assert sync_1arg_store.called is True
 
         # 2. Async arelease with 2-arg (with areserve capability) and 1-arg uninspectable signatures
@@ -1366,7 +1373,8 @@ class TestReservationDispatchHelpers:
             arelease.__signature__ = "invalid"
 
         async_store = UninspectableAsync2Arg()
-        assert await arelease_webhook_event(async_store, "e", token="t") is True
+        assert await arelease_webhook_event(async_store, "e", token="t") is None
+        assert await arelease_webhook_reservation(async_store, "e", token="t") is True
         assert async_store.received_token == "t"
 
         class UninspectableAsync1Arg:
@@ -1380,7 +1388,8 @@ class TestReservationDispatchHelpers:
             arelease.__signature__ = "invalid"
 
         async_1arg_store = UninspectableAsync1Arg()
-        assert await arelease_webhook_event(async_1arg_store, "e", token="t") is True
+        assert await arelease_webhook_event(async_1arg_store, "e", token="t") is None
+        assert await arelease_webhook_reservation(async_1arg_store, "e", token="t") is True
         assert async_1arg_store.called is True
 
         # 3. Fallback sync release via arelease_webhook_event
@@ -1391,7 +1400,10 @@ class TestReservationDispatchHelpers:
 
             release.__signature__ = "invalid"
 
-        assert await arelease_webhook_event(UninspectableSyncFallback(), "e", token="t") is True
+        assert await arelease_webhook_event(UninspectableSyncFallback(), "e", token="t") is None
+        assert (
+            await arelease_webhook_reservation(UninspectableSyncFallback(), "e", token="t") is True
+        )
 
         class UninspectableSyncFallbackWithToken:
             def __init__(self) -> None:
@@ -1407,7 +1419,8 @@ class TestReservationDispatchHelpers:
             release.__signature__ = "invalid"
 
         fallback_sync_tok = UninspectableSyncFallbackWithToken()
-        assert await arelease_webhook_event(fallback_sync_tok, "e", token="t") is True
+        assert await arelease_webhook_event(fallback_sync_tok, "e", token="t") is None
+        assert await arelease_webhook_reservation(fallback_sync_tok, "e", token="t") is True
         assert fallback_sync_tok.received_token == "t"
 
         # 4. Fallback coroutine release via arelease_webhook_event
@@ -1418,7 +1431,10 @@ class TestReservationDispatchHelpers:
 
             release.__signature__ = "invalid"
 
-        assert await arelease_webhook_event(UninspectableCoroFallback(), "e", token="t") is True
+        assert await arelease_webhook_event(UninspectableCoroFallback(), "e", token="t") is None
+        assert (
+            await arelease_webhook_reservation(UninspectableCoroFallback(), "e", token="t") is True
+        )
 
         class UninspectableCoroFallbackWithToken:
             def __init__(self) -> None:
@@ -1434,7 +1450,8 @@ class TestReservationDispatchHelpers:
             release.__signature__ = "invalid"
 
         fallback_coro_tok = UninspectableCoroFallbackWithToken()
-        assert await arelease_webhook_event(fallback_coro_tok, "e", token="t") is True
+        assert await arelease_webhook_event(fallback_coro_tok, "e", token="t") is None
+        assert await arelease_webhook_reservation(fallback_coro_tok, "e", token="t") is True
         assert fallback_coro_tok.received_token == "t"
 
     def test_release_internal_typeerror_is_not_retried_without_token(self) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,7 +22,13 @@ from didit.errors import (
     DiditServerError,
     DiditTimeoutError,
 )
-from didit.models.enums import SessionStatus
+from didit.models.enums import CallbackMethod, SessionStatus
+from didit.models.session import (
+    ContactDetails,
+    ExpectedDetails,
+    ResubmitFeature,
+    ResubmitNode,
+)
 from didit.transport import RequestOptions
 from didit.webhooks import compute_signature
 
@@ -109,6 +116,88 @@ class TestAsyncDiditClient:
         req_json = json.loads(route.calls.last.request.content.decode("utf-8"))
         assert req_json["sandbox_scenario"] == "approve"
         assert resp.session_id == "sess_sb_async"
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_create_session_with_full_v3_surface(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        route = respx.post(f"{base_url}/session/").mock(
+            return_value=Response(
+                201,
+                json={
+                    "session_id": "sess_full_v3_async",
+                    "status": "Not Started",
+                    "workflow_id": "wf_v3",
+                    "vendor_data": "usr_v3",
+                },
+            )
+        )
+        resp = await async_client.sessions.create(
+            vendor_data="usr_v3",
+            workflow_id="wf_v3",
+            callback="https://example.com/callback",
+            callback_method=CallbackMethod.BOTH,
+            metadata={"user_tier": "enterprise", "tenant_id": 99},
+            contact_details=ContactDetails(
+                email="alice@example.com",
+                send_notification_emails=True,
+                email_lang="es",
+                phone="+34600112233",
+            ),
+            expected_details=ExpectedDetails(
+                first_name="Alice",
+                last_name="Smith",
+                date_of_birth="1992-04-10",
+                nationality="ESP",
+                expected_document_types=["P", "ID"],
+            ),
+            portrait_image="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+        )
+        assert route.called
+        req_json = json.loads(route.calls.last.request.content.decode("utf-8"))
+        assert req_json["workflow_id"] == "wf_v3"
+        assert req_json["vendor_data"] == "usr_v3"
+        assert req_json["callback_method"] == "both"
+        assert req_json["metadata"] == {"user_tier": "enterprise", "tenant_id": 99}
+        assert req_json["contact_details"]["email"] == "alice@example.com"
+        assert req_json["contact_details"]["phone"] == "+34600112233"
+        assert req_json["expected_details"]["first_name"] == "Alice"
+        assert req_json["expected_details"]["expected_document_types"] == ["P", "ID"]
+        assert req_json["portrait_image"].startswith("iVBORw")
+        assert resp.session_id == "sess_full_v3_async"
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_create_session_callback_method_and_metadata_variations(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        from pydantic import ValidationError
+
+        route = respx.post(f"{base_url}/session/").mock(
+            return_value=Response(
+                201,
+                json={"session_id": "sess_async_meta_var", "status": "Not Started"},
+            )
+        )
+        # Test scalar metadata
+        r1 = await async_client.sessions.create(workflow_id="wf_meta", metadata="campaign_scalar")
+        assert r1.session_id == "sess_async_meta_var"
+        assert json.loads(route.calls.last.request.content)["metadata"] == "campaign_scalar"
+
+        # Test list metadata
+        r2 = await async_client.sessions.create(workflow_id="wf_meta", metadata=["tag1", 99])
+        assert r2.session_id == "sess_async_meta_var"
+        assert json.loads(route.calls.last.request.content)["metadata"] == ["tag1", 99]
+
+        # Test invalid callback_method raises ValidationError
+        with pytest.raises(ValidationError):
+            await async_client.sessions.create(
+                workflow_id="wf_meta",
+                callback_method="post",  # type: ignore[arg-type]
+            )
         await async_client.aclose()
 
     @respx.mock
@@ -639,8 +728,11 @@ class TestAsyncDiditClient:
     )
     def test_async_client_config_mutual_exclusivity(self, kwargs: dict[str, object]) -> None:
         cfg = DiditConfig(api_key="cfg_key")
-        with pytest.raises(DiditConfigurationError, match="Cannot combine `config`"):
-            AsyncDidit(config=cfg, **kwargs)
+        with pytest.deprecated_call(
+            match="Passing explicit configuration arguments alongside `config`"
+        ):
+            async_client = AsyncDidit(config=cfg, **kwargs)
+        assert async_client.config.api_key == "cfg_key"
 
     @respx.mock
     async def test_rate_limit_error_retry_after(
@@ -1378,16 +1470,16 @@ class TestAsyncDiditClient:
                 200,
                 json={
                     "session_id": "sess_async_resub_1",
-                    "status": "Resubmitted",
-                    "resubmit_info": {"steps": ["document"]},
                 },
             )
         )
 
         res = await async_client.sessions.resubmit("sess_async_resub_1")
         assert res.session_id == "sess_async_resub_1"
-        assert res.status == SessionStatus.RESUBMITTED
-        assert res.requires_resubmission is True
+        assert res.status is None
+        assert res.requested_status == SessionStatus.RESUBMITTED
+        assert res.requires_resubmission is False
+        assert res.requested_resubmission is True
         assert route.called
         sent = json.loads(route.calls[0].request.content)
         assert sent["new_status"] == "Resubmitted"
@@ -1402,21 +1494,167 @@ class TestAsyncDiditClient:
                 200,
                 json={
                     "session_id": "sess_async_resub_2",
-                    "status": "Resubmitted",
-                    "resubmit_info": {"nodes": ["document", "liveness"]},
                 },
             )
         )
 
         res = await async_client.sessions.resubmit(
-            "sess_async_resub_2", nodes_to_resubmit=["document", "liveness"]
+            "sess_async_resub_2",
+            nodes_to_resubmit=[
+                ResubmitNode(node_id="feature_ocr", feature=ResubmitFeature.OCR),
+                {"node_id": "feature_liveness", "feature": "LIVENESS"},
+            ],
+            comment="Please redo OCR and Liveness",
+            send_email=True,
+            email_address="async@example.com",
+            email_language="es",
         )
         assert res.session_id == "sess_async_resub_2"
-        assert res.status == SessionStatus.RESUBMITTED
-        assert res.requires_resubmission is True
+        assert res.status is None
+        assert res.requested_status == SessionStatus.RESUBMITTED
         sent = json.loads(route.calls[0].request.content)
         assert sent["new_status"] == "Resubmitted"
-        assert sent["nodes_to_resubmit"] == ["document", "liveness"]
+        assert sent["nodes_to_resubmit"] == [
+            {"node_id": "feature_ocr", "feature": "OCR"},
+            {"node_id": "feature_liveness", "feature": "LIVENESS"},
+        ]
+        assert sent["comment"] == "Please redo OCR and Liveness"
+        assert sent["send_email"] is True
+        assert sent["email_address"] == "async@example.com"
+        assert sent["email_language"] == "es"
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_resubmit_nodes_invalid_types(self, async_client: AsyncDidit) -> None:
+        with pytest.raises(TypeError, match="must be a ResubmitNode, dict, or string"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[12345],  # type: ignore[list-item]
+            )
+
+        with pytest.raises(ValueError, match="must contain 'node_id' and 'feature'"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[{"node_id": "foo"}],
+            )
+
+        with pytest.raises(ValueError, match="must contain 'node_id' and 'feature'"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[{"feature": "OCR"}],
+            )
+
+        with pytest.raises(ValueError, match="must be non-empty"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[{"node_id": "   ", "feature": "OCR"}],
+            )
+
+        with pytest.raises(ValueError, match="must be non-empty"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[{"node_id": "id1", "feature": "   "}],
+            )
+
+        with pytest.raises(ValueError, match="Invalid shorthand node 'plain_step'"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=["plain_step"],
+            )
+
+        with pytest.raises(ValueError, match="Both node_id and feature must be non-empty"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=["node_id:"],
+            )
+
+        with pytest.raises(ValueError, match="Both node_id and feature must be non-empty"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[":OCR"],
+            )
+
+        with pytest.raises(ValueError, match="non-resubmittable organizational step"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[ResubmitNode(node_id="kyb_node", feature="KYB_REGISTRY")],
+            )
+
+        with pytest.raises(ValueError, match="non-resubmittable organizational step"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[{"node_id": "kyb_node", "feature": "KYB_KEY_PEOPLE"}],
+            )
+
+        with pytest.raises(ValueError, match="non-resubmittable organizational step"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=["kyb_node:KYB"],
+            )
+
+        # Unknown features rejected for dict, shorthand, and ResubmitNode
+        with pytest.raises(ValueError):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[{"node_id": "step1", "feature": "BOGUS"}],
+            )
+
+        with pytest.raises(ValueError):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=["step1:BOGUS"],
+            )
+
+        with pytest.raises(ValueError):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[ResubmitNode(node_id="step1", feature="BOGUS")],  # type: ignore[arg-type]
+            )
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_resubmit_nodes_explicit_shorthand_and_normalization(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        route = respx.patch(f"{base_url}/session/sess_async_matrix/update-status/").mock(
+            return_value=Response(200, json={"session_id": "sess_async_matrix"})
+        )
+        res = await async_client.sessions.resubmit(
+            "sess_async_matrix",
+            nodes_to_resubmit=[
+                "   ",
+                "custom_node:LIVENESS",
+                "ocr_node:ocr",
+                ResubmitNode(node_id="face_check", feature=ResubmitFeature.FACE_MATCH),
+                {"node_id": "aml_step", "feature": "AML"},
+                "poa_check:PROOF_OF_ADDRESS",
+            ],
+        )
+        assert res.session_id == "sess_async_matrix"
+        assert res.status is None
+        assert res.requested_status == SessionStatus.RESUBMITTED
+        sent = json.loads(route.calls[0].request.content)
+        expected_nodes = [
+            {"node_id": "custom_node", "feature": "LIVENESS"},
+            {"node_id": "ocr_node", "feature": "OCR"},
+            {"node_id": "face_check", "feature": "FACE_MATCH"},
+            {"node_id": "aml_step", "feature": "AML"},
+            {"node_id": "poa_check", "feature": "PROOF_OF_ADDRESS"},
+        ]
+        assert sent["nodes_to_resubmit"] == expected_nodes
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_update_status_send_email_without_address(
+        self, async_client: AsyncDidit
+    ) -> None:
+        with pytest.raises(ValueError, match="email_address is required when send_email is True"):
+            await async_client.sessions.update_status(
+                "sess_async_err",
+                SessionStatus.APPROVED,
+                send_email=True,
+            )
         await async_client.aclose()
 
     @pytest.mark.parametrize("invalid_id", ["", "   "])
@@ -1438,17 +1676,48 @@ class TestAsyncDiditClient:
                 200,
                 json={
                     "session_id": "sess_async_custom_status",
-                    "status": "Declined",
                 },
             )
         )
 
         res = await async_client.sessions.update_status(
-            "sess_async_custom_status", SessionStatus.DECLINED
+            "sess_async_custom_status", SessionStatus.DECLINED, comment="Suspected fraud"
         )
-        assert res.status == SessionStatus.DECLINED
+        assert res.session_id == "sess_async_custom_status"
+        assert res.status is None
+        assert res.requested_status == SessionStatus.DECLINED
         sent = json.loads(route.calls[0].request.content)
         assert sent["new_status"] == "Declined"
+        assert sent["comment"] == "Suspected fraud"
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_update_status_response_shapes(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        # Non-dict JSON response fallback
+        respx.patch(f"{base_url}/session/sess_async_nondict/update-status/").mock(
+            return_value=Response(200, json=["unexpected", "array"])
+        )
+        r1 = await async_client.sessions.update_status("sess_async_nondict", SessionStatus.APPROVED)
+        assert r1.session_id == "sess_async_nondict"
+        assert r1.status is None
+        assert r1.requested_status == SessionStatus.APPROVED
+
+        # Dict response with explicit status included upstream
+        respx.patch(f"{base_url}/session/sess_async_explicit_status/update-status/").mock(
+            return_value=Response(
+                200,
+                json={"session_id": "sess_async_explicit_status", "status": "Declined"},
+            )
+        )
+        r2 = await async_client.sessions.update_status(
+            "sess_async_explicit_status", SessionStatus.DECLINED
+        )
+        assert r2.session_id == "sess_async_explicit_status"
+        assert r2.status == "Declined"
+        assert r2.requested_status == SessionStatus.DECLINED
         await async_client.aclose()
 
     @pytest.mark.parametrize(
@@ -1538,4 +1807,71 @@ class TestAsyncDiditClient:
         with pytest.raises(DiditAPIError) as exc_info:
             await async_client.sessions.generate_pdf_report("sess_async_pdf_bad_mime")
         assert exc_info.value.status_code == 502
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_download_pdf_report_success_and_force(
+        self, async_client: AsyncDidit, base_url: str, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "async_reports" / "compliance.pdf"
+        pdf_content = b"%PDF-1.4 official async compliance report binary content"
+        respx.get(f"{base_url}/session/sess_async_pdf_dl/generate-pdf/").mock(
+            return_value=Response(
+                200,
+                content=pdf_content,
+                headers={"Content-Type": "application/pdf"},
+            )
+        )
+
+        # 1. Successful download to new file
+        saved = await async_client.sessions.download_pdf_report("sess_async_pdf_dl", target)
+        assert saved == target.resolve()
+        assert target.is_file()
+        assert target.read_bytes() == pdf_content
+
+        # 2. Re-download with force=False raises FileExistsError
+        with pytest.raises(FileExistsError, match="already exists"):
+            await async_client.sessions.download_pdf_report(
+                "sess_async_pdf_dl", target, force=False
+            )
+
+        # 3. Re-download with force=True succeeds and overwrites via adownload_pdf_report alias
+        new_pdf_content = b"%PDF-1.4 updated async compliance report binary content"
+        respx.get(f"{base_url}/session/sess_async_pdf_dl_overwrite/generate-pdf/").mock(
+            return_value=Response(
+                200,
+                content=new_pdf_content,
+                headers={"Content-Type": "application/pdf"},
+            )
+        )
+        saved_overwrite = await async_client.sessions.adownload_pdf_report(
+            "sess_async_pdf_dl_overwrite", target, force=True
+        )
+        assert saved_overwrite == target.resolve()
+        assert target.read_bytes() == new_pdf_content
+
+        # 4. Empty/whitespace session_id raises ValueError
+        with pytest.raises(ValueError, match="session_id must not be empty or whitespace"):
+            await async_client.sessions.download_pdf_report("", target)
+        with pytest.raises(ValueError, match="session_id must not be empty or whitespace"):
+            await async_client.sessions.download_pdf_report("   ", target)
+
+        # 5. Options branches (timeout=None and explicit timeout)
+        target_opt1 = tmp_path / "async_opt1.pdf"
+        target_opt2 = tmp_path / "async_opt2.pdf"
+        respx.get(f"{base_url}/session/sess_async_opt/generate-pdf/").mock(
+            return_value=Response(
+                200, content=pdf_content, headers={"Content-Type": "application/pdf"}
+            )
+        )
+        await async_client.sessions.download_pdf_report(
+            "sess_async_opt", target_opt1, options=RequestOptions(idempotency_key="opt_key")
+        )
+        await async_client.sessions.download_pdf_report(
+            "sess_async_opt", target_opt2, options=RequestOptions(timeout=25.0)
+        )
+        assert target_opt1.is_file()
+        assert target_opt2.is_file()
+
         await async_client.aclose()

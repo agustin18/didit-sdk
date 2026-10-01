@@ -2,13 +2,14 @@
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from didit.errors import DiditAPIError, DiditNotFoundError
 from didit.models.decision import DocumentData
-from didit.models.enums import SessionStatus
-from didit.models.session import ResubmitInfo
+from didit.models.enums import CallbackMethod, SessionStatus
+from didit.models.session import ResubmitFeature, ResubmitInfo, ResubmitNode
 from didit.simulation import SimulatedAsyncDidit, SimulatedDidit
 from didit.webhooks import verify_webhook_signature
 
@@ -22,11 +23,15 @@ class TestSimulatedDidit:
             vendor_data="user_sim_1",
             workflow_id="wf_sim",
             callback="https://example.com/callback",
+            callback_method=CallbackMethod.INITIATOR,
+            metadata={"sim_tier": "gold"},
         )
         assert session.session_id.startswith("sim_")
         assert session.status == SessionStatus.NOT_STARTED
         assert session.vendor_data == "user_sim_1"
         assert session.workflow_id == "wf_sim"
+        assert session.callback_method == CallbackMethod.INITIATOR
+        assert session.metadata == {"sim_tier": "gold"}
 
         # 2. Get session
         fetched = client.sessions.get(session.session_id)
@@ -159,6 +164,26 @@ class TestSimulatedDidit:
         with pytest.raises(ValueError, match="session_id must not be empty"):
             client.sessions.generate_pdf_report("")
 
+    def test_simulation_download_pdf_report(self, tmp_path: Path) -> None:
+        client = SimulatedDidit()
+        s = client.sessions.create(vendor_data="pdf_sim_sync_dl", workflow_id="wf")
+        dest = tmp_path / "sim_report.pdf"
+        saved = client.sessions.download_pdf_report(s.session_id, dest)
+        assert saved == dest.resolve()
+        assert dest.is_file()
+        assert dest.read_bytes().startswith(b"%PDF-")
+
+        with pytest.raises(FileExistsError):
+            client.sessions.download_pdf_report(s.session_id, dest, force=False)
+
+        with pytest.raises(ValueError, match="session_id must not be empty"):
+            client.sessions.download_pdf_report("", dest)
+        with pytest.raises(ValueError, match="session_id must not be empty"):
+            client.sessions.download_pdf_report("   ", dest)
+
+        saved_force = client.sessions.download_pdf_report(s.session_id, dest, force=True)
+        assert saved_force == dest.resolve()
+
 
 class TestSimulatedAsyncDidit:
     async def test_async_simulation_lifecycle(self) -> None:
@@ -167,9 +192,13 @@ class TestSimulatedAsyncDidit:
         session = await client.sessions.create(
             vendor_data="user_sim_async",
             workflow_id="wf_sim_async",
+            callback_method=CallbackMethod.BOTH,
+            metadata={"sim_tier": "platinum"},
         )
         assert session.session_id.startswith("sim_")
         assert session.status == SessionStatus.NOT_STARTED
+        assert session.callback_method == CallbackMethod.BOTH
+        assert session.metadata == {"sim_tier": "platinum"}
 
         fetched = await client.sessions.get(session.session_id)
         assert fetched.session_id == session.session_id
@@ -734,6 +763,27 @@ class TestSimulatedAsyncDidit:
         with pytest.raises(ValueError, match="session_id must not be empty"):
             await client.sessions.generate_pdf_report("")
 
+    @pytest.mark.asyncio
+    async def test_async_simulation_download_pdf_report(self, tmp_path: Path) -> None:
+        client = SimulatedAsyncDidit()
+        s = await client.sessions.create(vendor_data="pdf_sim_async_dl", workflow_id="wf")
+        dest = tmp_path / "sim_async_report.pdf"
+        saved = await client.sessions.download_pdf_report(s.session_id, dest)
+        assert saved == dest.resolve()
+        assert dest.is_file()
+        assert dest.read_bytes().startswith(b"%PDF-")
+
+        with pytest.raises(FileExistsError):
+            await client.sessions.download_pdf_report(s.session_id, dest, force=False)
+
+        with pytest.raises(ValueError, match="session_id must not be empty"):
+            await client.sessions.download_pdf_report("", dest)
+        with pytest.raises(ValueError, match="session_id must not be empty"):
+            await client.sessions.download_pdf_report("   ", dest)
+
+        saved_force = await client.sessions.adownload_pdf_report(s.session_id, dest, force=True)
+        assert saved_force == dest.resolve()
+
     def test_simulation_resubmit_and_update_status(self) -> None:
         client = SimulatedDidit()
         s = client.sessions.create(vendor_data="sim_resub_test", workflow_id="wf_sim")
@@ -741,18 +791,34 @@ class TestSimulatedAsyncDidit:
         # Test resubmit without nodes
         res1 = client.sessions.resubmit(s.session_id)
         assert res1.session_id == s.session_id
-        assert res1.status == SessionStatus.RESUBMITTED
-        assert res1.requires_resubmission is True
+        assert res1.status is None
+        assert res1.requested_status == SessionStatus.RESUBMITTED
+        assert res1.requires_resubmission is False
+        assert res1.requested_resubmission is True
 
         # Test resubmit with nodes
-        res2 = client.sessions.resubmit(s.session_id, nodes_to_resubmit=["document", "face"])
-        assert res2.status == SessionStatus.RESUBMITTED
-        assert res2.resubmit_info == ResubmitInfo(nodes=["document", "face"])
-        assert res2.requires_resubmission is True
+        res2 = client.sessions.resubmit(
+            s.session_id,
+            nodes_to_resubmit=[
+                ResubmitNode(node_id="doc_resub", feature=ResubmitFeature.OCR),
+                {"node_id": "face_resub", "feature": "FACE_MATCH"},
+                "plain_step:OCR",
+            ],
+        )
+        assert res2.session_id == s.session_id
+        assert res2.status is None
+        assert res2.requested_status == SessionStatus.RESUBMITTED
+        updated_s = client.sessions.get(s.session_id)
+        assert updated_s.status == SessionStatus.RESUBMITTED
+        assert updated_s.requires_resubmission is True
+        assert updated_s.resubmit_info == ResubmitInfo(
+            nodes=["doc_resub", "face_resub", "plain_step"]
+        )
 
         # Test update_status with allowed manual status
         res3 = client.sessions.update_status(s.session_id, "Declined")
-        assert res3.status == SessionStatus.DECLINED
+        assert res3.status is None
+        assert res3.requested_status == "Declined"
 
         # Test invalid status raises ValueError
         with pytest.raises(ValueError, match="Invalid manual status transition"):
@@ -761,7 +827,8 @@ class TestSimulatedAsyncDidit:
         # Decision is None branch in update_status
         client.sessions._storage.decisions.pop(s.session_id, None)
         res4 = client.sessions.update_status(s.session_id, SessionStatus.APPROVED)
-        assert res4.status == SessionStatus.APPROVED
+        assert res4.status is None
+        assert res4.requested_status == SessionStatus.APPROVED
 
         # Error cases
         with pytest.raises(ValueError, match="session_id must not be empty"):
@@ -775,13 +842,24 @@ class TestSimulatedAsyncDidit:
         client = SimulatedAsyncDidit()
         s = await client.sessions.create(vendor_data="async_sim_resub", workflow_id="wf_sim_async")
 
-        res = await client.sessions.resubmit(s.session_id, nodes_to_resubmit=["liveness"])
-        assert res.status == SessionStatus.RESUBMITTED
-        assert res.requires_resubmission is True
-        assert res.resubmit_info == ResubmitInfo(nodes=["liveness"])
+        res = await client.sessions.resubmit(
+            s.session_id,
+            nodes_to_resubmit=[
+                ResubmitNode(node_id="live_node", feature=ResubmitFeature.LIVENESS),
+                {"node_id": "dict_node", "feature": "OCR"},
+            ],
+        )
+        assert res.session_id == s.session_id
+        assert res.status is None
+        assert res.requested_status == SessionStatus.RESUBMITTED
+        updated_s = await client.sessions.get(s.session_id)
+        assert updated_s.status == SessionStatus.RESUBMITTED
+        assert updated_s.requires_resubmission is True
+        assert updated_s.resubmit_info == ResubmitInfo(nodes=["live_node", "dict_node"])
 
         res_update = await client.sessions.update_status(s.session_id, SessionStatus.APPROVED)
-        assert res_update.status == SessionStatus.APPROVED
+        assert res_update.status is None
+        assert res_update.requested_status == SessionStatus.APPROVED
 
         with pytest.raises(ValueError, match="Invalid manual status transition"):
             await client.sessions.update_status(s.session_id, "In Review")

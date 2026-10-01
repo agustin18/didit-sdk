@@ -941,10 +941,24 @@ def _callable_takes_token(store: Any, fn: Any, token: str | None) -> bool:
 
 def release_webhook_event(
     store: Any,
+    key: str,
+    token: str | None = None,
+) -> None:
+    """Safely release a webhook event reservation synchronously.
+
+    Preserves 100% backward compatibility with v0.2.0 callers expecting parameter name 'key'
+    and returning None. For tokenized reservation CAS success checks, use
+    release_webhook_reservation().
+    """
+    release_webhook_reservation(store, key, token)
+
+
+def release_webhook_reservation(
+    store: Any,
     event_id: str,
     token: str | None = None,
 ) -> bool:
-    """Safely release a webhook event reservation synchronously.
+    """Safely release a webhook event reservation synchronously, returning CAS outcome.
 
     Returns:
         bool: True if released or not a reservation store, False if CAS release failed.
@@ -965,10 +979,24 @@ def release_webhook_event(
 
 async def arelease_webhook_event(
     store: Any,
+    key: str,
+    token: str | None = None,
+) -> None:
+    """Safely release a webhook event reservation across sync and async stores.
+
+    Preserves 100% backward compatibility with v0.2.0 callers expecting parameter name 'key'
+    and returning None. For tokenized reservation CAS success checks, use
+    arelease_webhook_reservation().
+    """
+    await arelease_webhook_reservation(store, key, token)
+
+
+async def arelease_webhook_reservation(
+    store: Any,
     event_id: str,
     token: str | None = None,
 ) -> bool:
-    """Safely release a webhook event reservation across sync and async stores.
+    """Safely release a webhook reservation across sync and async stores, returning CAS outcome.
 
     Returns:
         bool: True if released or not a reservation store, False if CAS release failed.

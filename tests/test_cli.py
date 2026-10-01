@@ -165,11 +165,14 @@ class TestDiditCLI:
         respx.get("https://verification.didit.me/system/healthcheck/").mock(
             side_effect=ConnectError("Connection refused")
         )
+        respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
+            side_effect=ConnectError("Connection refused")
+        )
 
         exit_code = main(["doctor"])
         assert exit_code == 1
         captured = capsys.readouterr()
-        assert "Failed to connect to Didit system" in captured.err
+        assert "Failed to connect to Didit API during authentication check" in captured.err
 
     @respx.mock
     def test_cli_doctor_connection_failure_json(
@@ -179,6 +182,9 @@ class TestDiditCLI:
         respx.get("https://verification.didit.me/system/healthcheck/").mock(
             side_effect=ConnectError("Connection refused")
         )
+        respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
+            side_effect=ConnectError("Connection refused")
+        )
 
         exit_code = main(["doctor", "--json"])
         assert exit_code == 1
@@ -186,6 +192,36 @@ class TestDiditCLI:
         data = json.loads(captured.out)
         assert data["status"] == "error"
         assert data["error"]["code"] == "CONNECTION_ERROR"
+
+    @respx.mock
+    def test_cli_doctor_strict_connection_failure(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("DIDIT_API_KEY", "valid_key")
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
+            side_effect=ConnectError("Connection refused")
+        )
+
+        exit_code = main(["doctor", "--strict"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Healthcheck probe unavailable" in captured.err
+
+    @respx.mock
+    def test_cli_doctor_strict_connection_failure_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("DIDIT_API_KEY", "valid_key")
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
+            return_value=Response(503, text="Service Unavailable")
+        )
+
+        exit_code = main(["doctor", "--strict", "--json"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "error"
+        assert data["error"]["code"] == "CONNECTIVITY_UNAVAILABLE"
 
     @respx.mock
     def test_cli_doctor_auth_failure_401(
@@ -241,6 +277,62 @@ class TestDiditCLI:
         captured = capsys.readouterr()
         assert "[WARN] API Connection: Healthcheck unavailable" in captured.out
         assert "[OK] Authentication: API key verified" in captured.out
+
+    @respx.mock
+    def test_cli_doctor_strict_failure(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("DIDIT_API_KEY", "test_key")
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
+            return_value=Response(503, json={"detail": "Service unavailable"})
+        )
+        respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
+            return_value=Response(404, json={"detail": "Not found"})
+        )
+
+        exit_code = main(["doctor", "--strict"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Healthcheck probe unavailable" in captured.err
+
+    @respx.mock
+    def test_cli_doctor_strict_failure_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("DIDIT_API_KEY", "test_key")
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
+            return_value=Response(503, json={"detail": "Service unavailable"})
+        )
+        respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
+            return_value=Response(404, json={"detail": "Not found"})
+        )
+
+        exit_code = main(["doctor", "--strict", "--json"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "error"
+        assert data["error"]["code"] == "CONNECTIVITY_UNAVAILABLE"
+
+    @respx.mock
+    def test_cli_doctor_strict_success(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("DIDIT_API_KEY", "test_key")
+        monkeypatch.setenv("DIDIT_WEBHOOK_SECRET", "test_secret")
+        respx.get("https://verification.didit.me/system/healthcheck/").mock(
+            return_value=Response(200, json={"status": "ok"})
+        )
+        respx.get("https://verification.didit.me/v3/session/auth-probe-check/").mock(
+            return_value=Response(404, json={"detail": "Not found"})
+        )
+
+        exit_code = main(["doctor", "--strict", "--json"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "ok"
+        assert data["connectivity"] == "ok"
 
     # -------------------------------------------------------------------------
     # didit webhook verify
@@ -621,8 +713,8 @@ class TestDiditCLI:
                 "resubmit",
                 "sess_resub",
                 "--nodes",
-                "document",
-                "liveness",
+                "document:OCR",
+                "liveness:LIVENESS",
                 "--json",
             ]
         )
@@ -795,19 +887,26 @@ class TestDiditCLI:
         assert data["status"] == "error"
         assert data["error"]["code"] == "SESSION_NOT_FOUND"
 
+    @pytest.mark.parametrize("force", [True, False])
     def test_secure_write_bytes_cleanup_on_error(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force: bool
     ) -> None:
-        # Test that temporary files are cleaned up if file replacement fails
+        # Test that temporary files are cleaned up if file publication fails
         target = tmp_path / "final.pdf"
 
-        def broken_replace(*args: Any, **kwargs: Any) -> None:
-            raise OSError("Replace operation failed")
+        def broken_publish(*args: Any, **kwargs: Any) -> None:
+            raise OSError("Publish operation failed")
 
-        monkeypatch.setattr(Path, "replace", broken_replace)
-        with pytest.raises(OSError, match="Replace operation failed"):
-            _secure_write_bytes(target, b"test")
+        monkeypatch.setattr("didit.resources.sessions._atomic_publish", broken_publish)
+        with pytest.raises(OSError, match="Publish operation failed"):
+            _secure_write_bytes(target, b"test", force=force)
         assert not target.exists()
+
+    def test_secure_write_bytes_exists_error_without_force(self, tmp_path: Path) -> None:
+        target = tmp_path / "existing.pdf"
+        target.write_bytes(b"existing")
+        with pytest.raises(FileExistsError, match="already exists. Use --force"):
+            _secure_write_bytes(target, b"new", force=False)
 
     # -------------------------------------------------------------------------
     # didit sandbox scenarios
@@ -828,6 +927,81 @@ class TestDiditCLI:
         assert data["status"] == "ok"
         assert data["count"] > 0
         assert all(s["category"] == "decline" for s in data["scenarios"])
+
+    @respx.mock
+    def test_cli_sandbox_scenarios_remote_success_list(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("DIDIT_API_KEY", "test_key")
+        remote_data = [
+            {"slug": "approve", "category": "success", "description": "Remote approved"},
+        ]
+        route = respx.get("https://verification.didit.me/v1/sandbox/scenarios/").mock(
+            return_value=Response(200, json=remote_data)
+        )
+        exit_code = main(["sandbox", "scenarios", "--json"])
+        assert exit_code == 0
+        assert route.called
+        assert route.calls[0].request.headers["x-api-key"] == "test_key"
+        assert "Authorization" not in route.calls[0].request.headers
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["count"] == 1
+        assert data["scenarios"][0]["description"] == "Remote approved"
+
+    @respx.mock
+    def test_cli_sandbox_scenarios_remote_success_dict(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        remote_data = {
+            "scenarios": [
+                {"slug": "approve", "category": "success", "description": "Remote dict approved"},
+            ]
+        }
+        respx.get("https://verification.didit.me/v1/sandbox/scenarios/").mock(
+            return_value=Response(200, json=remote_data)
+        )
+        exit_code = main(["sandbox", "scenarios", "--json"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["count"] == 1
+        assert data["scenarios"][0]["description"] == "Remote dict approved"
+
+    @respx.mock
+    def test_cli_sandbox_scenarios_strict_error(self, capsys: pytest.CaptureFixture[str]) -> None:
+        respx.get("https://verification.didit.me/v1/sandbox/scenarios/").mock(
+            return_value=Response(500, json={"error": "internal error"})
+        )
+        exit_code = main(["sandbox", "scenarios", "--strict", "--json"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "error"
+        assert data["error"]["code"] == "CONNECTIVITY_UNAVAILABLE"
+
+    @respx.mock
+    def test_cli_sandbox_scenarios_strict_invalid_format(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        respx.get("https://verification.didit.me/v1/sandbox/scenarios/").mock(
+            return_value=Response(200, json="invalid_string")
+        )
+        exit_code = main(["sandbox", "scenarios", "--strict", "--json"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "error"
+        assert data["error"]["code"] == "CONNECTIVITY_UNAVAILABLE"
+
+    def test_cli_sandbox_scenarios_unreadable_api_key_file(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        missing_key_file = tmp_path / "missing_key.txt"
+        exit_code = main(["sandbox", "scenarios", "--api-key-file", str(missing_key_file)])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Available Didit Sandbox Scenarios" in captured.out
 
     # -------------------------------------------------------------------------
     # Root Error Handling & --debug
@@ -1146,14 +1320,19 @@ class TestDiditCLI:
                 },
             )
         )
-        exit_code = main(["session", "resubmit", "sess_r_text", "--nodes", "document"])
+        exit_code = main(["session", "resubmit", "sess_r_text", "--nodes", "document:OCR"])
         assert exit_code == 0
         captured = capsys.readouterr()
         assert "Session ID:             sess_r_text" in captured.out
-        assert "Status:                 Resubmitted" in captured.out
+        assert "Confirmed Status:       Resubmitted" in captured.out
+        assert "Requested Status:       Resubmitted" in captured.out
         assert "Requires Resubmission:  True" in captured.out
         assert "Resubmit Steps:         document" in captured.out
         assert "Remaining Attempts:     2" in captured.out
+        assert (
+            "Note: Run 'didit session get sess_r_text --decision' "
+            "to retrieve current verified outcome." in captured.out
+        )
 
     @respx.mock
     def test_cli_session_resubmit_text_mode_no_info(
@@ -1165,7 +1344,6 @@ class TestDiditCLI:
                 200,
                 json={
                     "session_id": "sess_r_text2",
-                    "status": "Resubmitted",
                 },
             )
         )
@@ -1173,7 +1351,14 @@ class TestDiditCLI:
         assert exit_code == 0
         captured = capsys.readouterr()
         assert "Session ID:             sess_r_text2" in captured.out
+        assert "Confirmed Status:" not in captured.out
+        assert "Requested Status:       Resubmitted" in captured.out
+        assert "Requires Resubmission:  False" in captured.out
         assert "Resubmit Details" not in captured.out
+        assert (
+            "Note: Run 'didit session get sess_r_text2 --decision' "
+            "to retrieve current verified outcome." in captured.out
+        )
 
     @respx.mock
     def test_cli_session_list_text_mode(
@@ -1277,7 +1462,9 @@ class TestDiditCLI:
         def mock_secure_write(*args: Any, **kwargs: Any) -> None:
             raise PermissionError("Permission denied on target path")
 
-        monkeypatch.setattr("didit.cli._secure_write_bytes", mock_secure_write)
+        monkeypatch.setattr(
+            "didit.resources.sessions.SessionsResource.download_pdf_report", mock_secure_write
+        )
 
         exit_code = main(["session", "pdf", "sess_pdf_io", "--json"])
         assert exit_code == 1
@@ -1348,12 +1535,18 @@ class TestDiditCLI:
                 },
             )
         )
-        exit_code = main(["session", "resubmit", "sess_no_att", "--nodes", "document"])
+        exit_code = main(["session", "resubmit", "sess_no_att", "--nodes", "document:OCR"])
         assert exit_code == 0
         captured = capsys.readouterr()
         assert "Session ID:             sess_no_att" in captured.out
+        assert "Confirmed Status:       Resubmitted" in captured.out
+        assert "Requested Status:       Resubmitted" in captured.out
         assert "Resubmit Steps:         document" in captured.out
         assert "Remaining Attempts:" not in captured.out
+        assert (
+            "Note: Run 'didit session get sess_no_att --decision' "
+            "to retrieve current verified outcome." in captured.out
+        )
 
     @pytest.mark.parametrize(
         ("args_list", "expected_msg"),

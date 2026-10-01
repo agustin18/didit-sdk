@@ -13,6 +13,7 @@ __all__ = [
     "parse_django_webhook",
     "parse_flask_webhook",
     "release_didit_claim",
+    "release_didit_reservation",
 ]
 
 
@@ -21,6 +22,7 @@ def __getattr__(name: str) -> Any:
         "DiditWebhookGuard",
         "DiditWebhookRoute",
         "release_didit_claim",
+        "release_didit_reservation",
         "complete_didit_reservation",
     ):
         try:
@@ -29,6 +31,7 @@ def __getattr__(name: str) -> Any:
                 DiditWebhookRoute,
                 complete_didit_reservation,
                 release_didit_claim,
+                release_didit_reservation,
             )
 
             if name == "DiditWebhookGuard":
@@ -37,6 +40,8 @@ def __getattr__(name: str) -> Any:
                 return DiditWebhookRoute
             if name == "complete_didit_reservation":
                 return complete_didit_reservation
+            if name == "release_didit_reservation":
+                return release_didit_reservation
             return release_didit_claim
         except ImportError as e:
             raise ImportError(

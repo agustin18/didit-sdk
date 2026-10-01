@@ -24,7 +24,7 @@ Unofficial, community-maintained Python client for the [Didit](https://didit.me)
 - **Didit V3 API Alignment**: Full fidelity to upstream V3 schemas (`id_verifications[]`, `liveness_checks[]`, `face_matches[]`, `aml_screenings[]`, `reviews[]`, `warnings[]`) with forward compatibility (`extra="allow"`), verification warnings helper (`decision.has_warning(...)`), and backward-compatible property accessors.
 - **Complete Session Lifecycle**: Covers all 10 documented Didit session statuses (`Not Started`, `In Progress`, `In Review`, `Approved`, `Declined`, `Expired`, `Abandoned`, `Kyc Expired`, `Resubmitted`, `Awaiting User`) with granular state inspection (`is_decided`, `is_closed`, `requires_review`, `requires_user_action`, `requires_resubmission`).
 - **Resubmission & Manual Review**: Full resubmission support (`client.sessions.resubmit()`) and review status transitions (`client.sessions.update_status()`).
-- **Official Compliance PDF Reports**: Download verification audit reports (`client.sessions.generate_pdf_report()`) with binary header (`%PDF-`) and MIME format validation.
+- **Official Compliance PDF Reports**: Download verification audit reports (`client.sessions.generate_pdf_report()` / `download_pdf_report()`) with binary header (`%PDF-`), MIME format validation, and atomic disk writes with private permissions.
 - **Production CLI (`didit`)**: Inspect sessions, download PDF reports, verify webhook signatures, query sandbox scenarios, and run diagnostic health checks with zero-credential exposure in command arguments.
 - **Cryptographic Security & DoS Defense**: Constant-time HMAC-SHA256 signature verification (`X-Signature-V2` & `X-Signature`), full UTF-8 Unicode canonical JSON support (`ensure_ascii=False`, `allow_nan=False`), authoritative signed body anti-replay verification with strict header matching, and bounded body limits (HTTP 413) to prevent memory exhaustion.
 - **Webhook Deduplication**: Thread-safe in-memory and atomic Redis deduplication stores (`InMemoryWebhookDedupStore`, `RedisWebhookDedupStore`, `AsyncRedisWebhookDedupStore`) with configurable duplicate actions (`respond_ok`, `pass`, `raise`).
@@ -215,16 +215,27 @@ if decision.requires_resubmission and decision.resubmit_info:
     if decision.resubmit_info.available_attempts is not None:
         print(f"Attempts remaining: {decision.resubmit_info.available_attempts}")
 
+    from didit import ResubmitFeature, ResubmitNode
+
     # Request resubmission for specific failed check nodes
-    resubmitted = client.sessions.resubmit(
+    result = client.sessions.resubmit(
         "sess_12345",
-        nodes_to_resubmit=["document"],
+        nodes_to_resubmit=[
+            ResubmitNode(
+                node_id="feature_ocr",
+                feature=ResubmitFeature.OCR,
+            )
+        ],
     )
-    print(f"Session status: {resubmitted.status}")
+    print(f"Resubmission acknowledged for session: {result.session_id}")
+
+    # Query decision endpoint to retrieve the updated session state
+    current_decision = client.sessions.get_decision(result.session_id)
+    print(f"Current decision status: {current_decision.status}")
 
 # Update session status (manual review transitions: 'Approved', 'Declined', 'Resubmitted')
 updated = client.sessions.update_status("sess_12345", new_status=SessionStatus.APPROVED)
-print(f"Session status updated to: {updated.status}")
+print(f"Session status update acknowledged: {updated.session_id}")
 ```
 
 ### 7. Compliance PDF Reports
@@ -236,11 +247,15 @@ from didit import Didit
 
 client = Didit()
 
-# Download verification report (60s default timeout per upstream processing characteristics)
-pdf_bytes = client.sessions.generate_pdf_report("sess_12345")
+# Option A: Direct-to-disk secure download (atomic swap, POSIX 0600 private permissions)
+report_path = client.sessions.download_pdf_report(
+    "sess_12345",
+    "reports/verification_report.pdf",
+    force=True,
+)
 
-with open("verification_report.pdf", "wb") as f:
-    f.write(pdf_bytes)
+# Option B: In-memory raw binary bytes (60s default timeout tailored to upstream generation latencies)
+pdf_bytes = client.sessions.generate_pdf_report("sess_12345")
 ```
 
 ---
@@ -421,8 +436,11 @@ Audit your network connectivity, API availability, and authentication credential
 
 ```bash
 didit doctor
-# Or with structured JSON
+# Or with structured JSON output
 didit doctor --json
+
+# In CI/CD pipelines (fails with non-zero exit code if healthcheck or latency probes are unavailable)
+didit doctor --strict
 ```
 
 #### Session Inspection & Lifecycle
@@ -440,8 +458,8 @@ didit session create --workflow-id wf_standard --vendor-data user_42
 didit session list --status Approved --limit 20
 didit session list --all --max-sessions 500
 
-# Resubmit a session
-didit session resubmit sess_12345 --workflow-id wf_retry
+# Resubmit a session with explicit node and feature
+didit session resubmit sess_12345 --node feature_ocr:OCR
 
 # Download PDF report with atomic POSIX 0600 file permissions and overwrite guard
 didit session pdf sess_12345 --output report.pdf
@@ -456,18 +474,22 @@ Verify Didit webhook signatures without exposing raw payload bytes in command ar
 # Verify using body file
 didit webhook verify \
   --secret-file /etc/secrets/didit_secret.txt \
-  --signature-header "t=1700000000,v2=..." \
+  --signature "d8e8fca2dc64a51e6d1b7a2d4b6c8e9f0123456789abcdef0123456789abcdef" \
+  --timestamp 1700000000 \
   --body-file payload.json
 
 # Or verify from stdin in Unix pipelines
 cat payload.json | didit webhook verify \
   --secret-file /etc/secrets/didit_secret.txt \
-  --signature-header "t=1700000000,v2=..." \
+  --signature "d8e8fca2dc64a51e6d1b7a2d4b6c8e9f0123456789abcdef0123456789abcdef" \
+  --timestamp 1700000000 \
   --stdin
 
 # Bypass timestamp freshness check for historic replay audits (emits warning to stderr)
 cat payload.json | didit webhook verify \
-  --signature-header "t=1600000000,v2=..." \
+  --secret-file /etc/secrets/didit_secret.txt \
+  --signature "d8e8fca2dc64a51e6d1b7a2d4b6c8e9f0123456789abcdef0123456789abcdef" \
+  --timestamp 1600000000 \
   --stdin \
   --skip-freshness-check
 ```
@@ -478,7 +500,7 @@ List official Didit sandbox simulation slugs with optional category filtering:
 
 ```bash
 didit sandbox scenarios
-didit sandbox scenarios --category declined
+didit sandbox scenarios --category decline
 ```
 
 ---

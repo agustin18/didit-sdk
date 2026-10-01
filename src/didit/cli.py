@@ -8,12 +8,10 @@ and sandbox scenario exploration.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import re
 import sys
-import tempfile
 import time
 import traceback
 import urllib.parse
@@ -34,6 +32,8 @@ from didit.errors import (
     DiditPermissionError,
     DiditSignatureError,
 )
+from didit.models.enums import SessionStatus
+from didit.resources.sessions import _secure_write_bytes as _secure_write_bytes
 from didit.webhooks import parse_webhook_payload
 
 SANDBOX_SCENARIOS: list[dict[str, str]] = [
@@ -199,35 +199,6 @@ def _resolve_body(args: argparse.Namespace) -> str:
     return sys.stdin.read()
 
 
-def _secure_write_bytes(dest_path: Path, data: bytes, *, force: bool = False) -> None:
-    """Atomically write binary data to disk enforcing 0600 private permissions."""
-    if dest_path.exists() and not force:
-        raise FileExistsError(f"File '{dest_path}' already exists. Use --force to overwrite.")
-
-    dest_dir = dest_path.parent
-    dest_dir.mkdir(parents=True, exist_ok=True)
-
-    tmp_fd, tmp_path_str = tempfile.mkstemp(dir=dest_dir, prefix=".didit_tmp_")
-    tmp_path = Path(tmp_path_str)
-    fd_closed = False
-    try:
-        with contextlib.suppress(AttributeError, OSError):
-            os.fchmod(tmp_fd, 0o600)
-        with os.fdopen(tmp_fd, "wb") as f:
-            fd_closed = True
-            f.write(data)
-        tmp_path.replace(dest_path)
-        with contextlib.suppress(AttributeError, OSError):
-            os.chmod(dest_path, 0o600)
-    except Exception:
-        if not fd_closed:
-            with contextlib.suppress(OSError):
-                os.close(tmp_fd)
-        with contextlib.suppress(OSError):
-            tmp_path.unlink(missing_ok=True)
-        raise
-
-
 def _get_client(args: argparse.Namespace) -> Didit:
     """Instantiate a synchronous Didit client resolving configuration safely."""
     api_key = _resolve_api_key(args)
@@ -271,21 +242,35 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     health_url = f"{origin}/system/healthcheck/"
 
     conn_ok = False
+    conn_err_reason: str | None = None
     start_time = time.monotonic()
     try:
         with httpx.Client(timeout=10.0) as http_client:
             health_resp = http_client.get(health_url)
             latency_ms = (time.monotonic() - start_time) * 1000.0
-            conn_ok = health_resp.is_success
-    except (httpx.ConnectError, httpx.TimeoutException):
-        return _emit_error(
-            "CONNECTION_ERROR",
-            f"Failed to connect to Didit system at {origin}. Check network connectivity.",
-            is_json=is_json,
-        )
-    except Exception:
+            if health_resp.status_code == 200:
+                conn_ok = True
+            else:
+                conn_ok = False
+                conn_err_reason = f"HTTP {health_resp.status_code}"
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
         latency_ms = (time.monotonic() - start_time) * 1000.0
         conn_ok = False
+        conn_err_reason = str(exc) or "Network connection failed"
+    except Exception as exc:
+        latency_ms = (time.monotonic() - start_time) * 1000.0
+        conn_ok = False
+        conn_err_reason = str(exc) or "Unexpected healthcheck error"
+
+    strict = getattr(args, "strict", False)
+    if strict and not conn_ok:
+        msg = f"Healthcheck probe unavailable at {health_url} ({conn_err_reason})"
+        return _emit_error(
+            "CONNECTIVITY_UNAVAILABLE",
+            msg,
+            is_json=is_json,
+            exit_code=1,
+        )
 
     # 2. Authentication Probe (verifying permissions without reading user KYC data)
     try:
@@ -526,14 +511,31 @@ def _cmd_session_resubmit(args: argparse.Namespace) -> int:
 
     text_lines = [
         f"Session ID:             {session.session_id}",
-        f"Status:                 {session.status.value}",
-        f"Requires Resubmission:  {session.requires_resubmission}",
     ]
-    if session.resubmit_info:
-        nodes_str = ", ".join(session.resubmit_info.nodes) if session.resubmit_info.nodes else "all"
+    if session.status is not None:
+        stat_str = (
+            session.status.value
+            if isinstance(session.status, SessionStatus)
+            else str(session.status)
+        )
+        text_lines.append(f"Confirmed Status:       {stat_str}")
+    req_stat = (
+        session.requested_status.value
+        if isinstance(session.requested_status, SessionStatus)
+        else (session.requested_status or "Resubmitted")
+    )
+    text_lines.append(f"Requested Status:       {req_stat}")
+    text_lines.append(f"Requires Resubmission:  {session.requires_resubmission}")
+    text_lines.append(
+        "Note: Run 'didit session get "
+        f"{session.session_id} --decision' to retrieve current verified outcome."
+    )
+    resub_info = getattr(session, "resubmit_info", None)
+    if resub_info:
+        nodes_str = ", ".join(resub_info.nodes) if resub_info.nodes else "all"
         text_lines.append(f"Resubmit Steps:         {nodes_str}")
-        if session.resubmit_info.available_attempts is not None:
-            text_lines.append(f"Remaining Attempts:     {session.resubmit_info.available_attempts}")
+        if resub_info.available_attempts is not None:
+            text_lines.append(f"Remaining Attempts:     {resub_info.available_attempts}")
 
     return _emit_success({}, is_json=False, text_lines=text_lines)
 
@@ -631,11 +633,23 @@ def _cmd_session_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_session_pdf(args: argparse.Namespace) -> int:
-    """Download compliance PDF report for a session and save privately to disk."""
+    """Download compliance PDF report for a session using direct-to-disk streaming."""
     is_json = getattr(args, "json", False)
+    force = getattr(args, "force", False)
     client = _get_client(args)
+
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "", args.session_id) + ".pdf"
+    out_path = Path(args.output).resolve() if args.output else Path(safe_name).resolve()
+
     try:
-        pdf_bytes = client.sessions.generate_pdf_report(args.session_id)
+        saved_path = client.sessions.download_pdf_report(
+            args.session_id,
+            destination=out_path,
+            force=force,
+        )
+        pdf_size = saved_path.stat().st_size
+    except FileExistsError as exc:
+        return _emit_error("FILE_EXISTS", str(exc), is_json=is_json)
     except DiditNotFoundError:
         return _emit_error(
             "SESSION_NOT_FOUND",
@@ -644,14 +658,6 @@ def _cmd_session_pdf(args: argparse.Namespace) -> int:
         )
     except DiditAPIError as exc:
         return _emit_error("API_ERROR", str(exc), is_json=is_json)
-
-    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "", args.session_id) + ".pdf"
-    out_path = Path(args.output).resolve() if args.output else Path(safe_name).resolve()
-
-    try:
-        _secure_write_bytes(out_path, pdf_bytes, force=getattr(args, "force", False))
-    except FileExistsError as exc:
-        return _emit_error("FILE_EXISTS", str(exc), is_json=is_json)
     except Exception as exc:
         return _emit_error(
             "IO_ERROR",
@@ -661,13 +667,13 @@ def _cmd_session_pdf(args: argparse.Namespace) -> int:
 
     perms = "0600" if sys.platform != "win32" else "private"
     data = {
-        "saved_to": str(out_path),
-        "bytes": len(pdf_bytes),
+        "saved_to": str(saved_path),
+        "bytes": pdf_size,
         "session_id": args.session_id,
         "permissions": perms,
     }
     mode_text = "mode: 0600" if sys.platform != "win32" else "permissions: private"
-    text_lines = [f"Report saved to {out_path} ({len(pdf_bytes)} bytes, {mode_text})"]
+    text_lines = [f"Report saved to {saved_path} ({pdf_size} bytes, {mode_text})"]
     return _emit_success(data, is_json=is_json, text_lines=text_lines)
 
 
@@ -675,6 +681,7 @@ def _cmd_sandbox_scenarios(args: argparse.Namespace) -> int:
     """List available Didit sandbox testing scenarios."""
     is_json = getattr(args, "json", False)
     category = getattr(args, "category", None)
+    strict = getattr(args, "strict", False)
 
     base_url = (
         getattr(args, "base_url", None) or os.environ.get("DIDIT_BASE_URL") or DEFAULT_BASE_URL
@@ -683,10 +690,21 @@ def _cmd_sandbox_scenarios(args: argparse.Namespace) -> int:
     origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
     live_url = f"{origin}/v1/sandbox/scenarios/"
 
+    api_key: str | None = None
+    try:
+        api_key = _resolve_api_key(args)
+    except DiditConfigurationError:
+        api_key = None
+
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["x-api-key"] = api_key
+
     scenarios = SANDBOX_SCENARIOS
+    remote_error: str | None = None
     try:
         with httpx.Client(timeout=5.0) as http_client:
-            resp = http_client.get(live_url)
+            resp = http_client.get(live_url, headers=headers)
             if resp.is_success:
                 data = resp.json()
                 if isinstance(data, list):
@@ -697,8 +715,20 @@ def _cmd_sandbox_scenarios(args: argparse.Namespace) -> int:
                     and isinstance(data["scenarios"], list)
                 ):
                     scenarios = data["scenarios"]
-    except Exception:
-        scenarios = SANDBOX_SCENARIOS
+                else:
+                    remote_error = "Invalid format returned by remote sandbox scenarios endpoint"
+            else:
+                remote_error = f"HTTP {resp.status_code} returned by remote endpoint"
+    except Exception as exc:
+        remote_error = str(exc) or "Network connection failed"
+
+    if strict and remote_error:
+        return _emit_error(
+            "CONNECTIVITY_UNAVAILABLE",
+            f"Remote sandbox scenarios catalog unavailable at {live_url}: {remote_error}",
+            is_json=is_json,
+            exit_code=1,
+        )
 
     if category:
         scenarios = [s for s in scenarios if s.get("category") == category]
@@ -788,6 +818,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--secret-file",
         help="Path to file containing webhook secret to inspect (defaults to DIDIT_WEBHOOK_SECRET)",
     )
+    doctor_parser.add_argument(
+        "--strict",
+        action="store_true",
+        default=False,
+        help="Fail with non-zero exit code if healthcheck or latency probe is unavailable",
+    )
     doctor_parser.set_defaults(func=_cmd_doctor)
 
     # didit webhook
@@ -875,8 +911,13 @@ def build_parser() -> argparse.ArgumentParser:
     session_resubmit.add_argument("session_id", help="Didit session identifier")
     session_resubmit.add_argument(
         "--nodes",
+        "--node",
+        dest="nodes",
         nargs="*",
-        help="Optional workflow step/node keys to resubmit (e.g. 'document', 'liveness')",
+        help=(
+            "Workflow nodes to resubmit formatted as 'node_id:FEATURE' "
+            "(e.g. 'feature_ocr:OCR', 'feature_liveness:LIVENESS')"
+        ),
     )
     session_resubmit.set_defaults(func=_cmd_session_resubmit)
 
@@ -939,6 +980,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--category",
         choices=["success", "decline", "review"],
         help="Filter scenarios by category outcome",
+    )
+    sandbox_scenarios.add_argument(
+        "--strict",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Fail-closed if remote sandbox scenarios catalog is unreachable",
     )
     sandbox_scenarios.set_defaults(func=_cmd_sandbox_scenarios)
 

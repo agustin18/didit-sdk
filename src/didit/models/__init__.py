@@ -7,18 +7,31 @@ from didit.models.decision import (
     DocumentData,
     ReviewData,
 )
-from didit.models.enums import Language, ManualSessionStatus, SessionStatus
+from didit.models.enums import (
+    CURRENT_DIDIT_LANGUAGES,
+    CallbackMethod,
+    Language,
+    ManualSessionStatus,
+    SessionStatus,
+)
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
+    ContactDetails,
     CreateSessionRequest,
+    ExpectedDetails,
     ObservedSessionState,
+    ResubmitFeature,
     ResubmitInfo,
+    ResubmitNode,
     SessionListItem,
     SessionListPage,
     SessionReconciliationReport,
     SessionResponse,
     SessionStateSource,
+    UpdateSessionStatusRequest,
+    UpdateSessionStatusResponse,
+    UpdateStatusResponse,
 )
 from didit.models.webhook import WebhookPayload
 
@@ -27,13 +40,19 @@ __all__ = [
     "AsyncSessionStateSource",
     "BatchReconciliationReport",
     "BiometricsData",
+    "CURRENT_DIDIT_LANGUAGES",
+    "CallbackMethod",
+    "ContactDetails",
     "CreateSessionRequest",
     "DecisionResponse",
     "DocumentData",
+    "ExpectedDetails",
     "Language",
     "ManualSessionStatus",
     "ObservedSessionState",
+    "ResubmitFeature",
     "ResubmitInfo",
+    "ResubmitNode",
     "ReviewData",
     "SessionListItem",
     "SessionListPage",
@@ -41,5 +60,8 @@ __all__ = [
     "SessionResponse",
     "SessionStateSource",
     "SessionStatus",
+    "UpdateSessionStatusRequest",
+    "UpdateSessionStatusResponse",
+    "UpdateStatusResponse",
     "WebhookPayload",
 ]
