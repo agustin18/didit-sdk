@@ -20,13 +20,13 @@ The 1.x line of `didit-sdk` commits to the following functional domains, disting
 | :--- | :--- | :--- |
 | **Verification Sessions** | Creation, configuration, metadata attachment, status retrieval, and resilient polling. | Implemented in v0.2.x |
 | **Decisions & Warnings** | Decision retrieval (`get_decision`), risk normalization, multi-warning categorization, and review breakdown. | Implemented in v0.2.x |
-| **Session Lifecycle Actions** | Pure snapshot session reconciliation (`reconcile`, `reconcile_range`), resubmission requests (`resubmit`), and compliance PDF report generation (`generate_pdf_report`). | Planned for v0.3.0 |
+| **Session Lifecycle Actions** | Pure snapshot session reconciliation (`reconcile`, `reconcile_range`), resubmission requests (`resubmit`), and direct-to-disk streaming compliance PDF report generation (`download_pdf_report`). | Implemented in v0.3.0 |
 | **Webhook Ingestion** | Constant-time HMAC-SHA256 signature verification, Didit X-Signature-V2 canonical JSON formatting, and anti-replay defense. | Implemented in v0.2.x |
-| **Distributed Deduplication & Leases** | Crash-recoverable Tokenized Webhook Reservation Protocol backed by Redis (Lua CAS atomic leases) and thread-safe memory stores. | Planned for v0.3.0 |
+| **Distributed Deduplication & Leases** | Crash-recoverable Tokenized Webhook Reservation Protocol backed by Redis (Lua CAS atomic leases) and thread-safe memory stores. | Implemented in v0.3.0 |
 | **Framework Adapters** | First-class, dependency-isolated guards for **FastAPI**, **Django 5.2+**, and **Flask 3.1+**. | Implemented in v0.2.x |
 | **Sandbox & Simulation** | Offline simulation harness (`SimulatedDidit`, `SimulatedAsyncDidit`), live sandbox scenario cataloging (`GET /v1/sandbox/scenarios/`), and test fixture builders. | Implemented in v0.2.x / v0.3.0 |
 | **Security & Privacy** | Automatic PII redaction (`redacted_dump()`), zero-PII safe exceptions by default (`capture_sensitive_response=False`). | Implemented in v0.2.x / v0.3.0 |
-| **Live Contract Testing** | Automated periodic CI testing against live Didit sandbox endpoints to detect upstream schema and behavioral drift. | Planned for v0.3.0 |
+| **Live Contract Testing** | Automated periodic CI testing against live Didit sandbox endpoints with strict fail-closed credentials gate; continuous offline matrix validation. | Implemented in v0.3.0 |
 
 ---
 

@@ -196,12 +196,16 @@ def _atomic_publish(tmp_path: Path, dest_path: Path, *, force: bool = False) -> 
             f"File '{dest_path}' already exists. Use --force to overwrite."
         ) from err
     except (AttributeError, NotImplementedError, OSError) as exc:
+        tmp_path.unlink(missing_ok=True)
         if dest_path.exists():
-            tmp_path.unlink(missing_ok=True)
             raise FileExistsError(
                 f"File '{dest_path}' already exists. Use --force to overwrite."
             ) from exc
-        tmp_path.replace(dest_path)
+        raise OSError(
+            f"Filesystem at '{dest_path.parent}' does not support atomic link-based publication "
+            "without overwrite. Operation aborted to prevent TOCTOU overwrite race. "
+            "Use force=True to allow replacement."
+        ) from exc
 
 
 class _SyncRequestor:
@@ -228,23 +232,15 @@ class _SyncRequestor:
         self._capture_sensitive_response = capture_sensitive_response
         self._event_sink = event_sink
 
-    def request(
+    def _execute_with_retry(
         self,
         method: str,
+        url: str,
         path: str,
-        *,
-        json: Any = None,
-        params: Mapping[str, Any] | None = None,
-        options: RequestOptions | None = None,
+        headers: dict[str, str],
+        effective_opts: RequestOptions | None,
+        fn: Any,
     ) -> httpx.Response:
-        """Execute HTTP request with safe retries and exponential backoff.
-
-        Enforces follow_redirects=False to prevent cross-origin credential leaks.
-        Synchronous timeouts enforce socket-level limits and monotonic deadline budgets.
-        """
-        effective_opts = _merge_options(self._default_options, options)
-        url = _resolve_url(self._base_url, path)
-        headers = _build_headers(self._api_key, effective_opts)
         timeout = (
             effective_opts.timeout
             if (effective_opts and effective_opts.timeout is not None)
@@ -269,15 +265,7 @@ class _SyncRequestor:
                 eff_timeout = timeout
 
             try:
-                response = self._client.request(
-                    method=method,
-                    url=url,
-                    json=json,
-                    params=params,
-                    headers=headers,
-                    timeout=eff_timeout,
-                    follow_redirects=False,
-                )
+                response: httpx.Response = fn(eff_timeout)
                 if response.is_success:
                     return response
 
@@ -304,7 +292,6 @@ class _SyncRequestor:
                         response.headers.get("retry-after")
                     )
                     if retry_after is not None and retry_after > self._retry_policy.max_retry_after:
-                        # Exceeds max allowable wait; abort immediately
                         handle_http_error(
                             response,
                             capture_sensitive_response=self._capture_sensitive_response,
@@ -450,6 +437,40 @@ class _SyncRequestor:
                     f"Network error during transmission: {exc}"
                 ) from _resolve_cause(exc, self._capture_sensitive_response)
 
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: Mapping[str, Any] | None = None,
+        options: RequestOptions | None = None,
+    ) -> httpx.Response:
+        """Execute HTTP request with safe retries and exponential backoff.
+
+        Enforces follow_redirects=False to prevent cross-origin credential leaks.
+        Synchronous timeouts enforce socket-level limits and monotonic deadline budgets.
+        """
+        effective_opts = _merge_options(self._default_options, options)
+        url = _resolve_url(self._base_url, path)
+        headers = _build_headers(self._api_key, effective_opts)
+        return self._execute_with_retry(
+            method,
+            url,
+            path,
+            headers,
+            effective_opts,
+            lambda eff_to: self._client.request(
+                method=method,
+                url=url,
+                json=json,
+                params=params,
+                headers=headers,
+                timeout=eff_to,
+                follow_redirects=False,
+            ),
+        )
+
     def stream_download(
         self,
         path: str,
@@ -459,8 +480,8 @@ class _SyncRequestor:
         options: RequestOptions | None = None,
         validate_pdf: bool = True,
     ) -> Path:
-        """Stream HTTP GET response directly to disk enforcing bounded memory
-        and private permissions.
+        """Stream HTTP GET response directly to disk enforcing bounded memory,
+        monotonic deadlines, safe retries, and private permissions.
         """
         dest_path = dest_path.resolve()
         if dest_path.exists() and not force:
@@ -472,79 +493,87 @@ class _SyncRequestor:
         effective_opts = _merge_options(self._default_options, options)
         url = _resolve_url(self._base_url, path)
         headers = _build_headers(self._api_key, effective_opts)
-        timeout = (
-            effective_opts.timeout
-            if (effective_opts and effective_opts.timeout is not None)
-            else self._default_timeout
-        )
 
-        tmp_fd, tmp_path_str = tempfile.mkstemp(dir=dest_dir, prefix=".didit_tmp_")
-        tmp_path = Path(tmp_path_str)
-        fd_closed = False
+        staged_paths: list[Path] = []
+
+        def _execute_stream(eff_timeout: float | httpx.Timeout | None) -> httpx.Response:
+            while staged_paths:
+                staged_paths.pop().unlink(missing_ok=True)
+
+            tmp_fd, tmp_path_str = tempfile.mkstemp(dir=dest_dir, prefix=".didit_tmp_")
+            tmp_path = Path(tmp_path_str)
+            staged_paths.append(tmp_path)
+            fd_closed = False
+
+            try:
+                with contextlib.suppress(AttributeError, OSError):
+                    os.fchmod(tmp_fd, 0o600)
+
+                with self._client.stream(
+                    "GET",
+                    url,
+                    headers=headers,
+                    timeout=eff_timeout,
+                    follow_redirects=False,
+                ) as response:
+                    if response.status_code >= 400:
+                        response.read()
+                        return response
+
+                    if validate_pdf:
+                        content_type_lower = response.headers.get("content-type", "").lower()
+                        mime_ok = (
+                            "application/pdf" in content_type_lower
+                            or "application/octet-stream" in content_type_lower
+                        )
+                        if not mime_ok:
+                            raise DiditAPIError(
+                                "Invalid PDF report response received from server",
+                                status_code=502,
+                            )
+
+                    with os.fdopen(tmp_fd, "wb") as f:
+                        fd_closed = True
+                        first_chunk = True
+                        for chunk in response.iter_bytes(chunk_size=65536):
+                            if first_chunk:
+                                if validate_pdf and not chunk.startswith(b"%PDF-"):
+                                    raise DiditAPIError(
+                                        "Invalid PDF report response received from server",
+                                        status_code=502,
+                                    )
+                                first_chunk = False
+                            f.write(chunk)
+
+                        if first_chunk and validate_pdf:
+                            raise DiditAPIError(
+                                "Invalid PDF report response received from server",
+                                status_code=502,
+                            )
+
+                        f.flush()
+                        with contextlib.suppress(AttributeError, OSError):
+                            os.fsync(f.fileno())
+
+                    return response
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
+            finally:
+                if not fd_closed:
+                    with contextlib.suppress(OSError):
+                        os.close(tmp_fd)
+
         try:
-            with contextlib.suppress(AttributeError, OSError):
-                os.fchmod(tmp_fd, 0o600)
-
-            with self._client.stream(
-                "GET",
-                url,
-                headers=headers,
-                timeout=timeout,
-                follow_redirects=False,
-            ) as response:
-                if response.status_code >= 400:
-                    response.read()
-                    handle_http_error(
-                        response,
-                        capture_sensitive_response=self._capture_sensitive_response,
-                    )
-
-                if validate_pdf:
-                    content_type_lower = response.headers.get("content-type", "").lower()
-                    mime_ok = (
-                        "application/pdf" in content_type_lower
-                        or "application/octet-stream" in content_type_lower
-                    )
-                    if not mime_ok:
-                        raise DiditAPIError(
-                            "Invalid PDF report response received from server",
-                            status_code=502,
-                        )
-
-                with os.fdopen(tmp_fd, "wb") as f:
-                    fd_closed = True
-                    first_chunk = True
-                    for chunk in response.iter_bytes(chunk_size=65536):
-                        if first_chunk:
-                            if validate_pdf and not chunk.startswith(b"%PDF-"):
-                                raise DiditAPIError(
-                                    "Invalid PDF report response received from server",
-                                    status_code=502,
-                                )
-                            first_chunk = False
-                        f.write(chunk)
-
-                    if first_chunk and validate_pdf:
-                        raise DiditAPIError(
-                            "Invalid PDF report response received from server",
-                            status_code=502,
-                        )
-
-                    f.flush()
-                    with contextlib.suppress(AttributeError, OSError):
-                        os.fsync(f.fileno())
-
+            self._execute_with_retry("GET", url, path, headers, effective_opts, _execute_stream)
+            tmp_path = staged_paths[-1]
             _atomic_publish(tmp_path, dest_path, force=force)
             with contextlib.suppress(AttributeError, OSError):
                 os.chmod(dest_path, 0o600)
             return dest_path
-        except Exception:
-            if not fd_closed:
-                with contextlib.suppress(OSError):
-                    os.close(tmp_fd)
-            with contextlib.suppress(OSError):
-                tmp_path.unlink(missing_ok=True)
-            raise
+        finally:
+            while staged_paths:
+                staged_paths.pop().unlink(missing_ok=True)
 
 
 class _AsyncRequestor:
@@ -571,24 +600,15 @@ class _AsyncRequestor:
         self._capture_sensitive_response = capture_sensitive_response
         self._event_sink = event_sink
 
-    async def request(
+    async def _aexecute_with_retry(
         self,
         method: str,
+        url: str,
         path: str,
-        *,
-        json: Any = None,
-        params: Mapping[str, Any] | None = None,
-        options: RequestOptions | None = None,
+        headers: dict[str, str],
+        effective_opts: RequestOptions | None,
+        fn: Any,
     ) -> httpx.Response:
-        """Execute asynchronous HTTP request with safe retries and exponential backoff.
-
-        Enforces follow_redirects=False to prevent cross-origin credential leaks,
-        and applies an outer wall-clock timeout via asyncio.wait_for to prevent slow-drip
-        transmission attacks.
-        """
-        effective_opts = _merge_options(self._default_options, options)
-        url = _resolve_url(self._base_url, path)
-        headers = _build_headers(self._api_key, effective_opts)
         timeout = (
             effective_opts.timeout
             if (effective_opts and effective_opts.timeout is not None)
@@ -620,17 +640,11 @@ class _AsyncRequestor:
                     wall_clock_timeout = None
 
             try:
-                coro = self._client.request(
-                    method=method,
-                    url=url,
-                    json=json,
-                    params=params,
-                    headers=headers,
-                    timeout=eff_timeout,
-                    follow_redirects=False,
-                )
+                coro = fn(eff_timeout)
                 if wall_clock_timeout is not None:
-                    response = await asyncio.wait_for(coro, timeout=wall_clock_timeout)
+                    response: httpx.Response = await asyncio.wait_for(
+                        coro, timeout=wall_clock_timeout
+                    )
                 else:
                     response = await coro
 
@@ -810,6 +824,41 @@ class _AsyncRequestor:
                     f"Network error during transmission: {exc}"
                 ) from _resolve_cause(exc, self._capture_sensitive_response)
 
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: Mapping[str, Any] | None = None,
+        options: RequestOptions | None = None,
+    ) -> httpx.Response:
+        """Execute asynchronous HTTP request with safe retries and exponential backoff.
+
+        Enforces follow_redirects=False to prevent cross-origin credential leaks,
+        and applies an outer wall-clock timeout via asyncio.wait_for to prevent slow-drip
+        transmission attacks.
+        """
+        effective_opts = _merge_options(self._default_options, options)
+        url = _resolve_url(self._base_url, path)
+        headers = _build_headers(self._api_key, effective_opts)
+        return await self._aexecute_with_retry(
+            method,
+            url,
+            path,
+            headers,
+            effective_opts,
+            lambda eff_to: self._client.request(
+                method=method,
+                url=url,
+                json=json,
+                params=params,
+                headers=headers,
+                timeout=eff_to,
+                follow_redirects=False,
+            ),
+        )
+
     async def astream_download(
         self,
         path: str,
@@ -819,7 +868,9 @@ class _AsyncRequestor:
         options: RequestOptions | None = None,
         validate_pdf: bool = True,
     ) -> Path:
-        """Stream HTTP GET response asynchronously directly to disk."""
+        """Stream HTTP GET response asynchronously directly to disk enforcing bounded memory,
+        monotonic deadlines, slow-drip protection, safe retries, and private permissions.
+        """
         dest_path = dest_path.resolve()
         if dest_path.exists() and not force:
             raise FileExistsError(f"File '{dest_path}' already exists. Use --force to overwrite.")
@@ -830,76 +881,86 @@ class _AsyncRequestor:
         effective_opts = _merge_options(self._default_options, options)
         url = _resolve_url(self._base_url, path)
         headers = _build_headers(self._api_key, effective_opts)
-        timeout = (
-            effective_opts.timeout
-            if (effective_opts and effective_opts.timeout is not None)
-            else self._default_timeout
-        )
 
-        tmp_fd, tmp_path_str = tempfile.mkstemp(dir=dest_dir, prefix=".didit_tmp_")
-        tmp_path = Path(tmp_path_str)
-        fd_closed = False
+        staged_paths: list[Path] = []
+
+        async def _execute_astream(eff_timeout: float | httpx.Timeout | None) -> httpx.Response:
+            while staged_paths:
+                staged_paths.pop().unlink(missing_ok=True)
+
+            tmp_fd, tmp_path_str = tempfile.mkstemp(dir=dest_dir, prefix=".didit_tmp_")
+            tmp_path = Path(tmp_path_str)
+            staged_paths.append(tmp_path)
+            fd_closed = False
+
+            try:
+                with contextlib.suppress(AttributeError, OSError):
+                    os.fchmod(tmp_fd, 0o600)
+
+                async with self._client.stream(
+                    "GET",
+                    url,
+                    headers=headers,
+                    timeout=eff_timeout,
+                    follow_redirects=False,
+                ) as response:
+                    if response.status_code >= 400:
+                        await response.aread()
+                        return response
+
+                    if validate_pdf:
+                        content_type_lower = response.headers.get("content-type", "").lower()
+                        mime_ok = (
+                            "application/pdf" in content_type_lower
+                            or "application/octet-stream" in content_type_lower
+                        )
+                        if not mime_ok:
+                            raise DiditAPIError(
+                                "Invalid PDF report response received from server",
+                                status_code=502,
+                            )
+
+                    with os.fdopen(tmp_fd, "wb") as f:
+                        fd_closed = True
+                        first_chunk = True
+                        async for chunk in response.aiter_bytes(chunk_size=65536):
+                            if first_chunk:
+                                if validate_pdf and not chunk.startswith(b"%PDF-"):
+                                    raise DiditAPIError(
+                                        "Invalid PDF report response received from server",
+                                        status_code=502,
+                                    )
+                                first_chunk = False
+                            f.write(chunk)
+
+                        if first_chunk and validate_pdf:
+                            raise DiditAPIError(
+                                "Invalid PDF report response received from server",
+                                status_code=502,
+                            )
+
+                        f.flush()
+                        with contextlib.suppress(AttributeError, OSError):
+                            os.fsync(f.fileno())
+
+                    return response
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
+            finally:
+                if not fd_closed:
+                    with contextlib.suppress(OSError):
+                        os.close(tmp_fd)
+
         try:
-            with contextlib.suppress(AttributeError, OSError):
-                os.fchmod(tmp_fd, 0o600)
-
-            async with self._client.stream(
-                "GET",
-                url,
-                headers=headers,
-                timeout=timeout,
-                follow_redirects=False,
-            ) as response:
-                if response.status_code >= 400:
-                    await response.aread()
-                    handle_http_error(
-                        response,
-                        capture_sensitive_response=self._capture_sensitive_response,
-                    )
-
-                if validate_pdf:
-                    content_type_lower = response.headers.get("content-type", "").lower()
-                    mime_ok = (
-                        "application/pdf" in content_type_lower
-                        or "application/octet-stream" in content_type_lower
-                    )
-                    if not mime_ok:
-                        raise DiditAPIError(
-                            "Invalid PDF report response received from server",
-                            status_code=502,
-                        )
-
-                with os.fdopen(tmp_fd, "wb") as f:
-                    fd_closed = True
-                    first_chunk = True
-                    async for chunk in response.aiter_bytes(chunk_size=65536):
-                        if first_chunk:
-                            if validate_pdf and not chunk.startswith(b"%PDF-"):
-                                raise DiditAPIError(
-                                    "Invalid PDF report response received from server",
-                                    status_code=502,
-                                )
-                            first_chunk = False
-                        f.write(chunk)
-
-                    if first_chunk and validate_pdf:
-                        raise DiditAPIError(
-                            "Invalid PDF report response received from server",
-                            status_code=502,
-                        )
-
-                    f.flush()
-                    with contextlib.suppress(AttributeError, OSError):
-                        os.fsync(f.fileno())
-
+            await self._aexecute_with_retry(
+                "GET", url, path, headers, effective_opts, _execute_astream
+            )
+            tmp_path = staged_paths[-1]
             await asyncio.to_thread(_atomic_publish, tmp_path, dest_path, force=force)
             with contextlib.suppress(AttributeError, OSError):
                 os.chmod(dest_path, 0o600)
             return dest_path
-        except Exception:
-            if not fd_closed:
-                with contextlib.suppress(OSError):
-                    os.close(tmp_fd)
-            with contextlib.suppress(OSError):
-                tmp_path.unlink(missing_ok=True)
-            raise
+        finally:
+            while staged_paths:
+                staged_paths.pop().unlink(missing_ok=True)

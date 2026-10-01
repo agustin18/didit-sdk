@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1195,12 +1197,20 @@ class TestAtomicPublishAndStreamingDownload:
         src.write_text("fallback content")
 
         def broken_link(s: Any, d: Any) -> None:
-            raise OSError("Cross-device link not permitted")
+            raise OSError("Operation not supported on filesystem")
 
         monkeypatch.setattr(os, "link", broken_link)
-        _atomic_publish(src, dest, force=False)
+        with pytest.raises(OSError, match="does not support atomic link-based publication"):
+            _atomic_publish(src, dest, force=False)
         assert not src.exists()
-        assert dest.read_text() == "fallback content"
+        assert not dest.exists()
+
+        # When force=True, replace is used safely
+        src_force = tmp_path / "src_force.tmp"
+        src_force.write_text("forced content")
+        _atomic_publish(src_force, dest, force=True)
+        assert not src_force.exists()
+        assert dest.read_text() == "forced content"
 
     def test_atomic_publish_hardlink_oserror_fallback_when_dest_exists(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1495,4 +1505,165 @@ class TestAtomicPublishAndStreamingDownload:
         saved = await requestor.astream_download("/async-pdf-multi", dest, validate_pdf=True)
         assert saved == dest.resolve()
         assert dest.read_bytes() == chunk1 + chunk2
+        await client.aclose()
+
+    def test_sync_stream_download_deadline_exceeded_before_execution(self, tmp_path: Path) -> None:
+        client = httpx.Client()
+        requestor = _SyncRequestor(client, base_url="https://api.didit.me/v3", api_key="k")
+        dest = tmp_path / "deadline_fail.pdf"
+        opts = RequestOptions(deadline=time.monotonic() - 1.0)
+        with pytest.raises(DiditTimeoutError, match="deadline exceeded before execution"):
+            requestor.stream_download("/pdf", dest, options=opts)
+
+    @respx.mock
+    def test_sync_stream_download_retry_on_503_and_succeed(self, tmp_path: Path) -> None:
+        route = respx.get("https://api.didit.me/v3/pdf-retry").mock(
+            side_effect=[
+                httpx.Response(503, json={"error": "service unavailable"}),
+                httpx.Response(
+                    200,
+                    content=b"%PDF-1.4 retried ok",
+                    headers={"Content-Type": "application/pdf"},
+                ),
+            ]
+        )
+        client = httpx.Client()
+        policy = RetryPolicy(max_retries=2, base_delay=0.01, jitter=False)
+        requestor = _SyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        dest = tmp_path / "retried.pdf"
+        saved = requestor.stream_download("/pdf-retry", dest)
+        assert saved == dest.resolve()
+        assert dest.read_bytes() == b"%PDF-1.4 retried ok"
+        assert route.call_count == 2
+
+    @respx.mock
+    def test_sync_stream_download_retry_429_exceeds_max_retry_after_aborts(
+        self, tmp_path: Path
+    ) -> None:
+        respx.get("https://api.didit.me/v3/pdf-429").mock(
+            return_value=httpx.Response(
+                429, headers={"Retry-After": "120"}, json={"error": "rate limit"}
+            )
+        )
+        client = httpx.Client()
+        policy = RetryPolicy(max_retries=2, base_delay=0.01, max_retry_after=60.0, jitter=False)
+        requestor = _SyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        dest = tmp_path / "rate_limit.pdf"
+        with pytest.raises(DiditAPIError):
+            requestor.stream_download("/pdf-429", dest)
+        assert not dest.exists()
+
+    def test_sync_stream_download_pool_timeout(self, tmp_path: Path) -> None:
+        class PoolTimeoutTransport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                raise httpx.PoolTimeout("Pool exhausted")
+
+        client = httpx.Client(transport=PoolTimeoutTransport())
+        requestor = _SyncRequestor(client, base_url="https://api.didit.me/v3", api_key="k")
+        dest = tmp_path / "pool.pdf"
+        with pytest.raises(DiditPoolTimeoutError, match="Connection pool acquisition timed out"):
+            requestor.stream_download("/pdf-pool", dest)
+        assert not dest.exists()
+
+    def test_sync_stream_download_network_error_retry_and_exhaustion(self, tmp_path: Path) -> None:
+        class FlakyTransport(httpx.BaseTransport):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                self.calls += 1
+                raise httpx.ConnectError("Network is unreachable")
+
+        transport = FlakyTransport()
+        client = httpx.Client(transport=transport)
+        policy = RetryPolicy(max_retries=1, base_delay=0.01, jitter=False)
+        requestor = _SyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        dest = tmp_path / "flaky.pdf"
+        with pytest.raises(DiditConnectionError, match="Failed to connect"):
+            requestor.stream_download("/pdf-flaky", dest)
+        assert transport.calls == 2
+        assert not dest.exists()
+
+    @pytest.mark.asyncio
+    async def test_async_stream_download_deadline_exceeded_before_execution(
+        self, tmp_path: Path
+    ) -> None:
+        client = httpx.AsyncClient()
+        requestor = _AsyncRequestor(client, base_url="https://api.didit.me/v3", api_key="k")
+        dest = tmp_path / "async_deadline_fail.pdf"
+        opts = RequestOptions(deadline=time.monotonic() - 1.0)
+        with pytest.raises(DiditTimeoutError, match="deadline exceeded before execution"):
+            await requestor.astream_download("/async-pdf", dest, options=opts)
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_stream_download_retry_on_503_and_succeed(self, tmp_path: Path) -> None:
+        route = respx.get("https://api.didit.me/v3/async-retry").mock(
+            side_effect=[
+                httpx.Response(503, json={"error": "service unavailable"}),
+                httpx.Response(
+                    200,
+                    content=b"%PDF-1.4 async retried ok",
+                    headers={"Content-Type": "application/pdf"},
+                ),
+            ]
+        )
+        client = httpx.AsyncClient()
+        policy = RetryPolicy(max_retries=2, base_delay=0.01, jitter=False)
+        requestor = _AsyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", retry_policy=policy
+        )
+        dest = tmp_path / "async_retried.pdf"
+        saved = await requestor.astream_download("/async-retry", dest)
+        assert saved == dest.resolve()
+        assert dest.read_bytes() == b"%PDF-1.4 async retried ok"
+        assert route.call_count == 2
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_stream_download_slow_drip_timeout_aborts(self, tmp_path: Path) -> None:
+        class SlowDripAsyncStream(httpx.AsyncByteStream):
+            async def __aiter__(self) -> Any:
+                yield b"%PDF-1.4 start chunk"
+                await asyncio.sleep(0.5)
+                yield b"never reached"
+
+        class SlowDripTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                return httpx.Response(
+                    200,
+                    stream=SlowDripAsyncStream(),
+                    headers={"Content-Type": "application/pdf"},
+                )
+
+        client = httpx.AsyncClient(transport=SlowDripTransport())
+        requestor = _AsyncRequestor(
+            client, base_url="https://api.didit.me/v3", api_key="k", default_timeout=0.05
+        )
+        dest = tmp_path / "slow_drip.pdf"
+        opts = RequestOptions(max_retries=0)
+        with pytest.raises(DiditTimeoutError):
+            await requestor.astream_download("/slow-drip", dest, options=opts)
+        assert not dest.exists()
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_stream_download_pool_timeout(self, tmp_path: Path) -> None:
+        class AsyncPoolTimeoutTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                raise httpx.PoolTimeout("Async pool exhausted")
+
+        client = httpx.AsyncClient(transport=AsyncPoolTimeoutTransport())
+        requestor = _AsyncRequestor(client, base_url="https://api.didit.me/v3", api_key="k")
+        dest = tmp_path / "async_pool.pdf"
+        with pytest.raises(DiditPoolTimeoutError, match="Connection pool acquisition timed out"):
+            await requestor.astream_download("/async-pool", dest)
+        assert not dest.exists()
         await client.aclose()

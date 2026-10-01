@@ -902,6 +902,12 @@ class TestDiditCLI:
             _secure_write_bytes(target, b"test", force=force)
         assert not target.exists()
 
+    def test_secure_write_bytes_exists_error_without_force(self, tmp_path: Path) -> None:
+        target = tmp_path / "existing.pdf"
+        target.write_bytes(b"existing")
+        with pytest.raises(FileExistsError, match="already exists. Use --force"):
+            _secure_write_bytes(target, b"new", force=False)
+
     # -------------------------------------------------------------------------
     # didit sandbox scenarios
     # -------------------------------------------------------------------------
@@ -1444,7 +1450,9 @@ class TestDiditCLI:
         def mock_secure_write(*args: Any, **kwargs: Any) -> None:
             raise PermissionError("Permission denied on target path")
 
-        monkeypatch.setattr("didit.cli._secure_write_bytes", mock_secure_write)
+        monkeypatch.setattr(
+            "didit.resources.sessions.SessionsResource.download_pdf_report", mock_secure_write
+        )
 
         exit_code = main(["session", "pdf", "sess_pdf_io", "--json"])
         assert exit_code == 1

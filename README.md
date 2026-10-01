@@ -449,7 +449,7 @@ didit session list --status Approved --limit 20
 didit session list --all --max-sessions 500
 
 # Resubmit a session
-didit session resubmit sess_12345 --workflow-id wf_retry
+didit session resubmit sess_12345 --nodes document-verification-node
 
 # Download PDF report with atomic POSIX 0600 file permissions and overwrite guard
 didit session pdf sess_12345 --output report.pdf
@@ -464,18 +464,22 @@ Verify Didit webhook signatures without exposing raw payload bytes in command ar
 # Verify using body file
 didit webhook verify \
   --secret-file /etc/secrets/didit_secret.txt \
-  --signature-header "t=1700000000,v2=..." \
+  --signature "d8e8fca2dc64a51e6d1b7a2d4b6c8e9f0123456789abcdef0123456789abcdef" \
+  --timestamp 1700000000 \
   --body-file payload.json
 
 # Or verify from stdin in Unix pipelines
 cat payload.json | didit webhook verify \
   --secret-file /etc/secrets/didit_secret.txt \
-  --signature-header "t=1700000000,v2=..." \
+  --signature "d8e8fca2dc64a51e6d1b7a2d4b6c8e9f0123456789abcdef0123456789abcdef" \
+  --timestamp 1700000000 \
   --stdin
 
 # Bypass timestamp freshness check for historic replay audits (emits warning to stderr)
 cat payload.json | didit webhook verify \
-  --signature-header "t=1600000000,v2=..." \
+  --secret-file /etc/secrets/didit_secret.txt \
+  --signature "d8e8fca2dc64a51e6d1b7a2d4b6c8e9f0123456789abcdef0123456789abcdef" \
+  --timestamp 1600000000 \
   --stdin \
   --skip-freshness-check
 ```
@@ -486,7 +490,7 @@ List official Didit sandbox simulation slugs with optional category filtering:
 
 ```bash
 didit sandbox scenarios
-didit sandbox scenarios --category declined
+didit sandbox scenarios --category decline
 ```
 
 ---

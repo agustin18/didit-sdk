@@ -6,6 +6,8 @@ for callers relying on v0.2.0 behaviors, signatures, stores, and models.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 import respx
 from httpx import Response
@@ -225,29 +227,200 @@ class TestV020Compatibility:
         assert async_client.config.base_url == "https://cfg.didit.me/v3"
 
     def test_public_method_signatures_v020_frozen(self) -> None:
-        """Ensure core public methods have not changed or dropped parameters from v0.2.0."""
+        """Formally verify all v0.2.0 public method signatures remain backward-compatible.
+
+        Compares parameter names, kinds, defaults, and order against the v0.2.0 frozen manifest.
+        """
         import inspect
 
+        from didit.client import AsyncDidit, Didit
         from didit.resources.sessions import AsyncSessionsResource, SessionsResource
 
-        # SessionsResource.create signature
-        sig_create = inspect.signature(SessionsResource.create)
-        assert "workflow_id" in sig_create.parameters
-        assert "vendor_data" in sig_create.parameters
-        assert "callback" in sig_create.parameters
+        v020_signatures: dict[type, dict[str, list[tuple[str, inspect._ParameterKind, Any]]]] = {
+            Didit: {
+                "close": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty)
+                ],
+                "parse_webhook": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    ("raw_body", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    ("headers", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    ("secret", inspect.Parameter.KEYWORD_ONLY, None),
+                    ("max_age_seconds", inspect.Parameter.KEYWORD_ONLY, None),
+                ],
+                "verify_webhook": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    ("raw_body", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    ("headers", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    ("secret", inspect.Parameter.KEYWORD_ONLY, None),
+                    ("max_age_seconds", inspect.Parameter.KEYWORD_ONLY, None),
+                ],
+                "with_options": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    ("options", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                ],
+            },
+            AsyncDidit: {
+                "aclose": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty)
+                ],
+                "parse_webhook": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    ("raw_body", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    ("headers", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    ("secret", inspect.Parameter.KEYWORD_ONLY, None),
+                    ("max_age_seconds", inspect.Parameter.KEYWORD_ONLY, None),
+                ],
+                "verify_webhook": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    ("raw_body", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    ("headers", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    ("secret", inspect.Parameter.KEYWORD_ONLY, None),
+                    ("max_age_seconds", inspect.Parameter.KEYWORD_ONLY, None),
+                ],
+                "with_options": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    ("options", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                ],
+            },
+            SessionsResource: {
+                "create": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    (
+                        "vendor_data",
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.empty,
+                    ),
+                    ("workflow_id", inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.empty),
+                    ("callback", inspect.Parameter.KEYWORD_ONLY, None),
+                    ("language", inspect.Parameter.KEYWORD_ONLY, None),
+                    ("sandbox_scenario", inspect.Parameter.KEYWORD_ONLY, None),
+                    ("options", inspect.Parameter.KEYWORD_ONLY, None),
+                ],
+                "get": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    (
+                        "session_id",
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.empty,
+                    ),
+                    ("options", inspect.Parameter.KEYWORD_ONLY, None),
+                ],
+                "get_decision": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    (
+                        "session_id",
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.empty,
+                    ),
+                    ("options", inspect.Parameter.KEYWORD_ONLY, None),
+                ],
+                "poll_decision": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    (
+                        "session_id",
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.empty,
+                    ),
+                    ("timeout", inspect.Parameter.KEYWORD_ONLY, 60.0),
+                    ("interval", inspect.Parameter.KEYWORD_ONLY, 2.0),
+                    ("max_interval", inspect.Parameter.KEYWORD_ONLY, 10.0),
+                    ("backoff_multiplier", inspect.Parameter.KEYWORD_ONLY, 1.2),
+                    ("stop_on_review", inspect.Parameter.KEYWORD_ONLY, True),
+                    ("stop_when", inspect.Parameter.KEYWORD_ONLY, None),
+                    ("tolerate_transient_errors", inspect.Parameter.KEYWORD_ONLY, True),
+                    ("options", inspect.Parameter.KEYWORD_ONLY, None),
+                ],
+            },
+            AsyncSessionsResource: {
+                "create": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    (
+                        "vendor_data",
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.empty,
+                    ),
+                    ("workflow_id", inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.empty),
+                    ("callback", inspect.Parameter.KEYWORD_ONLY, None),
+                    ("language", inspect.Parameter.KEYWORD_ONLY, None),
+                    ("sandbox_scenario", inspect.Parameter.KEYWORD_ONLY, None),
+                    ("options", inspect.Parameter.KEYWORD_ONLY, None),
+                ],
+                "get": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    (
+                        "session_id",
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.empty,
+                    ),
+                    ("options", inspect.Parameter.KEYWORD_ONLY, None),
+                ],
+                "get_decision": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    (
+                        "session_id",
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.empty,
+                    ),
+                    ("options", inspect.Parameter.KEYWORD_ONLY, None),
+                ],
+                "poll_decision": [
+                    ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                    (
+                        "session_id",
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.empty,
+                    ),
+                    ("timeout", inspect.Parameter.KEYWORD_ONLY, 60.0),
+                    ("interval", inspect.Parameter.KEYWORD_ONLY, 2.0),
+                    ("max_interval", inspect.Parameter.KEYWORD_ONLY, 10.0),
+                    ("backoff_multiplier", inspect.Parameter.KEYWORD_ONLY, 1.2),
+                    ("stop_on_review", inspect.Parameter.KEYWORD_ONLY, True),
+                    ("stop_when", inspect.Parameter.KEYWORD_ONLY, None),
+                    ("tolerate_transient_errors", inspect.Parameter.KEYWORD_ONLY, True),
+                    ("options", inspect.Parameter.KEYWORD_ONLY, None),
+                ],
+            },
+        }
 
-        # SessionsResource.get signature
-        sig_get = inspect.signature(SessionsResource.get)
-        assert "session_id" in sig_get.parameters
+        for target_cls, methods in v020_signatures.items():
+            for method_name, expected_params in methods.items():
+                assert hasattr(target_cls, method_name), (
+                    f"{target_cls.__name__}.{method_name} missing"
+                )
+                actual_sig = inspect.signature(getattr(target_cls, method_name))
+                actual_params = list(actual_sig.parameters.values())
 
-        # SessionsResource.get_decision signature
-        sig_decision = inspect.signature(SessionsResource.get_decision)
-        assert "session_id" in sig_decision.parameters
+                for exp_name, exp_kind, exp_default in expected_params:
+                    assert exp_name in actual_sig.parameters, (
+                        f"{target_cls.__name__}.{method_name} dropped parameter {exp_name}"
+                    )
+                    param = actual_sig.parameters[exp_name]
+                    assert param.kind == exp_kind, (
+                        f"{target_cls.__name__}.{method_name}.{exp_name} "
+                        f"kind mismatch: {param.kind} vs {exp_kind}"
+                    )
+                    if exp_default is not inspect.Parameter.empty:
+                        assert param.default == exp_default, (
+                            f"{target_cls.__name__}.{method_name}.{exp_name} "
+                            f"default mismatch: {param.default} vs {exp_default}"
+                        )
 
-        # Async parity
-        async_sig_create = inspect.signature(AsyncSessionsResource.create)
-        assert "workflow_id" in async_sig_create.parameters
-        assert "vendor_data" in async_sig_create.parameters
+                exp_positional_names = [
+                    p[0]
+                    for p in expected_params
+                    if p[1]
+                    in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                ]
+                actual_positional_names = [
+                    p.name
+                    for p in actual_params
+                    if p.kind
+                    in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                ]
+                assert (
+                    actual_positional_names[: len(exp_positional_names)] == exp_positional_names
+                ), f"{target_cls.__name__}.{method_name} modified positional parameter order"
 
     def test_legacy_dedup_store_conformance(self) -> None:
         """Verify that InMemoryWebhookDedupStore supports legacy claim/release."""

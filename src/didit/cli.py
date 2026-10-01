@@ -615,11 +615,23 @@ def _cmd_session_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_session_pdf(args: argparse.Namespace) -> int:
-    """Download compliance PDF report for a session and save privately to disk."""
+    """Download compliance PDF report for a session using direct-to-disk streaming."""
     is_json = getattr(args, "json", False)
+    force = getattr(args, "force", False)
     client = _get_client(args)
+
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "", args.session_id) + ".pdf"
+    out_path = Path(args.output).resolve() if args.output else Path(safe_name).resolve()
+
     try:
-        pdf_bytes = client.sessions.generate_pdf_report(args.session_id)
+        saved_path = client.sessions.download_pdf_report(
+            args.session_id,
+            destination=out_path,
+            force=force,
+        )
+        pdf_size = saved_path.stat().st_size
+    except FileExistsError as exc:
+        return _emit_error("FILE_EXISTS", str(exc), is_json=is_json)
     except DiditNotFoundError:
         return _emit_error(
             "SESSION_NOT_FOUND",
@@ -628,14 +640,6 @@ def _cmd_session_pdf(args: argparse.Namespace) -> int:
         )
     except DiditAPIError as exc:
         return _emit_error("API_ERROR", str(exc), is_json=is_json)
-
-    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "", args.session_id) + ".pdf"
-    out_path = Path(args.output).resolve() if args.output else Path(safe_name).resolve()
-
-    try:
-        _secure_write_bytes(out_path, pdf_bytes, force=getattr(args, "force", False))
-    except FileExistsError as exc:
-        return _emit_error("FILE_EXISTS", str(exc), is_json=is_json)
     except Exception as exc:
         return _emit_error(
             "IO_ERROR",
@@ -645,13 +649,13 @@ def _cmd_session_pdf(args: argparse.Namespace) -> int:
 
     perms = "0600" if sys.platform != "win32" else "private"
     data = {
-        "saved_to": str(out_path),
-        "bytes": len(pdf_bytes),
+        "saved_to": str(saved_path),
+        "bytes": pdf_size,
         "session_id": args.session_id,
         "permissions": perms,
     }
     mode_text = "mode: 0600" if sys.platform != "win32" else "permissions: private"
-    text_lines = [f"Report saved to {out_path} ({len(pdf_bytes)} bytes, {mode_text})"]
+    text_lines = [f"Report saved to {saved_path} ({pdf_size} bytes, {mode_text})"]
     return _emit_success(data, is_json=is_json, text_lines=text_lines)
 
 
@@ -676,6 +680,7 @@ def _cmd_sandbox_scenarios(args: argparse.Namespace) -> int:
 
     headers: dict[str, str] = {}
     if api_key:
+        headers["x-api-key"] = api_key
         headers["Authorization"] = f"Bearer {api_key}"
 
     scenarios = SANDBOX_SCENARIOS
