@@ -27,6 +27,7 @@ from didit.events import DiditEventSink, ReconciliationDriftObserved, safe_emit
 from didit.models.decision import DecisionResponse
 from didit.models.enums import (
     ALLOWED_MANUAL_STATUSES,
+    CallbackMethod,
     Language,
     ManualSessionStatus,
     SessionStatus,
@@ -37,6 +38,7 @@ from didit.models.session import (
     ContactDetails,
     CreateSessionRequest,
     ExpectedDetails,
+    JsonValue,
     ObservedSessionState,
     ResubmitNode,
     SessionListPage,
@@ -102,35 +104,19 @@ def _normalize_nodes_to_resubmit(
     normalized: list[dict[str, str]] = []
     for item in nodes:
         if isinstance(item, ResubmitNode):
-            feat_val = (
-                item.feature.value if isinstance(item.feature, Enum) else str(item.feature).strip()
-            )
-            if feat_val.upper() in NON_RESUBMITTABLE_FEATURES:
-                raise ValueError(
-                    f"Feature '{feat_val}' is a non-resubmittable organizational step. "
-                    f"Didit business rules reject resubmission for '{feat_val}'."
-                )
-            normalized.append({"node_id": item.node_id, "feature": feat_val})
+            node_obj = item
         elif isinstance(item, dict):
             if "node_id" not in item or "feature" not in item:
                 raise ValueError(
                     f"Each dict in nodes_to_resubmit must contain 'node_id' and 'feature', "
                     f"got {item}"
                 )
-            feat_val = (
-                item["feature"].value
-                if isinstance(item["feature"], Enum)
-                else str(item["feature"]).strip()
-            )
             node_val = str(item["node_id"]).strip()
+            raw_feat = item["feature"]
+            feat_val = raw_feat.value if isinstance(raw_feat, Enum) else str(raw_feat).strip()
             if not node_val or not feat_val:
                 raise ValueError(f"Both 'node_id' and 'feature' must be non-empty in {item}")
-            if feat_val.upper() in NON_RESUBMITTABLE_FEATURES:
-                raise ValueError(
-                    f"Feature '{feat_val}' is a non-resubmittable organizational step. "
-                    f"Didit business rules reject resubmission for '{feat_val}'."
-                )
-            normalized.append({"node_id": node_val, "feature": feat_val})
+            node_obj = ResubmitNode(node_id=node_val, feature=feat_val)  # type: ignore[arg-type]
         elif isinstance(item, str):
             raw_node = item.strip()
             if not raw_node:
@@ -143,22 +129,24 @@ def _normalize_nodes_to_resubmit(
                 )
             node_part, feat_part = raw_node.split(":", 1)
             node_clean = node_part.strip()
-            feat_clean = feat_part.strip().upper()
+            feat_clean = feat_part.strip()
             if not node_clean or not feat_clean:
                 raise ValueError(
                     f"Invalid shorthand '{item}'. Both node_id and feature must be non-empty."
                 )
-            if feat_clean in NON_RESUBMITTABLE_FEATURES:
-                raise ValueError(
-                    f"Feature '{feat_clean}' is a non-resubmittable organizational step. "
-                    f"Didit business rules reject resubmission for '{feat_clean}'."
-                )
-            normalized.append({"node_id": node_clean, "feature": feat_clean})
+            node_obj = ResubmitNode(node_id=node_clean, feature=feat_clean)  # type: ignore[arg-type]
         else:
             raise TypeError(
                 f"Each item in nodes_to_resubmit must be a ResubmitNode, dict, or string, "
                 f"got {type(item).__name__} ({item!r})."
             )
+
+        if node_obj.feature.value in NON_RESUBMITTABLE_FEATURES:
+            raise ValueError(
+                f"Feature '{node_obj.feature.value}' is a non-resubmittable organizational step. "
+                f"Didit business rules reject resubmission for '{node_obj.feature.value}'."
+            )
+        normalized.append({"node_id": node_obj.node_id, "feature": node_obj.feature.value})
     return normalized
 
 
@@ -282,8 +270,8 @@ class SessionsResource:
         *,
         workflow_id: str,
         callback: str | None = None,
-        callback_method: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        callback_method: CallbackMethod | None = None,
+        metadata: JsonValue | None = None,
         language: Language | str | None = None,
         contact_details: ContactDetails | dict[str, Any] | None = None,
         expected_details: ExpectedDetails | dict[str, Any] | None = None,
@@ -297,8 +285,9 @@ class SessionsResource:
             vendor_data: Optional internal customer/user reference identifier.
             workflow_id: Didit workflow ID configuration.
             callback: Optional URL Didit will redirect the user to after completing verification.
-            callback_method: Optional HTTP method for callback ('both', 'get', 'post').
-            metadata: Optional arbitrary metadata dictionary stored with the session.
+            callback_method: Optional device receiving callback redirect
+                ('initiator', 'completer', 'both').
+            metadata: Optional arbitrary JSON value stored with the session.
             language: Optional UI language code for the hosted flow (e.g. 'es', 'en').
             contact_details: Optional contact details to pre-fill or enforce (email, phone, etc.).
             expected_details: Optional expected user/business details to cross-validate.
@@ -955,8 +944,8 @@ class AsyncSessionsResource:
         *,
         workflow_id: str,
         callback: str | None = None,
-        callback_method: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        callback_method: CallbackMethod | None = None,
+        metadata: JsonValue | None = None,
         language: Language | str | None = None,
         contact_details: ContactDetails | dict[str, Any] | None = None,
         expected_details: ExpectedDetails | dict[str, Any] | None = None,
@@ -964,7 +953,26 @@ class AsyncSessionsResource:
         sandbox_scenario: str | None = None,
         options: RequestOptions | None = None,
     ) -> SessionResponse:
-        """Create a new verification session asynchronously."""
+        """Create a new verification session asynchronously.
+
+        Args:
+            vendor_data: Optional internal customer/user reference identifier.
+            workflow_id: Didit workflow ID configuration.
+            callback: Optional URL Didit will redirect the user to after completing verification.
+            callback_method: Optional device receiving callback redirect
+                ('initiator', 'completer', 'both').
+            metadata: Optional arbitrary JSON value stored with the session.
+            language: Optional UI language code for the hosted flow (e.g. 'es', 'en').
+            contact_details: Optional contact details to pre-fill or enforce (email, phone, etc.).
+            expected_details: Optional expected user/business details to cross-validate.
+            portrait_image: Optional Base64 reference portrait image for biometric match.
+            sandbox_scenario: Optional Didit sandbox outcome slug e.g. 'approve',
+                'decline_document_expired'.
+            options: Optional per-request HTTP options.
+
+        Returns:
+            SessionResponse: Containing session_id, url, token, and status.
+        """
         lang_str = language.value if isinstance(language, Language) else language
         payload = CreateSessionRequest(
             workflow_id=workflow_id,

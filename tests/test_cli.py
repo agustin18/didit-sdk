@@ -1329,6 +1329,10 @@ class TestDiditCLI:
         assert "Requires Resubmission:  True" in captured.out
         assert "Resubmit Steps:         document" in captured.out
         assert "Remaining Attempts:     2" in captured.out
+        assert (
+            "Note: Run 'didit session get sess_r_text --decision' "
+            "to retrieve current verified outcome." in captured.out
+        )
 
     @respx.mock
     def test_cli_session_resubmit_text_mode_no_info(
@@ -1351,6 +1355,10 @@ class TestDiditCLI:
         assert "Requested Status:       Resubmitted" in captured.out
         assert "Requires Resubmission:  False" in captured.out
         assert "Resubmit Details" not in captured.out
+        assert (
+            "Note: Run 'didit session get sess_r_text2 --decision' "
+            "to retrieve current verified outcome." in captured.out
+        )
 
     @respx.mock
     def test_cli_session_list_text_mode(
@@ -1535,6 +1543,10 @@ class TestDiditCLI:
         assert "Requested Status:       Resubmitted" in captured.out
         assert "Resubmit Steps:         document" in captured.out
         assert "Remaining Attempts:" not in captured.out
+        assert (
+            "Note: Run 'didit session get sess_no_att --decision' "
+            "to retrieve current verified outcome." in captured.out
+        )
 
     @pytest.mark.parametrize(
         ("args_list", "expected_msg"),

@@ -8,7 +8,7 @@ import pytest
 
 from didit.errors import DiditAPIError, DiditNotFoundError
 from didit.models.decision import DocumentData
-from didit.models.enums import SessionStatus
+from didit.models.enums import CallbackMethod, SessionStatus
 from didit.models.session import ResubmitFeature, ResubmitInfo, ResubmitNode
 from didit.simulation import SimulatedAsyncDidit, SimulatedDidit
 from didit.webhooks import verify_webhook_signature
@@ -23,11 +23,15 @@ class TestSimulatedDidit:
             vendor_data="user_sim_1",
             workflow_id="wf_sim",
             callback="https://example.com/callback",
+            callback_method=CallbackMethod.INITIATOR,
+            metadata={"sim_tier": "gold"},
         )
         assert session.session_id.startswith("sim_")
         assert session.status == SessionStatus.NOT_STARTED
         assert session.vendor_data == "user_sim_1"
         assert session.workflow_id == "wf_sim"
+        assert session.callback_method == CallbackMethod.INITIATOR
+        assert session.metadata == {"sim_tier": "gold"}
 
         # 2. Get session
         fetched = client.sessions.get(session.session_id)
@@ -188,9 +192,13 @@ class TestSimulatedAsyncDidit:
         session = await client.sessions.create(
             vendor_data="user_sim_async",
             workflow_id="wf_sim_async",
+            callback_method=CallbackMethod.BOTH,
+            metadata={"sim_tier": "platinum"},
         )
         assert session.session_id.startswith("sim_")
         assert session.status == SessionStatus.NOT_STARTED
+        assert session.callback_method == CallbackMethod.BOTH
+        assert session.metadata == {"sim_tier": "platinum"}
 
         fetched = await client.sessions.get(session.session_id)
         assert fetched.session_id == session.session_id

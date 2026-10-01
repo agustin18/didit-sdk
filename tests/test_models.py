@@ -994,9 +994,13 @@ class TestSessionListAndReconciliationModels:
         """Verify ResubmitNode serializes feature enum and raw string properly."""
         node_enum = ResubmitNode(node_id="ocr_1", feature=ResubmitFeature.OCR)
         assert node_enum.model_dump() == {"node_id": "ocr_1", "feature": "OCR"}
+        assert node_enum.model_dump(mode="json") == {"node_id": "ocr_1", "feature": "OCR"}
 
-        node_str = ResubmitNode(node_id="face_1", feature="CUSTOM_FEATURE")
-        assert node_str.model_dump() == {"node_id": "face_1", "feature": "CUSTOM_FEATURE"}
+        node_str = ResubmitNode(node_id="face_1", feature="FACE_MATCH")  # type: ignore[arg-type]
+        assert node_str.model_dump() == {"node_id": "face_1", "feature": "FACE_MATCH"}
+
+        with pytest.raises(ValidationError):
+            ResubmitNode(node_id="ocr_1", feature=12345)  # type: ignore[arg-type]
 
     def test_update_session_status_response_redacted_and_repr(self) -> None:
         """Verify UpdateSessionStatusResponse string formatting and privacy-safe dumping."""
@@ -1047,15 +1051,80 @@ class TestSessionListAndReconciliationModels:
         assert r3.redacted_dump()["requested_status"] == "CustomReq"
 
     def test_callback_method_and_metadata_models(self) -> None:
-        """Verify CallbackMethod and arbitrary JSON metadata in CreateSessionRequest."""
+        """Verify strict CallbackMethod and arbitrary JSON metadata in CreateSessionRequest."""
         assert CallbackMethod.INITIATOR.value == "initiator"
         assert CallbackMethod.COMPLETER.value == "completer"
         assert CallbackMethod.BOTH.value == "both"
 
-        req = CreateSessionRequest(
+        # 1. Valid CallbackMethod enum and string coercion
+        req1 = CreateSessionRequest(
             workflow_id="wf_meta",
             callback_method=CallbackMethod.BOTH,
             metadata=["campaign_x", 123, {"active": True}],
         )
-        assert req.callback_method == "both"
-        assert req.metadata == ["campaign_x", 123, {"active": True}]
+        assert req1.callback_method == CallbackMethod.BOTH
+        assert req1.metadata == ["campaign_x", 123, {"active": True}]
+
+        req2 = CreateSessionRequest(
+            workflow_id="wf_meta",
+            callback_method="initiator",  # type: ignore[arg-type]
+            metadata="campaign_scalar",
+        )
+        assert req2.callback_method == CallbackMethod.INITIATOR
+        assert req2.metadata == "campaign_scalar"
+
+        req3 = CreateSessionRequest(
+            workflow_id="wf_meta",
+            callback_method="COMPLETER",  # type: ignore[arg-type]
+            metadata=42,
+        )
+        assert req3.callback_method == CallbackMethod.COMPLETER
+        assert req3.metadata == 42
+
+        # 2. Strict rejection of invalid callback_method
+        with pytest.raises(ValidationError):
+            CreateSessionRequest(
+                workflow_id="wf_meta",
+                callback_method="post",  # type: ignore[arg-type]
+            )
+
+        with pytest.raises(ValidationError):
+            CreateSessionRequest(
+                workflow_id="wf_meta",
+                callback_method="bogus",  # type: ignore[arg-type]
+            )
+
+        with pytest.raises(ValidationError):
+            CreateSessionRequest(
+                workflow_id="wf_meta",
+                callback_method=123,  # type: ignore[arg-type]
+            )
+
+        # 3. None callback_method preserves None
+        req_none = CreateSessionRequest(workflow_id="wf_meta", callback_method=None)
+        assert req_none.callback_method is None
+
+    def test_resubmit_feature_and_node_strict_validation(self) -> None:
+        """Verify strict ResubmitFeature validation on ResubmitNode."""
+        # 1. Valid enum
+        n1 = ResubmitNode(node_id="step_ocr", feature=ResubmitFeature.OCR)
+        assert n1.node_id == "step_ocr"
+        assert n1.feature == ResubmitFeature.OCR
+
+        # 2. Valid uppercase and lowercase strings coerced
+        n2 = ResubmitNode(node_id="step_face", feature="FACE_MATCH")  # type: ignore[arg-type]
+        assert n2.feature == ResubmitFeature.FACE_MATCH
+
+        n3 = ResubmitNode(node_id="step_live", feature="liveness")  # type: ignore[arg-type]
+        assert n3.feature == ResubmitFeature.LIVENESS
+
+        # 3. Model dump serializes feature to string
+        d = n1.model_dump()
+        assert d["feature"] == "OCR"
+
+        # 4. Strict rejection of unknown features
+        with pytest.raises(ValidationError):
+            ResubmitNode(node_id="step_bad", feature="BOGUS")  # type: ignore[arg-type]
+
+        with pytest.raises(ValidationError):
+            ResubmitNode(node_id="step_bad", feature="unknown_step")  # type: ignore[arg-type]

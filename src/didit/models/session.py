@@ -5,7 +5,8 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import JsonValue as JsonValue
 
 from didit.models.enums import CallbackMethod, ManualSessionStatus, SessionStatus
 
@@ -54,10 +55,17 @@ class ResubmitNode(BaseModel):
         min_length=1,
         description="Node identifier in the session's workflow definition (e.g. 'feature_ocr')",
     )
-    feature: ResubmitFeature | str = Field(
+    feature: ResubmitFeature = Field(
         ...,
         description="Feature type of the node (e.g. 'OCR', 'LIVENESS', 'FACE_MATCH')",
     )
+
+    @field_validator("feature", mode="before")
+    @classmethod
+    def _normalize_feature(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.strip().upper()
+        return v
 
     def model_dump(self, **kwargs: Any) -> dict[str, Any]:
         d = super().model_dump(**kwargs)
@@ -140,10 +148,18 @@ class CreateSessionRequest(BaseModel):
         default=None,
         description="Optional redirect URL after verification completion",
     )
-    callback_method: CallbackMethod | str | None = Field(
+    callback_method: CallbackMethod | None = Field(
         default=None,
         description="Device receiving callback redirect ('initiator', 'completer', 'both')",
     )
+
+    @field_validator("callback_method", mode="before")
+    @classmethod
+    def _normalize_callback_method(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.strip().lower()
+        return v
+
     metadata: JsonValue | None = Field(
         default=None,
         description="Arbitrary JSON stored with the session and echoed back in webhooks/responses",
@@ -306,6 +322,14 @@ class SessionResponse(BaseModel):
     workflow_id: str | None = Field(default=None, description="Associated workflow identifier")
     vendor_data: str | None = Field(default=None, description="Echoed vendor reference")
     callback: str | None = Field(default=None, description="Echoed callback URL")
+    callback_method: CallbackMethod | None = Field(
+        default=None,
+        description="Device receiving callback redirect ('initiator', 'completer', 'both')",
+    )
+    metadata: JsonValue | None = Field(
+        default=None,
+        description="Arbitrary JSON stored with the session and echoed back in webhooks/responses",
+    )
     resubmit_info: ResubmitInfo | None = Field(
         default=None,
         description="Optional typed metadata when resubmission of documents is requested",

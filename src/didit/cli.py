@@ -527,8 +527,8 @@ def _cmd_session_resubmit(args: argparse.Namespace) -> int:
     text_lines.append(f"Requested Status:       {req_stat}")
     text_lines.append(f"Requires Resubmission:  {session.requires_resubmission}")
     text_lines.append(
-        "Note: Run 'didit session decision "
-        f"{session.session_id}' to retrieve current verified outcome."
+        "Note: Run 'didit session get "
+        f"{session.session_id} --decision' to retrieve current verified outcome."
     )
     resub_info = getattr(session, "resubmit_info", None)
     if resub_info:

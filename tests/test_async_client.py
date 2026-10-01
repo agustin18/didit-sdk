@@ -22,7 +22,7 @@ from didit.errors import (
     DiditServerError,
     DiditTimeoutError,
 )
-from didit.models.enums import SessionStatus
+from didit.models.enums import CallbackMethod, SessionStatus
 from didit.models.session import (
     ContactDetails,
     ExpectedDetails,
@@ -138,7 +138,7 @@ class TestAsyncDiditClient:
             vendor_data="usr_v3",
             workflow_id="wf_v3",
             callback="https://example.com/callback",
-            callback_method="both",
+            callback_method=CallbackMethod.BOTH,
             metadata={"user_tier": "enterprise", "tenant_id": 99},
             contact_details=ContactDetails(
                 email="alice@example.com",
@@ -167,6 +167,37 @@ class TestAsyncDiditClient:
         assert req_json["expected_details"]["expected_document_types"] == ["P", "ID"]
         assert req_json["portrait_image"].startswith("iVBORw")
         assert resp.session_id == "sess_full_v3_async"
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_create_session_callback_method_and_metadata_variations(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        from pydantic import ValidationError
+
+        route = respx.post(f"{base_url}/session/").mock(
+            return_value=Response(
+                201,
+                json={"session_id": "sess_async_meta_var", "status": "Not Started"},
+            )
+        )
+        # Test scalar metadata
+        r1 = await async_client.sessions.create(workflow_id="wf_meta", metadata="campaign_scalar")
+        assert r1.session_id == "sess_async_meta_var"
+        assert json.loads(route.calls.last.request.content)["metadata"] == "campaign_scalar"
+
+        # Test list metadata
+        r2 = await async_client.sessions.create(workflow_id="wf_meta", metadata=["tag1", 99])
+        assert r2.session_id == "sess_async_meta_var"
+        assert json.loads(route.calls.last.request.content)["metadata"] == ["tag1", 99]
+
+        # Test invalid callback_method raises ValidationError
+        with pytest.raises(ValidationError):
+            await async_client.sessions.create(
+                workflow_id="wf_meta",
+                callback_method="post",  # type: ignore[arg-type]
+            )
         await async_client.aclose()
 
     @respx.mock
@@ -1559,6 +1590,25 @@ class TestAsyncDiditClient:
             await async_client.sessions.resubmit(
                 "sess_async_err",
                 nodes_to_resubmit=["kyb_node:KYB"],
+            )
+
+        # Unknown features rejected for dict, shorthand, and ResubmitNode
+        with pytest.raises(ValueError):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[{"node_id": "step1", "feature": "BOGUS"}],
+            )
+
+        with pytest.raises(ValueError):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=["step1:BOGUS"],
+            )
+
+        with pytest.raises(ValueError):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[ResubmitNode(node_id="step1", feature="BOGUS")],  # type: ignore[arg-type]
             )
         await async_client.aclose()
 
