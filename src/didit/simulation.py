@@ -28,11 +28,12 @@ from didit.models.decision import (
     ReviewData,
     VerificationWarning,
 )
-from didit.models.enums import Language, SessionStatus
+from didit.models.enums import ALLOWED_MANUAL_STATUSES, Language, ManualSessionStatus, SessionStatus
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
     ObservedSessionState,
+    ResubmitInfo,
     SessionListItem,
     SessionListPage,
     SessionReconciliationReport,
@@ -395,6 +396,61 @@ class _SimulatedStorage:
         decision.reviews = [ReviewData(reviewed_by="simulator", decision_reason=reason)]
         return decision.model_copy(deep=True)
 
+    def update_status(
+        self,
+        session_id: str,
+        new_status: ManualSessionStatus | SessionStatus | str,
+        nodes_to_resubmit: list[str] | None = None,
+        *,
+        options: Any = None,
+    ) -> SessionResponse:
+        """Update status of a simulated session (e.g. to 'Resubmitted')."""
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty")
+        clean_id = session_id.strip()
+        if clean_id not in self.sessions:
+            raise DiditNotFoundError(f"Simulated session '{clean_id}' not found", status_code=404)
+
+        if new_status not in ALLOWED_MANUAL_STATUSES:
+            raise ValueError(
+                f"Invalid manual status transition '{new_status}'. "
+                "Allowed transitions are: Approved, Declined, Resubmitted"
+            )
+
+        status_enum = (
+            new_status if isinstance(new_status, SessionStatus) else SessionStatus(str(new_status))
+        )
+        session = self.sessions[clean_id]
+        session.status = status_enum
+        resub_model = (
+            ResubmitInfo(nodes=nodes_to_resubmit)
+            if nodes_to_resubmit is not None
+            else (ResubmitInfo() if status_enum == SessionStatus.RESUBMITTED else None)
+        )
+        session.resubmit_info = resub_model
+
+        decision = self.decisions.get(clean_id)
+        if decision:
+            decision.status = status_enum
+            decision.resubmit_info = resub_model
+
+        return session.model_copy(deep=True)
+
+    def resubmit(
+        self,
+        session_id: str,
+        nodes_to_resubmit: list[str] | None = None,
+        *,
+        options: Any = None,
+    ) -> SessionResponse:
+        """Request resubmission for a simulated session."""
+        return self.update_status(
+            session_id,
+            SessionStatus.RESUBMITTED,
+            nodes_to_resubmit=nodes_to_resubmit,
+            options=options,
+        )
+
     def list(
         self,
         *,
@@ -533,6 +589,49 @@ class SimulatedSessionsResource:
                 f"Polling simulated session '{session_id}' timed out without terminal outcome"
             )
         return decision
+
+    def generate_pdf_report(self, session_id: str) -> bytes:
+        """Simulate generating a compliance PDF report for a session."""
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty")
+        cleaned_id = session_id.strip()
+        self._storage.get(cleaned_id)
+        return (
+            b"%PDF-1.4\n%Simulated Didit Compliance Report\n"
+            b"Session: " + cleaned_id.encode("utf-8") + b"\n%%EOF"
+        )
+
+    get_pdf_report = generate_pdf_report
+
+    def update_status(
+        self,
+        session_id: str,
+        new_status: str | SessionStatus,
+        nodes_to_resubmit: list[str] | None = None,
+        *,
+        options: Any = None,
+    ) -> SessionResponse:
+        """Update status of a simulated session."""
+        return self._storage.update_status(
+            session_id,
+            new_status,
+            nodes_to_resubmit=nodes_to_resubmit,
+            options=options,
+        )
+
+    def resubmit(
+        self,
+        session_id: str,
+        nodes_to_resubmit: list[str] | None = None,
+        *,
+        options: Any = None,
+    ) -> SessionResponse:
+        """Request resubmission for a simulated session."""
+        return self._storage.resubmit(
+            session_id,
+            nodes_to_resubmit=nodes_to_resubmit,
+            options=options,
+        )
 
     def list(
         self,
@@ -785,6 +884,49 @@ class SimulatedAsyncSessionsResource:
                 f"Polling simulated session '{session_id}' timed out without terminal outcome"
             )
         return decision
+
+    async def generate_pdf_report(self, session_id: str) -> bytes:
+        """Simulate generating a compliance PDF report for a session asynchronously."""
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty")
+        cleaned_id = session_id.strip()
+        self._storage.get(cleaned_id)
+        return (
+            b"%PDF-1.4\n%Simulated Didit Compliance Report\n"
+            b"Session: " + cleaned_id.encode("utf-8") + b"\n%%EOF"
+        )
+
+    get_pdf_report = generate_pdf_report
+
+    async def update_status(
+        self,
+        session_id: str,
+        new_status: str | SessionStatus,
+        nodes_to_resubmit: list[str] | None = None,
+        *,
+        options: Any = None,
+    ) -> SessionResponse:
+        """Update status of a simulated session asynchronously."""
+        return self._storage.update_status(
+            session_id,
+            new_status,
+            nodes_to_resubmit=nodes_to_resubmit,
+            options=options,
+        )
+
+    async def resubmit(
+        self,
+        session_id: str,
+        nodes_to_resubmit: list[str] | None = None,
+        *,
+        options: Any = None,
+    ) -> SessionResponse:
+        """Request resubmission for a simulated session asynchronously."""
+        return self._storage.resubmit(
+            session_id,
+            nodes_to_resubmit=nodes_to_resubmit,
+            options=options,
+        )
 
     async def list(
         self,

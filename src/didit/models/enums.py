@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 
 class SessionStatus(str, Enum):
@@ -75,6 +76,11 @@ class SessionStatus(str, Enum):
         )
 
     @property
+    def requires_resubmission(self) -> bool:
+        """Return True if session requires user resubmission of documents/biometrics."""
+        return self == SessionStatus.RESUBMITTED
+
+    @property
     def is_terminal(self) -> bool:
         """Backward-compatible alias for ``is_closed``."""
         return self.is_closed
@@ -83,6 +89,25 @@ class SessionStatus(str, Enum):
     def is_in_review(self) -> bool:
         """Backward-compatible alias for ``requires_review``."""
         return self.requires_review
+
+
+ManualSessionStatus = Literal[
+    SessionStatus.APPROVED,
+    SessionStatus.DECLINED,
+    SessionStatus.RESUBMITTED,
+    "Approved",
+    "Declined",
+    "Resubmitted",
+]
+
+ALLOWED_MANUAL_STATUSES: set[SessionStatus | str] = {
+    SessionStatus.APPROVED,
+    SessionStatus.DECLINED,
+    SessionStatus.RESUBMITTED,
+    "Approved",
+    "Declined",
+    "Resubmitted",
+}
 
 
 class Language(str, Enum):

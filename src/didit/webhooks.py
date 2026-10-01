@@ -138,6 +138,7 @@ def _verify_decoded_webhook(
     secret: str,
     *,
     max_age_seconds: int | None = None,
+    verify_freshness: bool = True,
 ) -> bool:
     """Internal single-pass signature and freshness verification for pre-parsed JSON."""
     if not secret:
@@ -159,7 +160,7 @@ def _verify_decoded_webhook(
     if isinstance(signed_timestamp, bool) or not isinstance(signed_timestamp, int):
         return False
 
-    if not timestamp_is_fresh(signed_timestamp, max_age):
+    if verify_freshness and not timestamp_is_fresh(signed_timestamp, max_age):
         return False
 
     header_timestamp = lower_headers.get("x-timestamp")
@@ -188,6 +189,7 @@ def verify_webhook_signature(
     secret: str,
     *,
     max_age_seconds: int | None = None,
+    verify_freshness: bool = True,
 ) -> bool:
     """Verify cryptographic authenticity and freshness of an incoming Didit webhook.
 
@@ -205,6 +207,7 @@ def verify_webhook_signature(
         headers,
         secret,
         max_age_seconds=max_age_seconds,
+        verify_freshness=verify_freshness,
     )
 
 
@@ -214,6 +217,7 @@ def parse_webhook_payload(
     secret: str,
     *,
     max_age_seconds: int | None = None,
+    verify_freshness: bool = True,
 ) -> WebhookPayload:
     """Verify webhook signature and return validated WebhookPayload.
 
@@ -231,6 +235,7 @@ def parse_webhook_payload(
         headers,
         secret,
         max_age_seconds=max_age_seconds,
+        verify_freshness=verify_freshness,
     ):
         raise DiditSignatureError("Webhook signature verification failed or timestamp is expired")
 

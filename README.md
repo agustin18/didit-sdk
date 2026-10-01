@@ -22,7 +22,10 @@ Unofficial, community-maintained Python client for the [Didit](https://didit.me)
 - **Ergonomic Sync & Async**: Dual-client architecture built on top of high-performance `httpx`.
 - **Strictly Typed & Validated**: 100% type annotations (PEP 561 compliant with `py.typed`) and robust Pydantic v2 domain models.
 - **Didit V3 API Alignment**: Full fidelity to upstream V3 schemas (`id_verifications[]`, `liveness_checks[]`, `face_matches[]`, `aml_screenings[]`, `reviews[]`, `warnings[]`) with forward compatibility (`extra="allow"`), verification warnings helper (`decision.has_warning(...)`), and backward-compatible property accessors.
-- **Complete Session Lifecycle**: Covers all 10 documented Didit session statuses (`Not Started`, `In Progress`, `In Review`, `Approved`, `Declined`, `Expired`, `Abandoned`, `Kyc Expired`, `Resubmitted`, `Awaiting User`) with granular state inspection (`is_decided`, `is_closed`, `requires_review`, `requires_user_action`).
+- **Complete Session Lifecycle**: Covers all 10 documented Didit session statuses (`Not Started`, `In Progress`, `In Review`, `Approved`, `Declined`, `Expired`, `Abandoned`, `Kyc Expired`, `Resubmitted`, `Awaiting User`) with granular state inspection (`is_decided`, `is_closed`, `requires_review`, `requires_user_action`, `requires_resubmission`).
+- **Resubmission & Manual Review**: Full resubmission support (`client.sessions.resubmit()`) and review status transitions (`client.sessions.update_status()`).
+- **Official Compliance PDF Reports**: Download verification audit reports (`client.sessions.generate_pdf_report()`) with binary header (`%PDF-`) and MIME format validation.
+- **Production CLI (`didit`)**: Inspect sessions, download PDF reports, verify webhook signatures, query sandbox scenarios, and run diagnostic health checks with zero-credential exposure in command arguments.
 - **Cryptographic Security & DoS Defense**: Constant-time HMAC-SHA256 signature verification (`X-Signature-V2` & `X-Signature`), full UTF-8 Unicode canonical JSON support (`ensure_ascii=False`, `allow_nan=False`), authoritative signed body anti-replay verification with strict header matching, and bounded body limits (HTTP 413) to prevent memory exhaustion.
 - **Webhook Deduplication**: Thread-safe in-memory and atomic Redis deduplication stores (`InMemoryWebhookDedupStore`, `RedisWebhookDedupStore`, `AsyncRedisWebhookDedupStore`) with configurable duplicate actions (`respond_ok`, `pass`, `raise`).
 - **Multi-Framework Integrations**: Native adapters for **FastAPI** (`DiditWebhookGuard`), **Django** (`@didit_webhook_view`), and **Flask** (`@didit_webhook`).
@@ -196,6 +199,50 @@ class MetricsEventSink:
 client = Didit(event_sink=MetricsEventSink())
 ```
 
+### 6. Session Resubmission & Lifecycle Updates
+
+Handle customer resubmission workflows when a verification session requires document or biometric resubmission, or perform manual reviewer status transitions:
+
+```python
+from didit import Didit, SessionStatus
+
+client = Didit()
+
+# Inspect whether a decision requires user resubmission
+decision = client.sessions.get_decision("sess_12345")
+if decision.requires_resubmission and decision.resubmit_info:
+    print(f"Resubmit steps: {decision.resubmit_info.nodes}")
+    if decision.resubmit_info.available_attempts is not None:
+        print(f"Attempts remaining: {decision.resubmit_info.available_attempts}")
+
+    # Request resubmission for specific failed check nodes
+    resubmitted = client.sessions.resubmit(
+        "sess_12345",
+        nodes_to_resubmit=["document"],
+    )
+    print(f"Session status: {resubmitted.status}")
+
+# Update session status (manual review transitions: 'Approved', 'Declined', 'Resubmitted')
+updated = client.sessions.update_status("sess_12345", new_status=SessionStatus.APPROVED)
+print(f"Session status updated to: {updated.status}")
+```
+
+### 7. Compliance PDF Reports
+
+Download official verification audit PDF reports with strict binary header (`%PDF-`) and MIME (`application/pdf`) format validation:
+
+```python
+from didit import Didit
+
+client = Didit()
+
+# Download verification report (60s default timeout per upstream processing characteristics)
+pdf_bytes = client.sessions.generate_pdf_report("sess_12345")
+
+with open("verification_report.pdf", "wb") as f:
+    f.write(pdf_bytes)
+```
+
 ---
 
 ## Webhook Integrations & Tokenized Reservation Protocol
@@ -344,6 +391,94 @@ assert decision.status == SessionStatus.APPROVED
 # 3. Generate signed webhook payloads to test your local receiver
 raw_body, headers = sim.generate_webhook_event(session.session_id)
 # headers contain valid X-Signature-V2 and fresh X-Timestamp!
+```
+
+---
+
+## Developer CLI (`didit`)
+
+The SDK includes a security-hardened, script-friendly command-line interface (`didit`) for development, operations, and diagnostic audits.
+
+### Zero Argv Credentials
+
+To prevent credential leakage through process inspection (`ps aux`, `/proc`), shell histories, or CI logs, the CLI never accepts API keys or webhook secrets via positional arguments or command flags. Pass credentials via environment variables or file paths:
+
+- `DIDIT_API_KEY` or `--api-key-file /path/to/key.txt`
+- `DIDIT_WEBHOOK_SECRET` or `--secret-file /path/to/secret.txt`
+
+### Universal `--json` Contract
+
+Pass `--json` to any command for deterministic, machine-readable output:
+- **Success Envelope**: `{"status": "ok", ...}` (for session resources, verification status is available under `"session_status"`).
+- **Error Envelope**: `{"status": "error", "error": {"code": "...", "message": "..."}}`.
+- Non-zero exit code (`1`) on any error condition.
+
+### Commands
+
+#### Diagnostics & Healthcheck (`didit doctor`)
+
+Audit your network connectivity, API availability, and authentication credentials without querying or exposing customer KYC sessions:
+
+```bash
+didit doctor
+# Or with structured JSON
+didit doctor --json
+```
+
+#### Session Inspection & Lifecycle
+
+By default, session output redacts sensitive bearer tokens and URLs. Supply `--include-sensitive` only when necessary:
+
+```bash
+# Get session details
+didit session get sess_12345
+
+# Create a session
+didit session create --workflow-id wf_standard --vendor-data user_42
+
+# List sessions with pagination
+didit session list --status Approved --limit 20
+didit session list --all --max-sessions 500
+
+# Resubmit a session
+didit session resubmit sess_12345 --workflow-id wf_retry
+
+# Download PDF report with atomic POSIX 0600 file permissions and overwrite guard
+didit session pdf sess_12345 --output report.pdf
+didit session pdf sess_12345 --output report.pdf --force
+```
+
+#### Webhook Signature Verification (`didit webhook verify`)
+
+Verify Didit webhook signatures without exposing raw payload bytes in command arguments:
+
+```bash
+# Verify using body file
+didit webhook verify \
+  --secret-file /etc/secrets/didit_secret.txt \
+  --signature-header "t=1700000000,v2=..." \
+  --body-file payload.json
+
+# Or verify from stdin in Unix pipelines
+cat payload.json | didit webhook verify \
+  --secret-file /etc/secrets/didit_secret.txt \
+  --signature-header "t=1700000000,v2=..." \
+  --stdin
+
+# Bypass timestamp freshness check for historic replay audits (emits warning to stderr)
+cat payload.json | didit webhook verify \
+  --signature-header "t=1600000000,v2=..." \
+  --stdin \
+  --skip-freshness-check
+```
+
+#### Sandbox Scenarios Explorer (`didit sandbox scenarios`)
+
+List official Didit sandbox simulation slugs with optional category filtering:
+
+```bash
+didit sandbox scenarios
+didit sandbox scenarios --category declined
 ```
 
 ---

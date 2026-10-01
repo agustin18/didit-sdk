@@ -132,6 +132,7 @@ class Didit:
         *,
         secret: str | None = None,
         max_age_seconds: int | None = None,
+        verify_freshness: bool = True,
     ) -> bool:
         """Verify an incoming webhook's signature and timestamp freshness."""
         wh_secret = secret or self._config.webhook_secret
@@ -141,7 +142,11 @@ class Didit:
                 "Provide secret parameter or configure DIDIT_WEBHOOK_SECRET."
             )
         return verify_webhook_signature(
-            raw_body, headers, wh_secret, max_age_seconds=max_age_seconds
+            raw_body,
+            headers,
+            wh_secret,
+            max_age_seconds=max_age_seconds,
+            verify_freshness=verify_freshness,
         )
 
     def parse_webhook(
@@ -151,6 +156,7 @@ class Didit:
         *,
         secret: str | None = None,
         max_age_seconds: int | None = None,
+        verify_freshness: bool = True,
     ) -> WebhookPayload:
         """Verify and parse an incoming webhook payload into a WebhookPayload object."""
         wh_secret = secret or self._config.webhook_secret
@@ -159,7 +165,13 @@ class Didit:
                 "No webhook_secret configured on client. "
                 "Provide secret parameter or configure DIDIT_WEBHOOK_SECRET."
             )
-        return parse_webhook_payload(raw_body, headers, wh_secret, max_age_seconds=max_age_seconds)
+        return parse_webhook_payload(
+            raw_body,
+            headers,
+            wh_secret,
+            max_age_seconds=max_age_seconds,
+            verify_freshness=verify_freshness,
+        )
 
     def close(self) -> None:
         """Close the underlying HTTP client."""
@@ -285,6 +297,7 @@ class AsyncDidit:
         *,
         secret: str | None = None,
         max_age_seconds: int | None = None,
+        verify_freshness: bool = True,
     ) -> bool:
         """Verify an incoming webhook's signature and timestamp freshness."""
         wh_secret = secret or self._config.webhook_secret
@@ -294,7 +307,11 @@ class AsyncDidit:
                 "Provide secret parameter or configure DIDIT_WEBHOOK_SECRET."
             )
         return verify_webhook_signature(
-            raw_body, headers, wh_secret, max_age_seconds=max_age_seconds
+            raw_body,
+            headers,
+            wh_secret,
+            max_age_seconds=max_age_seconds,
+            verify_freshness=verify_freshness,
         )
 
     def parse_webhook(
@@ -304,6 +321,7 @@ class AsyncDidit:
         *,
         secret: str | None = None,
         max_age_seconds: int | None = None,
+        verify_freshness: bool = True,
     ) -> WebhookPayload:
         """Verify and parse an incoming webhook payload into a WebhookPayload object."""
         wh_secret = secret or self._config.webhook_secret
@@ -312,7 +330,13 @@ class AsyncDidit:
                 "No webhook_secret configured on client. "
                 "Provide secret parameter or configure DIDIT_WEBHOOK_SECRET."
             )
-        return parse_webhook_payload(raw_body, headers, wh_secret, max_age_seconds=max_age_seconds)
+        return parse_webhook_payload(
+            raw_body,
+            headers,
+            wh_secret,
+            max_age_seconds=max_age_seconds,
+            verify_freshness=verify_freshness,
+        )
 
     async def aclose(self) -> None:
         """Close the underlying asynchronous HTTP client."""

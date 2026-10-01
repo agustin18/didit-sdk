@@ -7,12 +7,13 @@ from didit.models.decision import (
     DocumentData,
     ReviewData,
 )
-from didit.models.enums import Language, SessionStatus
+from didit.models.enums import Language, ManualSessionStatus, SessionStatus
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
     CreateSessionRequest,
     ObservedSessionState,
+    ResubmitInfo,
     SessionListItem,
     SessionListPage,
     SessionReconciliationReport,
@@ -30,7 +31,9 @@ __all__ = [
     "DecisionResponse",
     "DocumentData",
     "Language",
+    "ManualSessionStatus",
     "ObservedSessionState",
+    "ResubmitInfo",
     "ReviewData",
     "SessionListItem",
     "SessionListPage",

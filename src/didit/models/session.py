@@ -34,10 +34,37 @@ class CreateSessionRequest(BaseModel):
     )
 
 
+class ResubmitInfo(BaseModel):
+    """Metadata regarding requested verification resubmission."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    nodes: list[str] = Field(
+        default_factory=list,
+        description="Workflow node keys or check steps requiring resubmission",
+    )
+    available_attempts: int | None = Field(
+        default=None,
+        description="Number of remaining allowed resubmission attempts",
+    )
+    max_attempts: int | None = Field(
+        default=None,
+        description="Maximum total resubmission attempts configured",
+    )
+
+    def redacted_dump(self) -> dict[str, Any]:
+        """Privacy-safe dump preserving only structured non-PII attributes."""
+        return {
+            "nodes": list(self.nodes),
+            "available_attempts": self.available_attempts,
+            "max_attempts": self.max_attempts,
+        }
+
+
 class SessionResponse(BaseModel):
     """Data returned by Didit when a session is created or fetched."""
 
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     session_id: str = Field(..., description="Unique Didit session identifier")
     session_token: str | None = Field(
@@ -51,6 +78,41 @@ class SessionResponse(BaseModel):
     workflow_id: str | None = Field(default=None, description="Associated workflow identifier")
     vendor_data: str | None = Field(default=None, description="Echoed vendor reference")
     callback: str | None = Field(default=None, description="Echoed callback URL")
+    resubmit_info: ResubmitInfo | None = Field(
+        default=None,
+        description="Optional typed metadata when resubmission of documents is requested",
+    )
+
+    @property
+    def requires_resubmission(self) -> bool:
+        """Return True if session requires user resubmission of documents/biometrics."""
+        return self.status.requires_resubmission or bool(self.resubmit_info)
+
+    def __repr__(self) -> str:
+        token_repr = "'[REDACTED]'" if self.session_token else "None"
+        return (
+            f"SessionResponse(session_id={self.session_id!r}, "
+            f"status={self.status.value!r}, "
+            f"workflow_id={self.workflow_id!r}, "
+            f"session_token={token_repr})"
+        )
+
+    __str__ = __repr__
+
+    def redacted_dump(self) -> dict[str, Any]:
+        """Dump model dictionary with session_token and sensitive URLs redacted.
+
+        Uses a strict allowlist to guarantee privacy defaults.
+        """
+        return {
+            "session_id": self.session_id,
+            "status": self.status.value if isinstance(self.status, SessionStatus) else self.status,
+            "session_token": "[REDACTED]" if self.session_token else None,
+            "workflow_id": self.workflow_id,
+            "vendor_data": self.vendor_data,
+            "requires_resubmission": self.requires_resubmission,
+            "resubmit_info": self.resubmit_info.redacted_dump() if self.resubmit_info else None,
+        }
 
 
 class SessionListItem(BaseModel):

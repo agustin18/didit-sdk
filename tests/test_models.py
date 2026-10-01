@@ -849,3 +849,136 @@ class TestSessionListAndReconciliationModels:
         )
         assert report_custom.truncated is True
         assert report_custom.remote_count == 120
+
+    @pytest.mark.parametrize(
+        ("status", "expected_resubmission"),
+        [
+            (SessionStatus.NOT_STARTED, False),
+            (SessionStatus.IN_PROGRESS, False),
+            (SessionStatus.IN_REVIEW, False),
+            (SessionStatus.APPROVED, False),
+            (SessionStatus.DECLINED, False),
+            (SessionStatus.EXPIRED, False),
+            (SessionStatus.ABANDONED, False),
+            (SessionStatus.KYC_EXPIRED, False),
+            (SessionStatus.RESUBMITTED, True),
+            (SessionStatus.AWAITING_USER, False),
+        ],
+    )
+    def test_session_status_requires_resubmission(
+        self, status: SessionStatus, expected_resubmission: bool
+    ) -> None:
+        assert status.requires_resubmission is expected_resubmission
+
+    def test_session_response_resubmission_properties(self) -> None:
+        from didit.models.session import ResubmitInfo, SessionResponse
+
+        # 1. Standard session without resubmit info
+        s1 = SessionResponse(session_id="s1", status=SessionStatus.IN_PROGRESS)
+        assert s1.requires_resubmission is False
+        assert s1.resubmit_info is None
+
+        # 2. Session with RESUBMITTED status
+        s2 = SessionResponse(session_id="s2", status=SessionStatus.RESUBMITTED)
+        assert s2.requires_resubmission is True
+        assert s2.resubmit_info is None
+
+        # 3. Session with AWAITING_USER status and without resubmit_info
+        s3 = SessionResponse(session_id="s3", status=SessionStatus.AWAITING_USER)
+        assert s3.requires_resubmission is False
+
+        # 4. Session with typed ResubmitInfo
+        info = ResubmitInfo(nodes=["document"], available_attempts=2, max_attempts=3)
+        s4 = SessionResponse(
+            session_id="s4",
+            status=SessionStatus.IN_REVIEW,
+            resubmit_info=info,
+            extra_field="preserved_upstream_metadata",
+        )
+        assert s4.requires_resubmission is True
+        assert s4.resubmit_info == info
+        assert s4.resubmit_info.nodes == ["document"]
+        assert s4.resubmit_info.available_attempts == 2
+        assert s4.resubmit_info.max_attempts == 3
+        assert (s4.__pydantic_extra__ or {})["extra_field"] == "preserved_upstream_metadata"
+
+        # 5. Session coerced from dict into ResubmitInfo
+        s5 = SessionResponse(
+            session_id="s5",
+            status=SessionStatus.IN_REVIEW,
+            resubmit_info={"nodes": ["face"], "available_attempts": 1},
+        )
+        assert s5.requires_resubmission is True
+        assert isinstance(s5.resubmit_info, ResubmitInfo)
+        assert s5.resubmit_info.nodes == ["face"]
+        assert s5.resubmit_info.available_attempts == 1
+
+    def test_session_response_privacy_repr_and_redacted_dump(self) -> None:
+        """Verify that SessionResponse redacts sensitive tokens in repr and redacted_dump."""
+        session = SessionResponse(
+            session_id="sess_safe_123",
+            session_token="secret_client_token_xyz",
+            url="https://verify.didit.me/sess_safe_123",
+            status=SessionStatus.AWAITING_USER,
+            workflow_id="wf_456",
+            vendor_data="user_789",
+            resubmit_info={"nodes": ["document"], "available_attempts": 2},
+            extra_upstream_field="sensitive_leak",
+        )
+
+        repr_str = repr(session)
+        assert "secret_client_token_xyz" not in repr_str
+        assert "[REDACTED]" in repr_str
+        assert str(session) == repr_str
+
+        session_no_token = SessionResponse(
+            session_id="sess_no_token",
+            status=SessionStatus.APPROVED,
+        )
+        assert "session_token=None" in repr(session_no_token)
+
+        redacted = session.redacted_dump()
+        assert redacted["session_id"] == "sess_safe_123"
+        assert redacted["status"] == "Awaiting User"
+        assert redacted["session_token"] == "[REDACTED]"
+        assert redacted["workflow_id"] == "wf_456"
+        assert redacted["vendor_data"] == "user_789"
+        assert redacted["requires_resubmission"] is True
+        assert redacted["resubmit_info"] == {
+            "nodes": ["document"],
+            "available_attempts": 2,
+            "max_attempts": None,
+        }
+        assert "extra_upstream_field" not in redacted
+        assert "url" not in redacted
+
+    def test_decision_response_resubmission_properties_and_redacted_dump(self) -> None:
+        """Verify DecisionResponse has resubmit_info and requires_resubmission parity."""
+        # 1. Decision without resubmission
+        d1 = DecisionResponse(session_id="dec_1", status=SessionStatus.APPROVED)
+        assert d1.requires_resubmission is False
+        assert d1.resubmit_info is None
+
+        # 2. Decision with RESUBMITTED status
+        d2 = DecisionResponse(session_id="dec_2", status=SessionStatus.RESUBMITTED)
+        assert d2.requires_resubmission is True
+        assert d2.resubmit_info is None
+
+        # 3. Decision with typed ResubmitInfo
+        d3 = DecisionResponse(
+            session_id="dec_3",
+            status=SessionStatus.IN_REVIEW,
+            resubmit_info={"nodes": ["liveness"], "available_attempts": 1, "max_attempts": 2},
+        )
+        assert d3.requires_resubmission is True
+        assert d3.resubmit_info is not None
+        assert d3.resubmit_info.nodes == ["liveness"]
+        assert d3.resubmit_info.available_attempts == 1
+
+        dump = d3.redacted_dump()
+        assert dump["requires_resubmission"] is True
+        assert dump["resubmit_info"] == {
+            "nodes": ["liveness"],
+            "available_attempts": 1,
+            "max_attempts": 2,
+        }

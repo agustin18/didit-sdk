@@ -20,7 +20,12 @@ from didit.errors import (
 )
 from didit.events import DiditEventSink, ReconciliationDriftObserved, safe_emit
 from didit.models.decision import DecisionResponse
-from didit.models.enums import Language, SessionStatus
+from didit.models.enums import (
+    ALLOWED_MANUAL_STATUSES,
+    Language,
+    ManualSessionStatus,
+    SessionStatus,
+)
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
@@ -57,6 +62,16 @@ def _validate_timestamp(val: datetime | str | None, param_name: str) -> datetime
             )
         return dt
     raise ValueError(f"{param_name} must be a datetime or ISO-8601 string")
+
+
+def _validate_manual_status(new_status: ManualSessionStatus | SessionStatus | str) -> str:
+    """Validate manual status transition against allowed upstream Didit statuses."""
+    if new_status not in ALLOWED_MANUAL_STATUSES:
+        raise ValueError(
+            f"Invalid manual status transition '{new_status}'. "
+            "Allowed transitions are: Approved, Declined, Resubmitted"
+        )
+    return new_status.value if isinstance(new_status, SessionStatus) else str(new_status)
 
 
 def _validate_session_list_filters(
@@ -184,6 +199,71 @@ class SessionsResource:
         """Retrieve details and status for an existing verification session."""
         resp = self._requestor.request("GET", f"/session/{session_id}/", options=options)
         return SessionResponse.model_validate(resp.json())
+
+    def update_status(
+        self,
+        session_id: str,
+        new_status: ManualSessionStatus | SessionStatus | str,
+        nodes_to_resubmit: list[str] | None = None,
+        *,
+        options: RequestOptions | None = None,
+    ) -> SessionResponse:
+        """Update status of an existing session (PATCH /v3/session/{session_id}/update-status/).
+
+        Restricted by upstream Didit contract to manual reviewer transitions:
+        'Approved', 'Declined', or 'Resubmitted'.
+
+        Args:
+            session_id: The unique identifier of the verification session.
+            new_status: The target status ('Approved', 'Declined', 'Resubmitted',
+                or SessionStatus enum).
+            nodes_to_resubmit: Optional list of upstream workflow node IDs to resubmit.
+            options: Optional per-request HTTP options.
+
+        Returns:
+            SessionResponse: The updated verification session.
+        """
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty")
+
+        status_val = _validate_manual_status(new_status)
+        payload: dict[str, Any] = {"new_status": status_val}
+        if nodes_to_resubmit is not None:
+            payload["nodes_to_resubmit"] = nodes_to_resubmit
+
+        resp = self._requestor.request(
+            "PATCH",
+            f"/session/{session_id.strip()}/update-status/",
+            json=payload,
+            options=options,
+        )
+        return SessionResponse.model_validate(resp.json())
+
+    def resubmit(
+        self,
+        session_id: str,
+        nodes_to_resubmit: list[str] | None = None,
+        *,
+        options: RequestOptions | None = None,
+    ) -> SessionResponse:
+        """Request document or biometric resubmission for an existing verification session.
+
+        Invokes PATCH /v3/session/{session_id}/update-status/ with status 'Resubmitted'.
+
+        Args:
+            session_id: The unique identifier of the verification session.
+            nodes_to_resubmit: Optional list of workflow step/node keys to resubmit.
+            options: Optional per-request HTTP options.
+
+        Returns:
+            SessionResponse: The updated session with requires_resubmission=True.
+        """
+        return self.update_status(
+            session_id,
+            SessionStatus.RESUBMITTED,
+            nodes_to_resubmit=nodes_to_resubmit,
+            options=options,
+        )
 
     def list(
         self,
@@ -460,6 +540,63 @@ class SessionsResource:
         decision.raw_data = data
         return decision
 
+    def generate_pdf_report(
+        self,
+        session_id: str,
+        *,
+        options: RequestOptions | None = None,
+    ) -> bytes:
+        """Download compliance PDF report for a verification session.
+
+        Invokes GET /v3/session/{session_id}/generate-pdf/ returning raw binary PDF content.
+        Uses a default 60-second read timeout per upstream recommendation for media rendering.
+
+        Args:
+            session_id: The unique identifier of the verification session.
+            options: Optional per-request HTTP options.
+
+        Returns:
+            bytes: The binary PDF file content.
+
+        Raises:
+            ValueError: If session_id is empty or whitespace.
+            DiditNotFoundError: If the session does not exist.
+            DiditAPIError: If the remote endpoint returns an error or invalid PDF format.
+        """
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty")
+
+        if options is None:
+            eff_options = RequestOptions(timeout=60.0)
+        elif options.timeout is None:
+            eff_options = RequestOptions(
+                idempotency_key=options.idempotency_key,
+                timeout=60.0,
+                max_retries=options.max_retries,
+                headers=options.headers,
+                deadline=options.deadline,
+            )
+        else:
+            eff_options = options
+
+        resp = self._requestor.request(
+            "GET", f"/session/{session_id.strip()}/generate-pdf/", options=eff_options
+        )
+        magic_ok = resp.content.startswith(b"%PDF-")
+        content_type_lower = resp.headers.get("content-type", "").lower()
+        mime_ok = (
+            "application/pdf" in content_type_lower
+            or "application/octet-stream" in content_type_lower
+        )
+        if not (magic_ok and mime_ok):
+            raise DiditAPIError(
+                "Invalid PDF report response received from server",
+                status_code=502,
+            )
+        return resp.content
+
+    get_pdf_report = generate_pdf_report
+
     def poll_decision(
         self,
         session_id: str,
@@ -603,6 +740,54 @@ class AsyncSessionsResource:
         """Retrieve session status asynchronously."""
         resp = await self._requestor.request("GET", f"/session/{session_id}/", options=options)
         return SessionResponse.model_validate(resp.json())
+
+    async def update_status(
+        self,
+        session_id: str,
+        new_status: ManualSessionStatus | SessionStatus | str,
+        nodes_to_resubmit: list[str] | None = None,
+        *,
+        options: RequestOptions | None = None,
+    ) -> SessionResponse:
+        """Update status of an existing session asynchronously.
+
+        Endpoint: PATCH /v3/session/{session_id}/update-status/
+        Restricted by upstream Didit contract to manual reviewer transitions:
+        'Approved', 'Declined', or 'Resubmitted'.
+        """
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty")
+
+        status_val = _validate_manual_status(new_status)
+        payload: dict[str, Any] = {"new_status": status_val}
+        if nodes_to_resubmit is not None:
+            payload["nodes_to_resubmit"] = nodes_to_resubmit
+
+        resp = await self._requestor.request(
+            "PATCH",
+            f"/session/{session_id.strip()}/update-status/",
+            json=payload,
+            options=options,
+        )
+        return SessionResponse.model_validate(resp.json())
+
+    async def resubmit(
+        self,
+        session_id: str,
+        nodes_to_resubmit: list[str] | None = None,
+        *,
+        options: RequestOptions | None = None,
+    ) -> SessionResponse:
+        """Request document or biometric resubmission for an existing session asynchronously.
+
+        Invokes PATCH /v3/session/{session_id}/update-status/ with status 'Resubmitted'.
+        """
+        return await self.update_status(
+            session_id,
+            SessionStatus.RESUBMITTED,
+            nodes_to_resubmit=nodes_to_resubmit,
+            options=options,
+        )
 
     async def list(
         self,
@@ -869,6 +1054,63 @@ class AsyncSessionsResource:
         decision = DecisionResponse.model_validate(data)
         decision.raw_data = data
         return decision
+
+    async def generate_pdf_report(
+        self,
+        session_id: str,
+        *,
+        options: RequestOptions | None = None,
+    ) -> bytes:
+        """Download compliance PDF report for a verification session asynchronously.
+
+        Invokes GET /v3/session/{session_id}/generate-pdf/ returning raw binary PDF content.
+        Uses a default 60-second read timeout per upstream recommendation for media rendering.
+
+        Args:
+            session_id: The unique identifier of the verification session.
+            options: Optional per-request HTTP options.
+
+        Returns:
+            bytes: The binary PDF file content.
+
+        Raises:
+            ValueError: If session_id is empty or whitespace.
+            DiditNotFoundError: If the session does not exist.
+            DiditAPIError: If the remote endpoint returns an error or invalid PDF format.
+        """
+        if not session_id or not session_id.strip():
+            raise ValueError("session_id must not be empty")
+
+        if options is None:
+            eff_options = RequestOptions(timeout=60.0)
+        elif options.timeout is None:
+            eff_options = RequestOptions(
+                idempotency_key=options.idempotency_key,
+                timeout=60.0,
+                max_retries=options.max_retries,
+                headers=options.headers,
+                deadline=options.deadline,
+            )
+        else:
+            eff_options = options
+
+        resp = await self._requestor.request(
+            "GET", f"/session/{session_id.strip()}/generate-pdf/", options=eff_options
+        )
+        magic_ok = resp.content.startswith(b"%PDF-")
+        content_type_lower = resp.headers.get("content-type", "").lower()
+        mime_ok = (
+            "application/pdf" in content_type_lower
+            or "application/octet-stream" in content_type_lower
+        )
+        if not (magic_ok and mime_ok):
+            raise DiditAPIError(
+                "Invalid PDF report response received from server",
+                status_code=502,
+            )
+        return resp.content
+
+    get_pdf_report = generate_pdf_report
 
     async def poll_decision(
         self,

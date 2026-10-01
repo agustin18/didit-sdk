@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Session Lifecycle Completeness (`client.sessions.resubmit()` / `async_client.sessions.resubmit()` & `update_status()`):**
+  - Request document or biometric resubmission via `PATCH /v3/session/{session_id}/update-status/` with target status `Resubmitted` and optional `nodes_to_resubmit` list.
+  - Update session status via `PATCH /v3/session/{session_id}/update-status/` with runtime validation restricting transitions to manual review statuses: `Approved`, `Declined`, or `Resubmitted` (`ManualSessionStatus`).
+  - Added typed `ResubmitInfo` domain model and `requires_resubmission` property on both `SessionResponse` and `DecisionResponse`.
+  - Privacy safeguards: `redacted_dump()` and allowlist `__repr__` / `__str__` for `SessionResponse` redact sensitive session tokens and URLs while strictly preserving `extra="allow"` for forward-compatibility.
+  - Full offline simulation parity (`SimulatedDidit` and `SimulatedAsyncDidit` support `resubmit()` and `update_status()` with state updates on sessions and decisions).
+- **Compliance PDF Report Generation (`client.sessions.generate_pdf_report()` / `async_client.sessions.generate_pdf_report()`):**
+  - Download official verification PDF reports via `GET /v3/session/{session_id}/generate-pdf/` as raw binary bytes.
+  - 60.0s default timeout tailored to upstream document generation latencies.
+  - Binary header (`%PDF-`) and MIME (`application/pdf` or `application/octet-stream`) format validation, raising `DiditAPIError(status_code=502)` on corrupt or invalid responses.
+- **Developer CLI (`didit`):**
+  - Production-grade CLI tool for session inspection, lifecycle operations, webhook verification, and system diagnostics.
+  - Zero argv secrets: reads credentials exclusively via environment variables (`DIDIT_API_KEY`, `DIDIT_WEBHOOK_SECRET`) or secure files (`--api-key-file`, `--secret-file`).
+  - Hardened webhook signature verification: accepts signed payloads via `--body-file` or `--stdin`, validates positive integer `--tolerance`, and provides fail-safe `--skip-freshness-check` with stderr warnings.
+  - Atomic POSIX `0600` private file creation for PDF reports using temporary swap-files and `--force` overwrite protection, with cross-platform handle cleanup on Windows.
+  - Universal JSON contract: custom `JSONAwareArgumentParser` ensures structured error envelopes (`{"status": "error", "error": {"code": ..., "message": ...}}`) even on argument parsing errors.
+  - Privacy-by-default output: `session get`, `session list`, and `session create` redact sensitive tokens and URLs across text and JSON modes unless `--include-sensitive` is explicitly supplied.
+  - Diagnostic `didit doctor`: probes root unauthenticated `/system/healthcheck/` for network connectivity without fail-open, authenticates credentials safely via probe without touching customer KYC data, and inspects secret configuration without character length leakage.
+  - Sandbox scenario catalog explorer (`didit sandbox scenarios`) probing live scenarios from `/v1/sandbox/scenarios/` with a static 16-scenario offline fallback.
+  - Full pagination controls on `didit session list` (`--limit`, `--offset`, `--all`, `--max-sessions`) with parameter validation.
 - **Session Listing & Pagination (`client.sessions.list()` / `async_client.sessions.list()`):**
   - Query upstream `GET /v3/sessions/` with comprehensive filtering (`status`, `vendor_data`, `country`, `workflow_id`, `search`, `date_from`, `date_to`) and pagination (`limit`, `offset`).
   - Typed `SessionListPage` and `SessionListItem` models for ergonomic consumption.
