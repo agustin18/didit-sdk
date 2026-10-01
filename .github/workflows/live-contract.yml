@@ -57,7 +57,6 @@ jobs:
   live-contract-gate:
     name: Live Didit Sandbox Contract Gate
     runs-on: ubuntu-latest
-    if: "${{ secrets.DIDIT_API_KEY != '' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -74,7 +73,25 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
+      - name: Check Live Credentials Gate
+        id: check-creds
+        env:
+          DIDIT_API_KEY: ${{ secrets.DIDIT_API_KEY }}
+        run: |
+          if [ -z "${DIDIT_API_KEY}" ]; then
+            if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              echo "::error::DIDIT_API_KEY is missing on ${{ github.event_name }}. Failing closed."
+              exit 1
+            else
+              echo "DIDIT_API_KEY not configured in environment. Skipping live gate step (offline matrix validated)."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Verify Live Sandbox Scenarios Contract Against Oracle
+        if: steps.check-creds.outputs.skip != 'true'
         env:
           DIDIT_API_KEY: ${{ secrets.DIDIT_API_KEY }}
         run: |
