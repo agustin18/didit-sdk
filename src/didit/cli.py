@@ -509,16 +509,27 @@ def _cmd_session_resubmit(args: argparse.Namespace) -> int:
         sess_dict = session.model_dump() if include_sensitive else session.redacted_dump()
         return _emit_success(sess_dict, is_json=True)
 
-    status_val = (
-        session.status.value
-        if isinstance(session.status, SessionStatus)
-        else (session.status or "Resubmitted")
-    )
     text_lines = [
         f"Session ID:             {session.session_id}",
-        f"Status:                 {status_val}",
-        f"Requires Resubmission:  {session.requires_resubmission}",
     ]
+    if session.status is not None:
+        stat_str = (
+            session.status.value
+            if isinstance(session.status, SessionStatus)
+            else str(session.status)
+        )
+        text_lines.append(f"Confirmed Status:       {stat_str}")
+    req_stat = (
+        session.requested_status.value
+        if isinstance(session.requested_status, SessionStatus)
+        else (session.requested_status or "Resubmitted")
+    )
+    text_lines.append(f"Requested Status:       {req_stat}")
+    text_lines.append(f"Requires Resubmission:  {session.requires_resubmission}")
+    text_lines.append(
+        "Note: Run 'didit session decision "
+        f"{session.session_id}' to retrieve current verified outcome."
+    )
     resub_info = getattr(session, "resubmit_info", None)
     if resub_info:
         nodes_str = ", ".join(resub_info.nodes) if resub_info.nodes else "all"
@@ -900,10 +911,12 @@ def build_parser() -> argparse.ArgumentParser:
     session_resubmit.add_argument("session_id", help="Didit session identifier")
     session_resubmit.add_argument(
         "--nodes",
+        "--node",
+        dest="nodes",
         nargs="*",
         help=(
-            "Optional exact upstream workflow node IDs to resubmit "
-            "(e.g. 'document-verification-node', 'face-liveness-node')"
+            "Workflow nodes to resubmit formatted as 'node_id:FEATURE' "
+            "(e.g. 'feature_ocr:OCR', 'feature_liveness:LIVENESS')"
         ),
     )
     session_resubmit.set_defaults(func=_cmd_session_resubmit)

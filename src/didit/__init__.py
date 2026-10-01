@@ -65,7 +65,13 @@ from didit.models.decision import (
     ReviewData,
     VerificationWarning,
 )
-from didit.models.enums import Language, ManualSessionStatus, SessionStatus
+from didit.models.enums import (
+    CURRENT_DIDIT_LANGUAGES,
+    CallbackMethod,
+    Language,
+    ManualSessionStatus,
+    SessionStatus,
+)
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
@@ -101,6 +107,8 @@ __all__ = [
     "AsyncWebhookReservationStore",
     "BatchReconciliationReport",
     "BiometricsData",
+    "CURRENT_DIDIT_LANGUAGES",
+    "CallbackMethod",
     "ContactDetails",
     "CreateSessionRequest",
     "DecisionResponse",

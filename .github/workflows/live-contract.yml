@@ -8,6 +8,7 @@ on:
       - "tests/test_contract_matrix.py"
       - "tests/test_v020_compatibility.py"
       - "tests/test_openapi_contract_drift.py"
+      - "tests/test_upstream_openapi_drift.py"
       - ".github/workflows/live-contract.yml"
   workflow_dispatch:
     inputs:
@@ -45,6 +46,12 @@ jobs:
 
       - name: Run OpenAPI Contract Drift Tests
         run: uv run pytest tests/test_openapi_contract_drift.py -v
+
+      - name: Run Live Upstream OpenAPI Drift Gate
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          DIDIT_CHECK_UPSTREAM_DRIFT: "1"
+        run: uv run pytest tests/test_upstream_openapi_drift.py -v
 
       - name: Run Contract Matrix Tests
         env:

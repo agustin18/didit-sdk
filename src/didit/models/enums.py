@@ -169,3 +169,21 @@ class Language(str, Enum):
     ZH_CN = "zh-CN"
     ZH_TW = "zh-TW"
     ZH = "zh"
+
+
+CURRENT_DIDIT_LANGUAGES: frozenset[str] = frozenset(
+    lang.value for lang in Language if lang not in (Language.EU, Language.GL)
+)
+
+
+class CallbackMethod(str, Enum):
+    """Device handling redirect to callback URL according to Didit OpenAPI specification.
+
+    - initiator: Redirect only the device that started the verification flow (default).
+    - completer: Redirect the device that finishes the verification flow.
+    - both: Allow either device to trigger the callback redirect.
+    """
+
+    INITIATOR = "initiator"
+    COMPLETER = "completer"
+    BOTH = "both"

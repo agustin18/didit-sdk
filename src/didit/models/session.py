@@ -5,13 +5,18 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from didit.models.enums import ManualSessionStatus, SessionStatus
+from didit.models.enums import CallbackMethod, ManualSessionStatus, SessionStatus
 
 
 class ResubmitFeature(str, Enum):
-    """Allowed feature choices for nodes_to_resubmit in Didit Verification API."""
+    """Schema-valid feature choices in Didit OpenAPI V3 specification.
+
+    Note: Upstream business rules restrict executable resubmission to user verification
+    steps (e.g. OCR, LIVENESS, FACE_MATCH). Organizational KYB steps (KYB_REGISTRY,
+    KYB_KEY_PEOPLE, KYB) are valid in the schema but cannot be resubmitted directly.
+    """
 
     OCR = "OCR"
     OCR_BACK = "OCR_BACK"
@@ -135,13 +140,13 @@ class CreateSessionRequest(BaseModel):
         default=None,
         description="Optional redirect URL after verification completion",
     )
-    callback_method: str | None = Field(
+    callback_method: CallbackMethod | str | None = Field(
         default=None,
-        description="HTTP method for callback redirection ('both', 'get', 'post')",
+        description="Device receiving callback redirect ('initiator', 'completer', 'both')",
     )
-    metadata: dict[str, Any] | None = Field(
+    metadata: JsonValue | None = Field(
         default=None,
-        description="Arbitrary metadata dictionary stored with the session",
+        description="Arbitrary JSON stored with the session and echoed back in webhooks/responses",
     )
     language: str | None = Field(
         default=None,
@@ -208,7 +213,11 @@ class UpdateSessionStatusResponse(BaseModel):
     session_id: str = Field(..., description="UUID of the updated verification session")
     status: SessionStatus | str | None = Field(
         default=None,
-        description="Echoed status if present in response or provided by caller context",
+        description="Status confirmed upstream by Didit (None if not echoed upstream)",
+    )
+    requested_status: SessionStatus | str | None = Field(
+        default=None,
+        description="Status transition requested by client in update_status/resubmit",
     )
     resubmit_info: ResubmitInfo | None = Field(
         default=None,
@@ -217,12 +226,21 @@ class UpdateSessionStatusResponse(BaseModel):
 
     @property
     def requires_resubmission(self) -> bool:
-        """Return True if status indicates resubmission is required."""
+        """Return True if status confirmed by Didit indicates resubmission is required."""
         return self.status in (SessionStatus.RESUBMITTED, "Resubmitted")
 
+    @property
+    def requested_resubmission(self) -> bool:
+        """Return True if requested status indicates resubmission."""
+        return self.requested_status in (SessionStatus.RESUBMITTED, "Resubmitted")
+
     def __repr__(self) -> str:
-        status_part = f", status={self.status!r}" if self.status is not None else ""
-        return f"UpdateSessionStatusResponse(session_id={self.session_id!r}{status_part})"
+        parts = [f"session_id={self.session_id!r}"]
+        if self.status is not None:
+            parts.append(f"status={self.status!r}")
+        if self.requested_status is not None:
+            parts.append(f"requested_status={self.requested_status!r}")
+        return f"UpdateSessionStatusResponse({', '.join(parts)})"
 
     __str__ = __repr__
 
@@ -231,6 +249,11 @@ class UpdateSessionStatusResponse(BaseModel):
         return {
             "session_id": self.session_id,
             "status": self.status.value if isinstance(self.status, SessionStatus) else self.status,
+            "requested_status": (
+                self.requested_status.value
+                if isinstance(self.requested_status, SessionStatus)
+                else self.requested_status
+            ),
             "requires_resubmission": self.requires_resubmission,
             "resubmit_info": self.resubmit_info.redacted_dump() if self.resubmit_info else None,
         }

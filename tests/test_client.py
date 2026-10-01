@@ -1306,6 +1306,10 @@ class TestDiditSyncClient:
 
         res = client.sessions.resubmit("sess_resub_1")
         assert res.session_id == "sess_resub_1"
+        assert res.status is None
+        assert res.requested_status == SessionStatus.RESUBMITTED
+        assert res.requires_resubmission is False
+        assert res.requested_resubmission is True
         assert route.called
         sent = json.loads(route.calls[0].request.content)
         assert sent["new_status"] == "Resubmitted"
@@ -1334,6 +1338,8 @@ class TestDiditSyncClient:
             email_language="en",
         )
         assert res.session_id == "sess_resub_2"
+        assert res.status is None
+        assert res.requested_status == SessionStatus.RESUBMITTED
         sent = json.loads(route.calls[0].request.content)
         assert sent["new_status"] == "Resubmitted"
         assert sent["nodes_to_resubmit"] == [
@@ -1355,8 +1361,47 @@ class TestDiditSyncClient:
         with pytest.raises(ValueError, match="must contain 'node_id' and 'feature'"):
             client.sessions.resubmit("sess_err", nodes_to_resubmit=[{"feature": "OCR"}])
 
+        with pytest.raises(ValueError, match="must be non-empty"):
+            client.sessions.resubmit(
+                "sess_err", nodes_to_resubmit=[{"node_id": "   ", "feature": "OCR"}]
+            )
+
+        with pytest.raises(ValueError, match="must be non-empty"):
+            client.sessions.resubmit(
+                "sess_err", nodes_to_resubmit=[{"node_id": "id1", "feature": "   "}]
+            )
+
+        with pytest.raises(ValueError, match="Invalid shorthand node 'plain_step'"):
+            client.sessions.resubmit("sess_err", nodes_to_resubmit=["plain_step"])
+
+        with pytest.raises(ValueError, match="Both node_id and feature must be non-empty"):
+            client.sessions.resubmit("sess_err", nodes_to_resubmit=["node_id:"])
+
+        with pytest.raises(ValueError, match="Both node_id and feature must be non-empty"):
+            client.sessions.resubmit("sess_err", nodes_to_resubmit=[":OCR"])
+
+        with pytest.raises(ValueError, match="non-resubmittable organizational step"):
+            client.sessions.resubmit(
+                "sess_err",
+                nodes_to_resubmit=[ResubmitNode(node_id="kyb_node", feature="KYB_REGISTRY")],
+            )
+
+        with pytest.raises(ValueError, match="non-resubmittable organizational step"):
+            client.sessions.resubmit(
+                "sess_err",
+                nodes_to_resubmit=[{"node_id": "kyb_node", "feature": "KYB_KEY_PEOPLE"}],
+            )
+
+        with pytest.raises(ValueError, match="non-resubmittable organizational step"):
+            client.sessions.resubmit(
+                "sess_err",
+                nodes_to_resubmit=["kyb_node:KYB"],
+            )
+
     @respx.mock
-    def test_resubmit_nodes_string_inference_matrix(self, client: Didit, base_url: str) -> None:
+    def test_resubmit_nodes_explicit_shorthand_and_normalization(
+        self, client: Didit, base_url: str
+    ) -> None:
         route = respx.patch(f"{base_url}/session/sess_matrix/update-status/").mock(
             return_value=Response(200, json={"session_id": "sess_matrix"})
         )
@@ -1365,36 +1410,22 @@ class TestDiditSyncClient:
             nodes_to_resubmit=[
                 "   ",
                 "custom_node:LIVENESS",
-                "live_step",
-                "face_check",
-                "face_match_check",
-                "aml_screening",
-                "poa_check",
-                "address_step",
-                "phone_auth",
-                "email_verify",
-                "doc_front",
-                "ocr_back",
-                "NFC",
-                "unrecognized_step",
+                "ocr_node:ocr",
+                ResubmitNode(node_id="face_check", feature=ResubmitFeature.FACE_MATCH),
+                {"node_id": "aml_step", "feature": "AML"},
+                "poa_check:PROOF_OF_ADDRESS",
             ],
         )
         assert res.session_id == "sess_matrix"
+        assert res.status is None
+        assert res.requested_status == SessionStatus.RESUBMITTED
         sent = json.loads(route.calls[0].request.content)
         expected_nodes = [
             {"node_id": "custom_node", "feature": "LIVENESS"},
-            {"node_id": "live_step", "feature": "LIVENESS"},
-            {"node_id": "face_check", "feature": "FACE"},
-            {"node_id": "face_match_check", "feature": "FACE_MATCH"},
-            {"node_id": "aml_screening", "feature": "AML"},
+            {"node_id": "ocr_node", "feature": "OCR"},
+            {"node_id": "face_check", "feature": "FACE_MATCH"},
+            {"node_id": "aml_step", "feature": "AML"},
             {"node_id": "poa_check", "feature": "PROOF_OF_ADDRESS"},
-            {"node_id": "address_step", "feature": "PROOF_OF_ADDRESS"},
-            {"node_id": "phone_auth", "feature": "PHONE_VERIFICATION"},
-            {"node_id": "email_verify", "feature": "EMAIL_VERIFICATION"},
-            {"node_id": "doc_front", "feature": "OCR"},
-            {"node_id": "ocr_back", "feature": "OCR"},
-            {"node_id": "NFC", "feature": "NFC"},
-            {"node_id": "unrecognized_step", "feature": "OCR"},
         ]
         assert sent["nodes_to_resubmit"] == expected_nodes
 
@@ -1406,7 +1437,8 @@ class TestDiditSyncClient:
         )
         r1 = client.sessions.update_status("sess_nondict", SessionStatus.APPROVED)
         assert r1.session_id == "sess_nondict"
-        assert r1.status == SessionStatus.APPROVED
+        assert r1.status is None
+        assert r1.requested_status == SessionStatus.APPROVED
 
         # Dict response with explicit status included upstream
         respx.patch(f"{base_url}/session/sess_explicit_status/update-status/").mock(
@@ -1418,6 +1450,7 @@ class TestDiditSyncClient:
         r2 = client.sessions.update_status("sess_explicit_status", SessionStatus.DECLINED)
         assert r2.session_id == "sess_explicit_status"
         assert r2.status == "Declined"
+        assert r2.requested_status == SessionStatus.DECLINED
 
     def test_update_status_send_email_without_address(self, client: Didit) -> None:
         with pytest.raises(ValueError, match="email_address is required when send_email is True"):
@@ -1449,6 +1482,8 @@ class TestDiditSyncClient:
             comment="Suspected fraud",
         )
         assert res.session_id == "sess_custom_status"
+        assert res.status is None
+        assert res.requested_status == SessionStatus.DECLINED
         sent = json.loads(route.calls[0].request.content)
         assert sent["new_status"] == "Declined"
         assert sent["comment"] == "Suspected fraud"

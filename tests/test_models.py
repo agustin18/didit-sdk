@@ -10,7 +10,7 @@ from didit.models.decision import (
     DocumentData,
     ReviewData,
 )
-from didit.models.enums import Language, SessionStatus
+from didit.models.enums import CallbackMethod, Language, SessionStatus
 from didit.models.session import (
     CreateSessionRequest,
     ResubmitFeature,
@@ -1000,27 +1000,38 @@ class TestSessionListAndReconciliationModels:
 
     def test_update_session_status_response_redacted_and_repr(self) -> None:
         """Verify UpdateSessionStatusResponse string formatting and privacy-safe dumping."""
-        # 1. Without status or resubmit_info
-        r1 = UpdateSessionStatusResponse(session_id="sess_up_1")
+        # 1. Without status or resubmit_info (upstream Didit default)
+        r1 = UpdateSessionStatusResponse(
+            session_id="sess_up_1",
+            requested_status=SessionStatus.RESUBMITTED,
+        )
         assert "sess_up_1" in repr(r1)
+        assert "requested_status=" in repr(r1)
         assert str(r1) == repr(r1)
+        assert r1.status is None
+        assert r1.requested_status == SessionStatus.RESUBMITTED
         assert r1.requires_resubmission is False
+        assert r1.requested_resubmission is True
         d1 = r1.redacted_dump()
         assert d1["session_id"] == "sess_up_1"
         assert d1["status"] is None
+        assert d1["requested_status"] == "Resubmitted"
         assert d1["requires_resubmission"] is False
         assert d1["resubmit_info"] is None
 
-        # 2. With status Enum and resubmit_info
+        # 2. With confirmed status Enum and resubmit_info
         r2 = UpdateSessionStatusResponse(
             session_id="sess_up_2",
             status=SessionStatus.RESUBMITTED,
+            requested_status=SessionStatus.RESUBMITTED,
             resubmit_info=ResubmitInfo(nodes=["doc"]),
         )
         assert "Resubmitted" in repr(r2)
         assert r2.requires_resubmission is True
+        assert r2.requested_resubmission is True
         d2 = r2.redacted_dump()
         assert d2["status"] == "Resubmitted"
+        assert d2["requested_status"] == "Resubmitted"
         assert d2["requires_resubmission"] is True
         assert d2["resubmit_info"] == {
             "nodes": ["doc"],
@@ -1029,5 +1040,22 @@ class TestSessionListAndReconciliationModels:
         }
 
         # 3. With status as raw string
-        r3 = UpdateSessionStatusResponse(session_id="sess_up_3", status="CustomStatus")
+        r3 = UpdateSessionStatusResponse(
+            session_id="sess_up_3", status="CustomStatus", requested_status="CustomReq"
+        )
         assert r3.redacted_dump()["status"] == "CustomStatus"
+        assert r3.redacted_dump()["requested_status"] == "CustomReq"
+
+    def test_callback_method_and_metadata_models(self) -> None:
+        """Verify CallbackMethod and arbitrary JSON metadata in CreateSessionRequest."""
+        assert CallbackMethod.INITIATOR.value == "initiator"
+        assert CallbackMethod.COMPLETER.value == "completer"
+        assert CallbackMethod.BOTH.value == "both"
+
+        req = CreateSessionRequest(
+            workflow_id="wf_meta",
+            callback_method=CallbackMethod.BOTH,
+            metadata=["campaign_x", 123, {"active": True}],
+        )
+        assert req.callback_method == "both"
+        assert req.metadata == ["campaign_x", 123, {"active": True}]

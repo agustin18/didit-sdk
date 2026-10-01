@@ -215,17 +215,27 @@ if decision.requires_resubmission and decision.resubmit_info:
     if decision.resubmit_info.available_attempts is not None:
         print(f"Attempts remaining: {decision.resubmit_info.available_attempts}")
 
+    from didit import ResubmitFeature, ResubmitNode
+
     # Request resubmission for specific failed check nodes
-    # Note: Use exact node IDs returned for the session (e.g. 'document-verification-node', 'face-liveness-node')
-    resubmitted = client.sessions.resubmit(
+    result = client.sessions.resubmit(
         "sess_12345",
-        nodes_to_resubmit=["document-verification-node"],
+        nodes_to_resubmit=[
+            ResubmitNode(
+                node_id="feature_ocr",
+                feature=ResubmitFeature.OCR,
+            )
+        ],
     )
-    print(f"Session status: {resubmitted.status}")
+    print(f"Resubmission acknowledged for session: {result.session_id}")
+
+    # Query decision endpoint to retrieve the updated session state
+    current_decision = client.sessions.get_decision(result.session_id)
+    print(f"Current decision status: {current_decision.status}")
 
 # Update session status (manual review transitions: 'Approved', 'Declined', 'Resubmitted')
 updated = client.sessions.update_status("sess_12345", new_status=SessionStatus.APPROVED)
-print(f"Session status updated to: {updated.status}")
+print(f"Session status update acknowledged: {updated.session_id}")
 ```
 
 ### 7. Compliance PDF Reports
@@ -448,8 +458,8 @@ didit session create --workflow-id wf_standard --vendor-data user_42
 didit session list --status Approved --limit 20
 didit session list --all --max-sessions 500
 
-# Resubmit a session
-didit session resubmit sess_12345 --nodes document-verification-node
+# Resubmit a session with explicit node and feature
+didit session resubmit sess_12345 --node feature_ocr:OCR
 
 # Download PDF report with atomic POSIX 0600 file permissions and overwrite guard
 didit session pdf sess_12345 --output report.pdf

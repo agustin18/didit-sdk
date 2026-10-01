@@ -783,8 +783,10 @@ class TestSimulatedAsyncDidit:
         # Test resubmit without nodes
         res1 = client.sessions.resubmit(s.session_id)
         assert res1.session_id == s.session_id
-        assert res1.status == SessionStatus.RESUBMITTED
-        assert res1.requires_resubmission is True
+        assert res1.status is None
+        assert res1.requested_status == SessionStatus.RESUBMITTED
+        assert res1.requires_resubmission is False
+        assert res1.requested_resubmission is True
 
         # Test resubmit with nodes
         res2 = client.sessions.resubmit(
@@ -792,19 +794,23 @@ class TestSimulatedAsyncDidit:
             nodes_to_resubmit=[
                 ResubmitNode(node_id="doc_resub", feature=ResubmitFeature.OCR),
                 {"node_id": "face_resub", "feature": "FACE_MATCH"},
-                "plain_str",
+                "plain_step:OCR",
             ],
         )
-        assert res2.status == SessionStatus.RESUBMITTED
-        assert res2.requires_resubmission is True
+        assert res2.session_id == s.session_id
+        assert res2.status is None
+        assert res2.requested_status == SessionStatus.RESUBMITTED
         updated_s = client.sessions.get(s.session_id)
+        assert updated_s.status == SessionStatus.RESUBMITTED
+        assert updated_s.requires_resubmission is True
         assert updated_s.resubmit_info == ResubmitInfo(
-            nodes=["doc_resub", "face_resub", "plain_str"]
+            nodes=["doc_resub", "face_resub", "plain_step"]
         )
 
         # Test update_status with allowed manual status
         res3 = client.sessions.update_status(s.session_id, "Declined")
-        assert res3.status == SessionStatus.DECLINED
+        assert res3.status is None
+        assert res3.requested_status == "Declined"
 
         # Test invalid status raises ValueError
         with pytest.raises(ValueError, match="Invalid manual status transition"):
@@ -813,7 +819,8 @@ class TestSimulatedAsyncDidit:
         # Decision is None branch in update_status
         client.sessions._storage.decisions.pop(s.session_id, None)
         res4 = client.sessions.update_status(s.session_id, SessionStatus.APPROVED)
-        assert res4.status == SessionStatus.APPROVED
+        assert res4.status is None
+        assert res4.requested_status == SessionStatus.APPROVED
 
         # Error cases
         with pytest.raises(ValueError, match="session_id must not be empty"):
@@ -834,13 +841,17 @@ class TestSimulatedAsyncDidit:
                 {"node_id": "dict_node", "feature": "OCR"},
             ],
         )
-        assert res.status == SessionStatus.RESUBMITTED
-        assert res.requires_resubmission is True
+        assert res.session_id == s.session_id
+        assert res.status is None
+        assert res.requested_status == SessionStatus.RESUBMITTED
         updated_s = await client.sessions.get(s.session_id)
+        assert updated_s.status == SessionStatus.RESUBMITTED
+        assert updated_s.requires_resubmission is True
         assert updated_s.resubmit_info == ResubmitInfo(nodes=["live_node", "dict_node"])
 
         res_update = await client.sessions.update_status(s.session_id, SessionStatus.APPROVED)
-        assert res_update.status == SessionStatus.APPROVED
+        assert res_update.status is None
+        assert res_update.requested_status == SessionStatus.APPROVED
 
         with pytest.raises(ValueError, match="Invalid manual status transition"):
             await client.sessions.update_status(s.session_id, "In Review")

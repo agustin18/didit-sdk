@@ -713,8 +713,8 @@ class TestDiditCLI:
                 "resubmit",
                 "sess_resub",
                 "--nodes",
-                "document",
-                "liveness",
+                "document:OCR",
+                "liveness:LIVENESS",
                 "--json",
             ]
         )
@@ -1320,11 +1320,12 @@ class TestDiditCLI:
                 },
             )
         )
-        exit_code = main(["session", "resubmit", "sess_r_text", "--nodes", "document"])
+        exit_code = main(["session", "resubmit", "sess_r_text", "--nodes", "document:OCR"])
         assert exit_code == 0
         captured = capsys.readouterr()
         assert "Session ID:             sess_r_text" in captured.out
-        assert "Status:                 Resubmitted" in captured.out
+        assert "Confirmed Status:       Resubmitted" in captured.out
+        assert "Requested Status:       Resubmitted" in captured.out
         assert "Requires Resubmission:  True" in captured.out
         assert "Resubmit Steps:         document" in captured.out
         assert "Remaining Attempts:     2" in captured.out
@@ -1339,7 +1340,6 @@ class TestDiditCLI:
                 200,
                 json={
                     "session_id": "sess_r_text2",
-                    "status": "Resubmitted",
                 },
             )
         )
@@ -1347,6 +1347,9 @@ class TestDiditCLI:
         assert exit_code == 0
         captured = capsys.readouterr()
         assert "Session ID:             sess_r_text2" in captured.out
+        assert "Confirmed Status:" not in captured.out
+        assert "Requested Status:       Resubmitted" in captured.out
+        assert "Requires Resubmission:  False" in captured.out
         assert "Resubmit Details" not in captured.out
 
     @respx.mock
@@ -1524,10 +1527,12 @@ class TestDiditCLI:
                 },
             )
         )
-        exit_code = main(["session", "resubmit", "sess_no_att", "--nodes", "document"])
+        exit_code = main(["session", "resubmit", "sess_no_att", "--nodes", "document:OCR"])
         assert exit_code == 0
         captured = capsys.readouterr()
         assert "Session ID:             sess_no_att" in captured.out
+        assert "Confirmed Status:       Resubmitted" in captured.out
+        assert "Requested Status:       Resubmitted" in captured.out
         assert "Resubmit Steps:         document" in captured.out
         assert "Remaining Attempts:" not in captured.out
 

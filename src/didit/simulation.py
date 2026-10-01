@@ -35,7 +35,6 @@ from didit.models.session import (
     BatchReconciliationReport,
     ObservedSessionState,
     ResubmitInfo,
-    ResubmitNode,
     SessionListItem,
     SessionListPage,
     SessionReconciliationReport,
@@ -43,7 +42,11 @@ from didit.models.session import (
     SessionStateSource,
     UpdateSessionStatusResponse,
 )
-from didit.resources.sessions import _secure_write_bytes, _validate_session_list_filters
+from didit.resources.sessions import (
+    _normalize_nodes_to_resubmit,
+    _secure_write_bytes,
+    _validate_session_list_filters,
+)
 from didit.webhooks import compute_signature
 
 SUPPORTED_SANDBOX_SCENARIOS: set[str] = {
@@ -432,16 +435,10 @@ class _SimulatedStorage:
         session = self.sessions[clean_id]
         session.status = status_enum
 
-        resub_nodes: list[str] | None = None
-        if nodes_to_resubmit is not None:
-            resub_nodes = []
-            for item in nodes_to_resubmit:
-                if isinstance(item, ResubmitNode):
-                    resub_nodes.append(item.node_id)
-                elif isinstance(item, dict):
-                    resub_nodes.append(str(item.get("node_id", "")))
-                else:
-                    resub_nodes.append(str(item))
+        normalized = _normalize_nodes_to_resubmit(nodes_to_resubmit)
+        resub_nodes: list[str] | None = (
+            [item["node_id"] for item in normalized] if normalized is not None else None
+        )
 
         resub_model = (
             ResubmitInfo(nodes=resub_nodes)
@@ -455,7 +452,9 @@ class _SimulatedStorage:
             decision.status = status_enum
             decision.resubmit_info = resub_model
 
-        return UpdateSessionStatusResponse(session_id=clean_id, status=status_enum)
+        return UpdateSessionStatusResponse(
+            session_id=clean_id, status=None, requested_status=status_enum
+        )
 
     def resubmit(
         self,

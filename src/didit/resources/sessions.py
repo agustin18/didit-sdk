@@ -38,7 +38,6 @@ from didit.models.session import (
     CreateSessionRequest,
     ExpectedDetails,
     ObservedSessionState,
-    ResubmitFeature,
     ResubmitNode,
     SessionListPage,
     SessionReconciliationReport,
@@ -84,59 +83,77 @@ def _validate_manual_status(new_status: ManualSessionStatus | SessionStatus | st
     return new_status.value if isinstance(new_status, SessionStatus) else str(new_status)
 
 
+NON_RESUBMITTABLE_FEATURES: frozenset[str] = frozenset({"KYB_REGISTRY", "KYB_KEY_PEOPLE", "KYB"})
+
+
 def _normalize_nodes_to_resubmit(
     nodes: Sequence[ResubmitNode | dict[str, Any] | str] | None,
 ) -> list[dict[str, str]] | None:
-    """Normalize nodes_to_resubmit to the exact Didit OpenAPI V3 object schema."""
+    """Normalize nodes_to_resubmit to the exact Didit OpenAPI V3 object schema.
+
+    Enforces fail-closed validation:
+    - ResubmitNode(node_id=..., feature=...)
+    - dict with keys 'node_id' and 'feature'
+    - String shorthand: 'node_id:FEATURE' (e.g. 'feature_ocr:OCR')
+    Rejects unrecognized plain strings or non-resubmittable KYB features.
+    """
     if nodes is None:
         return None
     normalized: list[dict[str, str]] = []
     for item in nodes:
         if isinstance(item, ResubmitNode):
-            feature_val = (
-                item.feature.value if isinstance(item.feature, Enum) else str(item.feature)
+            feat_val = (
+                item.feature.value if isinstance(item.feature, Enum) else str(item.feature).strip()
             )
-            normalized.append({"node_id": item.node_id, "feature": feature_val})
+            if feat_val.upper() in NON_RESUBMITTABLE_FEATURES:
+                raise ValueError(
+                    f"Feature '{feat_val}' is a non-resubmittable organizational step. "
+                    f"Didit business rules reject resubmission for '{feat_val}'."
+                )
+            normalized.append({"node_id": item.node_id, "feature": feat_val})
         elif isinstance(item, dict):
             if "node_id" not in item or "feature" not in item:
                 raise ValueError(
                     f"Each dict in nodes_to_resubmit must contain 'node_id' and 'feature', "
                     f"got {item}"
                 )
-            feature_val = (
-                item["feature"].value if isinstance(item["feature"], Enum) else str(item["feature"])
+            feat_val = (
+                item["feature"].value
+                if isinstance(item["feature"], Enum)
+                else str(item["feature"]).strip()
             )
-            normalized.append({"node_id": str(item["node_id"]), "feature": feature_val})
+            node_val = str(item["node_id"]).strip()
+            if not node_val or not feat_val:
+                raise ValueError(f"Both 'node_id' and 'feature' must be non-empty in {item}")
+            if feat_val.upper() in NON_RESUBMITTABLE_FEATURES:
+                raise ValueError(
+                    f"Feature '{feat_val}' is a non-resubmittable organizational step. "
+                    f"Didit business rules reject resubmission for '{feat_val}'."
+                )
+            normalized.append({"node_id": node_val, "feature": feat_val})
         elif isinstance(item, str):
             raw_node = item.strip()
             if not raw_node:
                 continue
-            if ":" in raw_node:
-                node_part, feat_part = raw_node.split(":", 1)
-                normalized.append({"node_id": node_part.strip(), "feature": feat_part.strip()})
-            else:
-                lower = raw_node.lower()
-                if "live" in lower:
-                    feat = "LIVENESS"
-                elif "face" in lower:
-                    feat = "FACE_MATCH" if "match" in lower else "FACE"
-                elif "aml" in lower:
-                    feat = "AML"
-                elif "poa" in lower or "address" in lower:
-                    feat = "PROOF_OF_ADDRESS"
-                elif "phone" in lower:
-                    feat = "PHONE_VERIFICATION"
-                elif "email" in lower:
-                    feat = "EMAIL_VERIFICATION"
-                elif "doc" in lower or "ocr" in lower:
-                    feat = "OCR"
-                else:
-                    feat = (
-                        raw_node.upper()
-                        if raw_node.upper() in [f.value for f in ResubmitFeature]
-                        else "OCR"
-                    )
-                normalized.append({"node_id": raw_node, "feature": feat})
+            if ":" not in raw_node:
+                raise ValueError(
+                    f"Invalid shorthand node '{item}'. Resubmission requires an explicit feature. "
+                    f"Use 'node_id:FEATURE' (e.g. 'feature_ocr:OCR') or "
+                    f"ResubmitNode(node_id=..., feature=...)."
+                )
+            node_part, feat_part = raw_node.split(":", 1)
+            node_clean = node_part.strip()
+            feat_clean = feat_part.strip().upper()
+            if not node_clean or not feat_clean:
+                raise ValueError(
+                    f"Invalid shorthand '{item}'. Both node_id and feature must be non-empty."
+                )
+            if feat_clean in NON_RESUBMITTABLE_FEATURES:
+                raise ValueError(
+                    f"Feature '{feat_clean}' is a non-resubmittable organizational step. "
+                    f"Didit business rules reject resubmission for '{feat_clean}'."
+                )
+            normalized.append({"node_id": node_clean, "feature": feat_clean})
         else:
             raise TypeError(
                 f"Each item in nodes_to_resubmit must be a ResubmitNode, dict, or string, "
@@ -316,7 +333,13 @@ class SessionsResource:
         *,
         options: RequestOptions | None = None,
     ) -> SessionResponse:
-        """Retrieve details and status for an existing verification session."""
+        """Retrieve details and status for an existing verification session.
+
+        Note: Upstream Didit OpenAPI V3 documents GET /v3/session/{id}/decision/
+        as the canonical programmatic endpoint for complete session decision data
+        (available via `client.sessions.get_decision()`). This method queries the
+        session resource at /v3/session/{id}/ for backward compatibility.
+        """
         resp = self._requestor.request("GET", f"/session/{session_id}/", options=options)
         return SessionResponse.model_validate(resp.json())
 
@@ -381,10 +404,11 @@ class SessionsResource:
         data = resp.json()
         if isinstance(data, dict):
             res_obj = UpdateSessionStatusResponse.model_validate(data)
-            if res_obj.status is None:
-                res_obj.status = status_val
+            res_obj.requested_status = status_val
             return res_obj
-        return UpdateSessionStatusResponse(session_id=session_id.strip(), status=status_val)
+        return UpdateSessionStatusResponse(
+            session_id=session_id.strip(), status=None, requested_status=status_val
+        )
 
     def resubmit(
         self,
@@ -964,7 +988,13 @@ class AsyncSessionsResource:
         *,
         options: RequestOptions | None = None,
     ) -> SessionResponse:
-        """Retrieve session status asynchronously."""
+        """Retrieve details and status for an existing session asynchronously.
+
+        Note: Upstream Didit OpenAPI V3 documents GET /v3/session/{id}/decision/
+        as the canonical programmatic endpoint for complete session decision data
+        (available via `client.sessions.get_decision()`). This method queries the
+        session resource at /v3/session/{id}/ for backward compatibility.
+        """
         resp = await self._requestor.request("GET", f"/session/{session_id}/", options=options)
         return SessionResponse.model_validate(resp.json())
 
@@ -1030,10 +1060,11 @@ class AsyncSessionsResource:
         data = resp.json()
         if isinstance(data, dict):
             res_obj = UpdateSessionStatusResponse.model_validate(data)
-            if res_obj.status is None:
-                res_obj.status = status_val
+            res_obj.requested_status = status_val
             return res_obj
-        return UpdateSessionStatusResponse(session_id=session_id.strip(), status=status_val)
+        return UpdateSessionStatusResponse(
+            session_id=session_id.strip(), status=None, requested_status=status_val
+        )
 
     async def resubmit(
         self,

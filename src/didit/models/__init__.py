@@ -7,7 +7,13 @@ from didit.models.decision import (
     DocumentData,
     ReviewData,
 )
-from didit.models.enums import Language, ManualSessionStatus, SessionStatus
+from didit.models.enums import (
+    CURRENT_DIDIT_LANGUAGES,
+    CallbackMethod,
+    Language,
+    ManualSessionStatus,
+    SessionStatus,
+)
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
@@ -34,6 +40,8 @@ __all__ = [
     "AsyncSessionStateSource",
     "BatchReconciliationReport",
     "BiometricsData",
+    "CURRENT_DIDIT_LANGUAGES",
+    "CallbackMethod",
     "ContactDetails",
     "CreateSessionRequest",
     "DecisionResponse",

@@ -12,7 +12,12 @@ from typing import Any
 
 import pytest
 
-from didit.models.enums import Language, SessionStatus
+from didit.models.enums import (
+    CURRENT_DIDIT_LANGUAGES,
+    CallbackMethod,
+    Language,
+    SessionStatus,
+)
 from didit.models.session import (
     ContactDetails,
     CreateSessionRequest,
@@ -47,6 +52,7 @@ def test_openapi_supported_paths_exist(openapi_spec: dict[str, Any]) -> None:
 
     expected_endpoints = {
         "/v3/session/": "post",
+        "/v3/sessions/": "get",
         "/v3/session/{sessionId}/decision/": "get",
         "/v3/session/{sessionId}/update-status/": "patch",
         "/v3/session/{sessionId}/generate-pdf/": "get",
@@ -93,6 +99,19 @@ def test_openapi_create_session_request_schema(openapi_spec: dict[str, Any]) -> 
     ]:
         assert prop in upstream_props, f"Expected property '{prop}' missing in OpenAPI"
         assert prop in sdk_fields, f"Property '{prop}' missing on CreateSessionRequest model"
+
+    # Verify callback_method enum choices
+    cb_schema = upstream_props["callback_method"]
+    assert set(cb_schema["enum"]) == {m.value for m in CallbackMethod}
+    assert cb_schema["default"] == "initiator"
+
+    # Verify metadata supports arbitrary JSON values (dict, list, int, str)
+    req_dict = CreateSessionRequest(workflow_id="wf_1", metadata={"key": "val"})
+    assert req_dict.metadata == {"key": "val"}
+    req_list = CreateSessionRequest(workflow_id="wf_1", metadata=["tag1", 42])
+    assert req_list.metadata == ["tag1", 42]
+    req_scalar = CreateSessionRequest(workflow_id="wf_1", metadata="simple_string")
+    assert req_scalar.metadata == "simple_string"
 
     contact_props = upstream_props.get("contact_details", {}).get("properties", {})
     for f_name in ["email", "send_notification_emails", "email_lang"]:
@@ -183,7 +202,10 @@ def test_openapi_languages_drift(openapi_spec: dict[str, Any]) -> None:
     ]
 
     upstream_langs = set(create_schema["properties"]["language"]["enum"])
-    sdk_langs = {lang.value for lang in Language}
+    # CURRENT_DIDIT_LANGUAGES has exact set equality with the 54 official OpenAPI languages
+    assert upstream_langs == CURRENT_DIDIT_LANGUAGES
+    assert len(CURRENT_DIDIT_LANGUAGES) == 54
 
-    for lang in upstream_langs:
-        assert lang in sdk_langs, f"Upstream language '{lang}' missing in Language enum"
+    # Language enum also retains EU and GL as deprecated legacy compatibility aliases
+    assert {"eu", "gl"}.issubset({lang.value for lang in Language})
+    assert len(Language) == 56

@@ -1445,6 +1445,10 @@ class TestAsyncDiditClient:
 
         res = await async_client.sessions.resubmit("sess_async_resub_1")
         assert res.session_id == "sess_async_resub_1"
+        assert res.status is None
+        assert res.requested_status == SessionStatus.RESUBMITTED
+        assert res.requires_resubmission is False
+        assert res.requested_resubmission is True
         assert route.called
         sent = json.loads(route.calls[0].request.content)
         assert sent["new_status"] == "Resubmitted"
@@ -1475,6 +1479,8 @@ class TestAsyncDiditClient:
             email_language="es",
         )
         assert res.session_id == "sess_async_resub_2"
+        assert res.status is None
+        assert res.requested_status == SessionStatus.RESUBMITTED
         sent = json.loads(route.calls[0].request.content)
         assert sent["new_status"] == "Resubmitted"
         assert sent["nodes_to_resubmit"] == [
@@ -1494,6 +1500,99 @@ class TestAsyncDiditClient:
                 "sess_async_err",
                 nodes_to_resubmit=[12345],  # type: ignore[list-item]
             )
+
+        with pytest.raises(ValueError, match="must contain 'node_id' and 'feature'"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[{"node_id": "foo"}],
+            )
+
+        with pytest.raises(ValueError, match="must contain 'node_id' and 'feature'"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[{"feature": "OCR"}],
+            )
+
+        with pytest.raises(ValueError, match="must be non-empty"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[{"node_id": "   ", "feature": "OCR"}],
+            )
+
+        with pytest.raises(ValueError, match="must be non-empty"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[{"node_id": "id1", "feature": "   "}],
+            )
+
+        with pytest.raises(ValueError, match="Invalid shorthand node 'plain_step'"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=["plain_step"],
+            )
+
+        with pytest.raises(ValueError, match="Both node_id and feature must be non-empty"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=["node_id:"],
+            )
+
+        with pytest.raises(ValueError, match="Both node_id and feature must be non-empty"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[":OCR"],
+            )
+
+        with pytest.raises(ValueError, match="non-resubmittable organizational step"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[ResubmitNode(node_id="kyb_node", feature="KYB_REGISTRY")],
+            )
+
+        with pytest.raises(ValueError, match="non-resubmittable organizational step"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[{"node_id": "kyb_node", "feature": "KYB_KEY_PEOPLE"}],
+            )
+
+        with pytest.raises(ValueError, match="non-resubmittable organizational step"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=["kyb_node:KYB"],
+            )
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_resubmit_nodes_explicit_shorthand_and_normalization(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        route = respx.patch(f"{base_url}/session/sess_async_matrix/update-status/").mock(
+            return_value=Response(200, json={"session_id": "sess_async_matrix"})
+        )
+        res = await async_client.sessions.resubmit(
+            "sess_async_matrix",
+            nodes_to_resubmit=[
+                "   ",
+                "custom_node:LIVENESS",
+                "ocr_node:ocr",
+                ResubmitNode(node_id="face_check", feature=ResubmitFeature.FACE_MATCH),
+                {"node_id": "aml_step", "feature": "AML"},
+                "poa_check:PROOF_OF_ADDRESS",
+            ],
+        )
+        assert res.session_id == "sess_async_matrix"
+        assert res.status is None
+        assert res.requested_status == SessionStatus.RESUBMITTED
+        sent = json.loads(route.calls[0].request.content)
+        expected_nodes = [
+            {"node_id": "custom_node", "feature": "LIVENESS"},
+            {"node_id": "ocr_node", "feature": "OCR"},
+            {"node_id": "face_check", "feature": "FACE_MATCH"},
+            {"node_id": "aml_step", "feature": "AML"},
+            {"node_id": "poa_check", "feature": "PROOF_OF_ADDRESS"},
+        ]
+        assert sent["nodes_to_resubmit"] == expected_nodes
         await async_client.aclose()
 
     @pytest.mark.asyncio
@@ -1535,6 +1634,8 @@ class TestAsyncDiditClient:
             "sess_async_custom_status", SessionStatus.DECLINED, comment="Suspected fraud"
         )
         assert res.session_id == "sess_async_custom_status"
+        assert res.status is None
+        assert res.requested_status == SessionStatus.DECLINED
         sent = json.loads(route.calls[0].request.content)
         assert sent["new_status"] == "Declined"
         assert sent["comment"] == "Suspected fraud"
@@ -1551,7 +1652,8 @@ class TestAsyncDiditClient:
         )
         r1 = await async_client.sessions.update_status("sess_async_nondict", SessionStatus.APPROVED)
         assert r1.session_id == "sess_async_nondict"
-        assert r1.status == SessionStatus.APPROVED
+        assert r1.status is None
+        assert r1.requested_status == SessionStatus.APPROVED
 
         # Dict response with explicit status included upstream
         respx.patch(f"{base_url}/session/sess_async_explicit_status/update-status/").mock(
@@ -1565,6 +1667,7 @@ class TestAsyncDiditClient:
         )
         assert r2.session_id == "sess_async_explicit_status"
         assert r2.status == "Declined"
+        assert r2.requested_status == SessionStatus.DECLINED
         await async_client.aclose()
 
     @pytest.mark.parametrize(
