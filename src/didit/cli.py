@@ -681,7 +681,6 @@ def _cmd_sandbox_scenarios(args: argparse.Namespace) -> int:
     headers: dict[str, str] = {}
     if api_key:
         headers["x-api-key"] = api_key
-        headers["Authorization"] = f"Bearer {api_key}"
 
     scenarios = SANDBOX_SCENARIOS
     remote_error: str | None = None

@@ -107,15 +107,10 @@ jobs:
           import json
           with open('/tmp/live_scenarios.json') as f:
               data = json.load(f)
+          with open('tests/contracts/sandbox_scenarios.json') as f:
+              contract = json.load(f)
           scenarios = {s['slug'] for s in data.get('scenarios', [])}
-          expected = {
-              'successful-verification', 'declined-expired-document', 'declined-underage',
-              'declined-face-mismatch', 'declined-suspected-spoof', 'declined-blacklisted',
-              'declined-unsupported-country', 'declined-unsupported-document', 'declined-poor-quality',
-              'declined-tampered-document', 'declined-sanctions-match', 'declined-pep-match',
-              'declined-adverse-media', 'declined-duplicate-submission', 'in-review-name-discrepancy',
-              'in-review-unclear-document'
-          }
+          expected = set(contract['expected_slugs'])
           assert scenarios == expected, f'Live sandbox scenarios contract mismatch: {scenarios ^ expected}'
           print(f'Successfully verified {len(scenarios)} live sandbox scenarios matching oracle!')
           "

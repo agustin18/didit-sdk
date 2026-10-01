@@ -471,3 +471,77 @@ class TestV020Compatibility:
 
         retrieved = sim.sessions.get(s.session_id)
         assert retrieved.session_id == s.session_id
+
+    def test_v020_integrations_and_dedup_frozen_contracts(self) -> None:
+        """Verify that v0.2.0 integration and dedup signatures and returns are preserved."""
+        import inspect
+
+        from didit.dedup import (
+            aclaim_webhook_event,
+            arelease_webhook_event,
+            compute_dedup_key,
+            release_webhook_event,
+        )
+        from didit.integrations.django import didit_webhook_view, parse_django_webhook
+        from didit.integrations.fastapi import (
+            DiditWebhookGuard,
+            didit_webhook,
+            release_didit_claim,
+        )
+        from didit.integrations.flask import didit_webhook as didit_flask_webhook
+        from didit.integrations.flask import parse_flask_webhook
+
+        # 1. Dedup helpers signatures and None return types for v0.2.0 callers
+        sig_rel = inspect.signature(release_webhook_event)
+        assert "store" in sig_rel.parameters
+        assert "event_id" in sig_rel.parameters
+        assert sig_rel.return_annotation in (None, "None", type(None))
+
+        sig_arel = inspect.signature(arelease_webhook_event)
+        assert "store" in sig_arel.parameters
+        assert "event_id" in sig_arel.parameters
+        assert sig_arel.return_annotation in (None, "None", type(None))
+
+        sig_aclaim = inspect.signature(aclaim_webhook_event)
+        assert "key" in sig_aclaim.parameters
+        assert sig_aclaim.parameters["ttl_seconds"].default == 86400
+        assert sig_aclaim.return_annotation in (bool, "bool")
+
+        sig_key = inspect.signature(compute_dedup_key)
+        assert "payload" in sig_key.parameters
+        assert sig_key.return_annotation in (str, "str")
+
+        # 2. FastAPI integration signatures and return types
+        sig_guard_init = inspect.signature(DiditWebhookGuard.__init__)
+        assert "dedup_ttl_seconds" in sig_guard_init.parameters
+        assert sig_guard_init.parameters["dedup_ttl_seconds"].default == 86400
+
+        sig_guard_rel = inspect.signature(DiditWebhookGuard.release_claim)
+        assert "request" in sig_guard_rel.parameters
+        assert sig_guard_rel.return_annotation in (None, "None", type(None))
+
+        sig_rel_claim = inspect.signature(release_didit_claim)
+        assert "request" in sig_rel_claim.parameters
+        assert sig_rel_claim.return_annotation in (None, "None", type(None))
+
+        sig_fastapi_wh = inspect.signature(didit_webhook)
+        assert "dedup_ttl_seconds" in sig_fastapi_wh.parameters
+        assert sig_fastapi_wh.parameters["dedup_ttl_seconds"].default == 86400
+
+        # 3. Django integration signatures and defaults
+        sig_django_wh = inspect.signature(didit_webhook_view)
+        assert "dedup_ttl_seconds" in sig_django_wh.parameters
+        assert sig_django_wh.parameters["dedup_ttl_seconds"].default == 86400
+
+        sig_django_parse = inspect.signature(parse_django_webhook)
+        assert "request" in sig_django_parse.parameters
+        assert sig_django_parse.return_annotation in (WebhookPayload, "WebhookPayload")
+
+        # 4. Flask integration signatures and defaults
+        sig_flask_wh = inspect.signature(didit_flask_webhook)
+        assert "dedup_ttl_seconds" in sig_flask_wh.parameters
+        assert sig_flask_wh.parameters["dedup_ttl_seconds"].default == 86400
+
+        sig_flask_parse = inspect.signature(parse_flask_webhook)
+        assert "request_obj" in sig_flask_parse.parameters
+        assert sig_flask_parse.return_annotation in (WebhookPayload, "WebhookPayload")

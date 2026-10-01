@@ -713,7 +713,7 @@ class TestFastAPIWebhookReservation:
         from unittest.mock import AsyncMock
 
         from didit.dedup import WebhookReservation
-        from didit.integrations.fastapi import release_didit_claim
+        from didit.integrations.fastapi import release_didit_claim, release_didit_reservation
 
         class FastAPIRecordingSink(DiditEventSink):
             def __init__(self) -> None:
@@ -746,11 +746,22 @@ class TestFastAPIWebhookReservation:
         req.state.didit_event_id = "evt_rel_cas_fail"
         req.state.didit_session_id = "sess_rel_cas_fail"
 
+        # release_didit_claim returns None for v0.2.0 compatibility
         res = await release_didit_claim(req)
-        assert res is False
+        assert res is None
         lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
         assert len(lost_events) == 1
         assert lost_events[0].reason == "lease_release_cas_failed"
+
+        # release_didit_reservation returns boolean CAS outcome
+        req.state.didit_claimed = True
+        req.state.didit_reservation = WebhookReservation(
+            event_id="evt_rel_cas_fail",
+            token="worker_token_rel_fail",
+            expires_at=time.monotonic() + 30,
+        )
+        res_cas = await release_didit_reservation(req)
+        assert res_cas is False
 
     @pytest.mark.asyncio
     async def test_guard_release_claim_cas_failure_emits_lease_lost(self) -> None:
@@ -792,11 +803,22 @@ class TestFastAPIWebhookReservation:
         req.state.didit_event_id = "evt_guard_rel_cas_fail"
         req.state.didit_session_id = "sess_guard_rel_cas_fail"
 
+        # guard.release_claim returns None for v0.2.0 compatibility
         res = await guard.release_claim(req)
-        assert res is False
+        assert res is None
         lost_events = [e for e in sink.events if isinstance(e, WebhookLeaseLost)]
         assert len(lost_events) == 1
         assert lost_events[0].reason == "lease_release_cas_failed"
+
+        # guard.release_reservation returns boolean CAS outcome
+        req.state.didit_claimed = True
+        req.state.didit_reservation = WebhookReservation(
+            event_id="evt_guard_rel_cas_fail",
+            token="worker_token_guard_fail",
+            expires_at=time.monotonic() + 30,
+        )
+        res_cas = await guard.release_reservation(req)
+        assert res_cas is False
 
 
 class TestFastAPIRouteDecoratorLifecycle:
@@ -1693,6 +1715,7 @@ class TestIntegrationsLazyLoading:
         assert pkg.DiditWebhookRoute is not None
         assert pkg.complete_didit_reservation is not None
         assert pkg.release_didit_claim is not None
+        assert pkg.release_didit_reservation is not None
         assert pkg.didit_webhook_view is not None
         assert pkg.parse_django_webhook is not None
         assert pkg.didit_webhook is not None

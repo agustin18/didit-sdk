@@ -942,7 +942,8 @@ class TestDiditCLI:
         exit_code = main(["sandbox", "scenarios", "--json"])
         assert exit_code == 0
         assert route.called
-        assert route.calls[0].request.headers["Authorization"] == "Bearer test_key"
+        assert route.calls[0].request.headers["x-api-key"] == "test_key"
+        assert "Authorization" not in route.calls[0].request.headers
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         assert data["count"] == 1

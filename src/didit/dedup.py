@@ -943,8 +943,21 @@ def release_webhook_event(
     store: Any,
     event_id: str,
     token: str | None = None,
-) -> bool:
+) -> None:
     """Safely release a webhook event reservation synchronously.
+
+    Preserves 100% backward compatibility with v0.2.0 callers expecting a None return value.
+    For tokenized reservation CAS success checks, use release_webhook_reservation().
+    """
+    release_webhook_reservation(store, event_id, token)
+
+
+def release_webhook_reservation(
+    store: Any,
+    event_id: str,
+    token: str | None = None,
+) -> bool:
+    """Safely release a webhook event reservation synchronously, returning CAS outcome.
 
     Returns:
         bool: True if released or not a reservation store, False if CAS release failed.
@@ -967,8 +980,21 @@ async def arelease_webhook_event(
     store: Any,
     event_id: str,
     token: str | None = None,
-) -> bool:
+) -> None:
     """Safely release a webhook event reservation across sync and async stores.
+
+    Preserves 100% backward compatibility with v0.2.0 callers expecting a None return value.
+    For tokenized reservation CAS success checks, use arelease_webhook_reservation().
+    """
+    await arelease_webhook_reservation(store, event_id, token)
+
+
+async def arelease_webhook_reservation(
+    store: Any,
+    event_id: str,
+    token: str | None = None,
+) -> bool:
+    """Safely release a webhook reservation across sync and async stores, returning CAS outcome.
 
     Returns:
         bool: True if released or not a reservation store, False if CAS release failed.

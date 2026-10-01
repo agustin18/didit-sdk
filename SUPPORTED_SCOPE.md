@@ -6,9 +6,9 @@ This document defines the contractual perimeter, API boundaries, and product sco
 
 ## 1. Mission Statement
 
-`didit-sdk` is an enterprise-hardened, production-grade Python client engineered specifically for **Didit Verification Sessions and KYC/Identity Verification workflows**.
+`didit-sdk` is a robust, production-ready Python client engineered specifically for **Didit Verification Sessions and KYC/Identity Verification workflows**.
 
-Our primary directive is **Veracity Over Speed**: providing bank-grade cryptographic guarantees, Didit X-Signature-V2 canonical JSON formatting, distributed replay protection, strict typing, and zero-PII leak protection for production KYC integrations.
+Our primary directive is **Veracity Over Speed**: providing verifiable cryptographic verification, Didit X-Signature-V2 canonical JSON formatting, distributed replay protection, strict typing, and zero-PII leak protection for production KYC integrations.
 
 ---
 

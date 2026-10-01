@@ -4,6 +4,8 @@ and warning catalog.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,26 +16,11 @@ from didit.models.session import SessionResponse
 from didit.models.webhook import WebhookPayload
 from didit.simulation import SUPPORTED_SANDBOX_SCENARIOS, SimulatedAsyncDidit, SimulatedDidit
 
-EXPECTED_SANDBOX_SCENARIOS: frozenset[str] = frozenset(
-    {
-        "approve",
-        "decline_document_expired",
-        "decline_could_not_recognize_document",
-        "decline_mrz_validation",
-        "decline_minimum_age",
-        "decline_face_match_low_similarity",
-        "decline_liveness_attack",
-        "decline_aml_hit",
-        "decline_ip_blocklist",
-        "decline_poa_address_mismatch",
-        "decline_nfc_chip_not_verified",
-        "decline_database_no_match",
-        "decline_kyb_registry_mismatch",
-        "review_aml_possible_match",
-        "review_face_match_borderline",
-        "review_poa_partial_match",
-    }
-)
+CONTRACT_FILE = Path(__file__).parent / "contracts" / "sandbox_scenarios.json"
+with open(CONTRACT_FILE, encoding="utf-8") as _f:
+    _CONTRACT_DATA = json.load(_f)
+
+EXPECTED_SANDBOX_SCENARIOS: frozenset[str] = frozenset(_CONTRACT_DATA["expected_slugs"])
 
 
 class TestSandboxScenarioContract:
