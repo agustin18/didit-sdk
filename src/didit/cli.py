@@ -32,6 +32,7 @@ from didit.errors import (
     DiditPermissionError,
     DiditSignatureError,
 )
+from didit.models.enums import SessionStatus
 from didit.resources.sessions import _secure_write_bytes as _secure_write_bytes
 from didit.webhooks import parse_webhook_payload
 
@@ -508,16 +509,22 @@ def _cmd_session_resubmit(args: argparse.Namespace) -> int:
         sess_dict = session.model_dump() if include_sensitive else session.redacted_dump()
         return _emit_success(sess_dict, is_json=True)
 
+    status_val = (
+        session.status.value
+        if isinstance(session.status, SessionStatus)
+        else (session.status or "Resubmitted")
+    )
     text_lines = [
         f"Session ID:             {session.session_id}",
-        f"Status:                 {session.status.value}",
+        f"Status:                 {status_val}",
         f"Requires Resubmission:  {session.requires_resubmission}",
     ]
-    if session.resubmit_info:
-        nodes_str = ", ".join(session.resubmit_info.nodes) if session.resubmit_info.nodes else "all"
+    resub_info = getattr(session, "resubmit_info", None)
+    if resub_info:
+        nodes_str = ", ".join(resub_info.nodes) if resub_info.nodes else "all"
         text_lines.append(f"Resubmit Steps:         {nodes_str}")
-        if session.resubmit_info.available_attempts is not None:
-            text_lines.append(f"Remaining Attempts:     {session.resubmit_info.available_attempts}")
+        if resub_info.available_attempts is not None:
+            text_lines.append(f"Remaining Attempts:     {resub_info.available_attempts}")
 
     return _emit_success({}, is_json=False, text_lines=text_lines)
 

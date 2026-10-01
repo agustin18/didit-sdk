@@ -7,6 +7,7 @@ on:
       - "tests/contracts/**"
       - "tests/test_contract_matrix.py"
       - "tests/test_v020_compatibility.py"
+      - "tests/test_openapi_contract_drift.py"
       - ".github/workflows/live-contract.yml"
   workflow_dispatch:
     inputs:
@@ -41,6 +42,9 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --extra dev
+
+      - name: Run OpenAPI Contract Drift Tests
+        run: uv run pytest tests/test_openapi_contract_drift.py -v
 
       - name: Run Contract Matrix Tests
         env:

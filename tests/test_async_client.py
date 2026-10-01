@@ -23,6 +23,12 @@ from didit.errors import (
     DiditTimeoutError,
 )
 from didit.models.enums import SessionStatus
+from didit.models.session import (
+    ContactDetails,
+    ExpectedDetails,
+    ResubmitFeature,
+    ResubmitNode,
+)
 from didit.transport import RequestOptions
 from didit.webhooks import compute_signature
 
@@ -110,6 +116,57 @@ class TestAsyncDiditClient:
         req_json = json.loads(route.calls.last.request.content.decode("utf-8"))
         assert req_json["sandbox_scenario"] == "approve"
         assert resp.session_id == "sess_sb_async"
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_create_session_with_full_v3_surface(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        route = respx.post(f"{base_url}/session/").mock(
+            return_value=Response(
+                201,
+                json={
+                    "session_id": "sess_full_v3_async",
+                    "status": "Not Started",
+                    "workflow_id": "wf_v3",
+                    "vendor_data": "usr_v3",
+                },
+            )
+        )
+        resp = await async_client.sessions.create(
+            vendor_data="usr_v3",
+            workflow_id="wf_v3",
+            callback="https://example.com/callback",
+            callback_method="both",
+            metadata={"user_tier": "enterprise", "tenant_id": 99},
+            contact_details=ContactDetails(
+                email="alice@example.com",
+                send_notification_emails=True,
+                email_lang="es",
+                phone="+34600112233",
+            ),
+            expected_details=ExpectedDetails(
+                first_name="Alice",
+                last_name="Smith",
+                date_of_birth="1992-04-10",
+                nationality="ESP",
+                expected_document_types=["P", "ID"],
+            ),
+            portrait_image="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+        )
+        assert route.called
+        req_json = json.loads(route.calls.last.request.content.decode("utf-8"))
+        assert req_json["workflow_id"] == "wf_v3"
+        assert req_json["vendor_data"] == "usr_v3"
+        assert req_json["callback_method"] == "both"
+        assert req_json["metadata"] == {"user_tier": "enterprise", "tenant_id": 99}
+        assert req_json["contact_details"]["email"] == "alice@example.com"
+        assert req_json["contact_details"]["phone"] == "+34600112233"
+        assert req_json["expected_details"]["first_name"] == "Alice"
+        assert req_json["expected_details"]["expected_document_types"] == ["P", "ID"]
+        assert req_json["portrait_image"].startswith("iVBORw")
+        assert resp.session_id == "sess_full_v3_async"
         await async_client.aclose()
 
     @respx.mock
@@ -1382,16 +1439,12 @@ class TestAsyncDiditClient:
                 200,
                 json={
                     "session_id": "sess_async_resub_1",
-                    "status": "Resubmitted",
-                    "resubmit_info": {"steps": ["document"]},
                 },
             )
         )
 
         res = await async_client.sessions.resubmit("sess_async_resub_1")
         assert res.session_id == "sess_async_resub_1"
-        assert res.status == SessionStatus.RESUBMITTED
-        assert res.requires_resubmission is True
         assert route.called
         sent = json.loads(route.calls[0].request.content)
         assert sent["new_status"] == "Resubmitted"
@@ -1406,21 +1459,53 @@ class TestAsyncDiditClient:
                 200,
                 json={
                     "session_id": "sess_async_resub_2",
-                    "status": "Resubmitted",
-                    "resubmit_info": {"nodes": ["document", "liveness"]},
                 },
             )
         )
 
         res = await async_client.sessions.resubmit(
-            "sess_async_resub_2", nodes_to_resubmit=["document", "liveness"]
+            "sess_async_resub_2",
+            nodes_to_resubmit=[
+                ResubmitNode(node_id="feature_ocr", feature=ResubmitFeature.OCR),
+                {"node_id": "feature_liveness", "feature": "LIVENESS"},
+            ],
+            comment="Please redo OCR and Liveness",
+            send_email=True,
+            email_address="async@example.com",
+            email_language="es",
         )
         assert res.session_id == "sess_async_resub_2"
-        assert res.status == SessionStatus.RESUBMITTED
-        assert res.requires_resubmission is True
         sent = json.loads(route.calls[0].request.content)
         assert sent["new_status"] == "Resubmitted"
-        assert sent["nodes_to_resubmit"] == ["document", "liveness"]
+        assert sent["nodes_to_resubmit"] == [
+            {"node_id": "feature_ocr", "feature": "OCR"},
+            {"node_id": "feature_liveness", "feature": "LIVENESS"},
+        ]
+        assert sent["comment"] == "Please redo OCR and Liveness"
+        assert sent["send_email"] is True
+        assert sent["email_address"] == "async@example.com"
+        assert sent["email_language"] == "es"
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_resubmit_nodes_invalid_types(self, async_client: AsyncDidit) -> None:
+        with pytest.raises(TypeError, match="must be a ResubmitNode, dict, or string"):
+            await async_client.sessions.resubmit(
+                "sess_async_err",
+                nodes_to_resubmit=[12345],  # type: ignore[list-item]
+            )
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_update_status_send_email_without_address(
+        self, async_client: AsyncDidit
+    ) -> None:
+        with pytest.raises(ValueError, match="email_address is required when send_email is True"):
+            await async_client.sessions.update_status(
+                "sess_async_err",
+                SessionStatus.APPROVED,
+                send_email=True,
+            )
         await async_client.aclose()
 
     @pytest.mark.parametrize("invalid_id", ["", "   "])
@@ -1442,17 +1527,44 @@ class TestAsyncDiditClient:
                 200,
                 json={
                     "session_id": "sess_async_custom_status",
-                    "status": "Declined",
                 },
             )
         )
 
         res = await async_client.sessions.update_status(
-            "sess_async_custom_status", SessionStatus.DECLINED
+            "sess_async_custom_status", SessionStatus.DECLINED, comment="Suspected fraud"
         )
-        assert res.status == SessionStatus.DECLINED
+        assert res.session_id == "sess_async_custom_status"
         sent = json.loads(route.calls[0].request.content)
         assert sent["new_status"] == "Declined"
+        assert sent["comment"] == "Suspected fraud"
+        await async_client.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_async_update_status_response_shapes(
+        self, async_client: AsyncDidit, base_url: str
+    ) -> None:
+        # Non-dict JSON response fallback
+        respx.patch(f"{base_url}/session/sess_async_nondict/update-status/").mock(
+            return_value=Response(200, json=["unexpected", "array"])
+        )
+        r1 = await async_client.sessions.update_status("sess_async_nondict", SessionStatus.APPROVED)
+        assert r1.session_id == "sess_async_nondict"
+        assert r1.status == SessionStatus.APPROVED
+
+        # Dict response with explicit status included upstream
+        respx.patch(f"{base_url}/session/sess_async_explicit_status/update-status/").mock(
+            return_value=Response(
+                200,
+                json={"session_id": "sess_async_explicit_status", "status": "Declined"},
+            )
+        )
+        r2 = await async_client.sessions.update_status(
+            "sess_async_explicit_status", SessionStatus.DECLINED
+        )
+        assert r2.session_id == "sess_async_explicit_status"
+        assert r2.status == "Declined"
         await async_client.aclose()
 
     @pytest.mark.parametrize(

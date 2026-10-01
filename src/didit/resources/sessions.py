@@ -9,8 +9,9 @@ import os
 import random
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -33,12 +34,17 @@ from didit.models.enums import (
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
+    ContactDetails,
     CreateSessionRequest,
+    ExpectedDetails,
     ObservedSessionState,
+    ResubmitFeature,
+    ResubmitNode,
     SessionListPage,
     SessionReconciliationReport,
     SessionResponse,
     SessionStateSource,
+    UpdateSessionStatusResponse,
 )
 from didit.transport import RequestOptions, _AsyncRequestor, _atomic_publish, _SyncRequestor
 
@@ -76,6 +82,67 @@ def _validate_manual_status(new_status: ManualSessionStatus | SessionStatus | st
             "Allowed transitions are: Approved, Declined, Resubmitted"
         )
     return new_status.value if isinstance(new_status, SessionStatus) else str(new_status)
+
+
+def _normalize_nodes_to_resubmit(
+    nodes: Sequence[ResubmitNode | dict[str, Any] | str] | None,
+) -> list[dict[str, str]] | None:
+    """Normalize nodes_to_resubmit to the exact Didit OpenAPI V3 object schema."""
+    if nodes is None:
+        return None
+    normalized: list[dict[str, str]] = []
+    for item in nodes:
+        if isinstance(item, ResubmitNode):
+            feature_val = (
+                item.feature.value if isinstance(item.feature, Enum) else str(item.feature)
+            )
+            normalized.append({"node_id": item.node_id, "feature": feature_val})
+        elif isinstance(item, dict):
+            if "node_id" not in item or "feature" not in item:
+                raise ValueError(
+                    f"Each dict in nodes_to_resubmit must contain 'node_id' and 'feature', "
+                    f"got {item}"
+                )
+            feature_val = (
+                item["feature"].value if isinstance(item["feature"], Enum) else str(item["feature"])
+            )
+            normalized.append({"node_id": str(item["node_id"]), "feature": feature_val})
+        elif isinstance(item, str):
+            raw_node = item.strip()
+            if not raw_node:
+                continue
+            if ":" in raw_node:
+                node_part, feat_part = raw_node.split(":", 1)
+                normalized.append({"node_id": node_part.strip(), "feature": feat_part.strip()})
+            else:
+                lower = raw_node.lower()
+                if "live" in lower:
+                    feat = "LIVENESS"
+                elif "face" in lower:
+                    feat = "FACE_MATCH" if "match" in lower else "FACE"
+                elif "aml" in lower:
+                    feat = "AML"
+                elif "poa" in lower or "address" in lower:
+                    feat = "PROOF_OF_ADDRESS"
+                elif "phone" in lower:
+                    feat = "PHONE_VERIFICATION"
+                elif "email" in lower:
+                    feat = "EMAIL_VERIFICATION"
+                elif "doc" in lower or "ocr" in lower:
+                    feat = "OCR"
+                else:
+                    feat = (
+                        raw_node.upper()
+                        if raw_node.upper() in [f.value for f in ResubmitFeature]
+                        else "OCR"
+                    )
+                normalized.append({"node_id": raw_node, "feature": feat})
+        else:
+            raise TypeError(
+                f"Each item in nodes_to_resubmit must be a ResubmitNode, dict, or string, "
+                f"got {type(item).__name__} ({item!r})."
+            )
+    return normalized
 
 
 def _secure_write_bytes(dest_path: Path, data: bytes, *, force: bool = False) -> None:
@@ -194,23 +261,34 @@ class SessionsResource:
 
     def create(
         self,
-        vendor_data: str,
+        vendor_data: str | None = None,
         *,
         workflow_id: str,
         callback: str | None = None,
+        callback_method: str | None = None,
+        metadata: dict[str, Any] | None = None,
         language: Language | str | None = None,
+        contact_details: ContactDetails | dict[str, Any] | None = None,
+        expected_details: ExpectedDetails | dict[str, Any] | None = None,
+        portrait_image: str | None = None,
         sandbox_scenario: str | None = None,
         options: RequestOptions | None = None,
     ) -> SessionResponse:
         """Create a new verification session.
 
         Args:
-            vendor_data: Internal customer/user reference identifier.
+            vendor_data: Optional internal customer/user reference identifier.
             workflow_id: Didit workflow ID configuration.
             callback: Optional URL Didit will redirect the user to after completing verification.
+            callback_method: Optional HTTP method for callback ('both', 'get', 'post').
+            metadata: Optional arbitrary metadata dictionary stored with the session.
             language: Optional UI language code for the hosted flow (e.g. 'es', 'en').
+            contact_details: Optional contact details to pre-fill or enforce (email, phone, etc.).
+            expected_details: Optional expected user/business details to cross-validate.
+            portrait_image: Optional Base64 reference portrait image for biometric match.
             sandbox_scenario: Optional Didit sandbox outcome slug e.g. 'approve',
                 'decline_document_expired'.
+            options: Optional per-request HTTP options.
 
         Returns:
             SessionResponse: Containing session_id, url, token, and status.
@@ -220,7 +298,12 @@ class SessionsResource:
             workflow_id=workflow_id,
             vendor_data=vendor_data,
             callback=callback,
+            callback_method=callback_method,
+            metadata=metadata,
             language=lang_str,
+            contact_details=contact_details,
+            expected_details=expected_details,
+            portrait_image=portrait_image,
             sandbox_scenario=sandbox_scenario,
         ).model_dump(exclude_none=True)
 
@@ -241,10 +324,14 @@ class SessionsResource:
         self,
         session_id: str,
         new_status: ManualSessionStatus | SessionStatus | str,
-        nodes_to_resubmit: list[str] | None = None,
+        nodes_to_resubmit: Sequence[ResubmitNode | dict[str, Any] | str] | None = None,
         *,
+        comment: str | None = None,
+        send_email: bool | None = None,
+        email_address: str | None = None,
+        email_language: str | None = None,
         options: RequestOptions | None = None,
-    ) -> SessionResponse:
+    ) -> UpdateSessionStatusResponse:
         """Update status of an existing session (PATCH /v3/session/{session_id}/update-status/).
 
         Restricted by upstream Didit contract to manual reviewer transitions:
@@ -254,22 +341,36 @@ class SessionsResource:
             session_id: The unique identifier of the verification session.
             new_status: The target status ('Approved', 'Declined', 'Resubmitted',
                 or SessionStatus enum).
-            nodes_to_resubmit: Optional list of exact upstream workflow node IDs to resubmit
-                as returned by Didit for the session (e.g. ['document-verification-node',
-                'face-liveness-node']). Warning codes, risk labels, or descriptions are NOT
-                valid node IDs.
+            nodes_to_resubmit: Optional list of workflow nodes to resubmit as
+                ResubmitNode(node_id=..., feature=...) or dicts {'node_id': ..., 'feature': ...}.
+            comment: Optional free-text reason stored on the session audit trail.
+            send_email: Optional flag to email the user about the status update.
+            email_address: Recipient email address (required when send_email is True).
+            email_language: Optional language code for notification email (e.g. 'en').
             options: Optional per-request HTTP options.
 
         Returns:
-            SessionResponse: The updated verification session.
+            UpdateSessionStatusResponse: Upstream response containing updated session_id.
         """
         if not session_id or not session_id.strip():
             raise ValueError("session_id must not be empty")
 
+        if send_email is True and not email_address:
+            raise ValueError("email_address is required when send_email is True")
+
         status_val = _validate_manual_status(new_status)
         payload: dict[str, Any] = {"new_status": status_val}
-        if nodes_to_resubmit is not None:
-            payload["nodes_to_resubmit"] = nodes_to_resubmit
+        if comment is not None:
+            payload["comment"] = comment
+        normalized_nodes = _normalize_nodes_to_resubmit(nodes_to_resubmit)
+        if normalized_nodes is not None:
+            payload["nodes_to_resubmit"] = normalized_nodes
+        if send_email is not None:
+            payload["send_email"] = send_email
+        if email_address is not None:
+            payload["email_address"] = email_address
+        if email_language is not None:
+            payload["email_language"] = email_language
 
         resp = self._requestor.request(
             "PATCH",
@@ -277,34 +378,50 @@ class SessionsResource:
             json=payload,
             options=options,
         )
-        return SessionResponse.model_validate(resp.json())
+        data = resp.json()
+        if isinstance(data, dict):
+            res_obj = UpdateSessionStatusResponse.model_validate(data)
+            if res_obj.status is None:
+                res_obj.status = status_val
+            return res_obj
+        return UpdateSessionStatusResponse(session_id=session_id.strip(), status=status_val)
 
     def resubmit(
         self,
         session_id: str,
-        nodes_to_resubmit: list[str] | None = None,
+        nodes_to_resubmit: Sequence[ResubmitNode | dict[str, Any] | str] | None = None,
         *,
+        comment: str | None = None,
+        send_email: bool | None = None,
+        email_address: str | None = None,
+        email_language: str | None = None,
         options: RequestOptions | None = None,
-    ) -> SessionResponse:
+    ) -> UpdateSessionStatusResponse:
         """Request document or biometric resubmission for an existing verification session.
 
         Invokes PATCH /v3/session/{session_id}/update-status/ with status 'Resubmitted'.
 
         Args:
             session_id: The unique identifier of the verification session.
-            nodes_to_resubmit: Optional list of exact upstream workflow node IDs to resubmit
-                as returned by Didit for the session (e.g. ['document-verification-node',
-                'face-liveness-node']). Warning codes, risk labels, or descriptions are NOT
-                valid node IDs; supply the exact IDs returned for the session.
+            nodes_to_resubmit: Optional list of workflow nodes to resubmit as
+                ResubmitNode(node_id=..., feature=...) or dicts {'node_id': ..., 'feature': ...}.
+            comment: Optional free-text reason stored on the session audit trail.
+            send_email: Optional flag to email the user about the resubmission.
+            email_address: Recipient email address (required when send_email is True).
+            email_language: Optional language code for notification email.
             options: Optional per-request HTTP options.
 
         Returns:
-            SessionResponse: The updated session with requires_resubmission=True.
+            UpdateSessionStatusResponse: Upstream response containing updated session_id.
         """
         return self.update_status(
             session_id,
             SessionStatus.RESUBMITTED,
             nodes_to_resubmit=nodes_to_resubmit,
+            comment=comment,
+            send_email=send_email,
+            email_address=email_address,
+            email_language=email_language,
             options=options,
         )
 
@@ -810,11 +927,16 @@ class AsyncSessionsResource:
 
     async def create(
         self,
-        vendor_data: str,
+        vendor_data: str | None = None,
         *,
         workflow_id: str,
         callback: str | None = None,
+        callback_method: str | None = None,
+        metadata: dict[str, Any] | None = None,
         language: Language | str | None = None,
+        contact_details: ContactDetails | dict[str, Any] | None = None,
+        expected_details: ExpectedDetails | dict[str, Any] | None = None,
+        portrait_image: str | None = None,
         sandbox_scenario: str | None = None,
         options: RequestOptions | None = None,
     ) -> SessionResponse:
@@ -824,7 +946,12 @@ class AsyncSessionsResource:
             workflow_id=workflow_id,
             vendor_data=vendor_data,
             callback=callback,
+            callback_method=callback_method,
+            metadata=metadata,
             language=lang_str,
+            contact_details=contact_details,
+            expected_details=expected_details,
+            portrait_image=portrait_image,
             sandbox_scenario=sandbox_scenario,
         ).model_dump(exclude_none=True)
 
@@ -845,10 +972,14 @@ class AsyncSessionsResource:
         self,
         session_id: str,
         new_status: ManualSessionStatus | SessionStatus | str,
-        nodes_to_resubmit: list[str] | None = None,
+        nodes_to_resubmit: Sequence[ResubmitNode | dict[str, Any] | str] | None = None,
         *,
+        comment: str | None = None,
+        send_email: bool | None = None,
+        email_address: str | None = None,
+        email_language: str | None = None,
         options: RequestOptions | None = None,
-    ) -> SessionResponse:
+    ) -> UpdateSessionStatusResponse:
         """Update status of an existing session asynchronously.
 
         Endpoint: PATCH /v3/session/{session_id}/update-status/
@@ -859,19 +990,36 @@ class AsyncSessionsResource:
             session_id: The unique identifier of the verification session.
             new_status: The target status ('Approved', 'Declined', 'Resubmitted',
                 or SessionStatus enum).
-            nodes_to_resubmit: Optional list of exact upstream workflow node IDs to resubmit
-                as returned by Didit for the session (e.g. ['document-verification-node',
-                'face-liveness-node']). Warning codes, risk labels, or descriptions are NOT
-                valid node IDs.
+            nodes_to_resubmit: Optional list of workflow nodes to resubmit as
+                ResubmitNode(node_id=..., feature=...) or dicts {'node_id': ..., 'feature': ...}.
+            comment: Optional free-text reason stored on the session audit trail.
+            send_email: Optional flag to email the user about the status update.
+            email_address: Recipient email address (required when send_email is True).
+            email_language: Optional language code for notification email (e.g. 'en').
             options: Optional per-request HTTP options.
+
+        Returns:
+            UpdateSessionStatusResponse: Upstream response containing updated session_id.
         """
         if not session_id or not session_id.strip():
             raise ValueError("session_id must not be empty")
 
+        if send_email is True and not email_address:
+            raise ValueError("email_address is required when send_email is True")
+
         status_val = _validate_manual_status(new_status)
         payload: dict[str, Any] = {"new_status": status_val}
-        if nodes_to_resubmit is not None:
-            payload["nodes_to_resubmit"] = nodes_to_resubmit
+        if comment is not None:
+            payload["comment"] = comment
+        normalized_nodes = _normalize_nodes_to_resubmit(nodes_to_resubmit)
+        if normalized_nodes is not None:
+            payload["nodes_to_resubmit"] = normalized_nodes
+        if send_email is not None:
+            payload["send_email"] = send_email
+        if email_address is not None:
+            payload["email_address"] = email_address
+        if email_language is not None:
+            payload["email_language"] = email_language
 
         resp = await self._requestor.request(
             "PATCH",
@@ -879,34 +1027,50 @@ class AsyncSessionsResource:
             json=payload,
             options=options,
         )
-        return SessionResponse.model_validate(resp.json())
+        data = resp.json()
+        if isinstance(data, dict):
+            res_obj = UpdateSessionStatusResponse.model_validate(data)
+            if res_obj.status is None:
+                res_obj.status = status_val
+            return res_obj
+        return UpdateSessionStatusResponse(session_id=session_id.strip(), status=status_val)
 
     async def resubmit(
         self,
         session_id: str,
-        nodes_to_resubmit: list[str] | None = None,
+        nodes_to_resubmit: Sequence[ResubmitNode | dict[str, Any] | str] | None = None,
         *,
+        comment: str | None = None,
+        send_email: bool | None = None,
+        email_address: str | None = None,
+        email_language: str | None = None,
         options: RequestOptions | None = None,
-    ) -> SessionResponse:
+    ) -> UpdateSessionStatusResponse:
         """Request document or biometric resubmission for an existing session asynchronously.
 
         Invokes PATCH /v3/session/{session_id}/update-status/ with status 'Resubmitted'.
 
         Args:
             session_id: The unique identifier of the verification session.
-            nodes_to_resubmit: Optional list of exact upstream workflow node IDs to resubmit
-                as returned by Didit for the session (e.g. ['document-verification-node',
-                'face-liveness-node']). Warning codes, risk labels, or descriptions are NOT
-                valid node IDs; supply the exact IDs returned for the session.
+            nodes_to_resubmit: Optional list of workflow nodes to resubmit as
+                ResubmitNode(node_id=..., feature=...) or dicts {'node_id': ..., 'feature': ...}.
+            comment: Optional free-text reason stored on the session audit trail.
+            send_email: Optional flag to email the user about the resubmission.
+            email_address: Recipient email address (required when send_email is True).
+            email_language: Optional language code for notification email.
             options: Optional per-request HTTP options.
 
         Returns:
-            SessionResponse: The updated session with requires_resubmission=True.
+            UpdateSessionStatusResponse: Upstream response containing updated session_id.
         """
         return await self.update_status(
             session_id,
             SessionStatus.RESUBMITTED,
             nodes_to_resubmit=nodes_to_resubmit,
+            comment=comment,
+            send_email=send_email,
+            email_address=email_address,
+            email_language=email_language,
             options=options,
         )
 

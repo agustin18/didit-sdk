@@ -2,11 +2,122 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from didit.models.enums import SessionStatus
+from didit.models.enums import ManualSessionStatus, SessionStatus
+
+
+class ResubmitFeature(str, Enum):
+    """Allowed feature choices for nodes_to_resubmit in Didit Verification API."""
+
+    OCR = "OCR"
+    OCR_BACK = "OCR_BACK"
+    NFC = "NFC"
+    AML = "AML"
+    FACE = "FACE"
+    LIVENESS = "LIVENESS"
+    FACE_MATCH = "FACE_MATCH"
+    IP_ANALYSIS = "IP_ANALYSIS"
+    AGE_ESTIMATION = "AGE_ESTIMATION"
+    PROOF_OF_ADDRESS = "PROOF_OF_ADDRESS"
+    PHONE_VERIFICATION = "PHONE_VERIFICATION"
+    EMAIL_VERIFICATION = "EMAIL_VERIFICATION"
+    FACE_SEARCH = "FACE_SEARCH"
+    DATABASE_VALIDATION = "DATABASE_VALIDATION"
+    QUESTIONNAIRE = "QUESTIONNAIRE"
+    DOCUMENT_AI = "DOCUMENT_AI"
+    KYB_DOCUMENTS = "KYB_DOCUMENTS"
+    ID_VERIFICATION = "ID_VERIFICATION"
+    POA = "POA"
+    PHONE = "PHONE"
+    EMAIL = "EMAIL"
+    KYB_REGISTRY = "KYB_REGISTRY"
+    KYB_KEY_PEOPLE = "KYB_KEY_PEOPLE"
+    KYB = "KYB"
+
+
+class ResubmitNode(BaseModel):
+    """Node specification for workflow resubmission requests."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    node_id: str = Field(
+        ...,
+        min_length=1,
+        description="Node identifier in the session's workflow definition (e.g. 'feature_ocr')",
+    )
+    feature: ResubmitFeature | str = Field(
+        ...,
+        description="Feature type of the node (e.g. 'OCR', 'LIVENESS', 'FACE_MATCH')",
+    )
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        d = super().model_dump(**kwargs)
+        if isinstance(d.get("feature"), Enum):
+            d["feature"] = d["feature"].value
+        return d
+
+
+class ContactDetails(BaseModel):
+    """Contact details to pre-fill or enforce during verification."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    email: str | None = Field(default=None, description="End user email address")
+    send_notification_emails: bool | None = Field(
+        default=None, description="Whether Didit should send transactional status emails"
+    )
+    email_lang: str | None = Field(
+        default=None, description="Language code for notification emails (e.g. 'en')"
+    )
+    phone: str | None = Field(
+        default=None, description="End user phone number in E.164 format (e.g. '+14155552671')"
+    )
+
+
+class ExpectedDetails(BaseModel):
+    """Expected user or business details to cross-validate against submitted documents."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    first_name: str | None = Field(default=None, description="User first name")
+    last_name: str | None = Field(default=None, description="User last name")
+    date_of_birth: str | None = Field(default=None, description="User date of birth (YYYY-MM-DD)")
+    gender: str | None = Field(default=None, description="User gender ('M', 'F', or None)")
+    nationality: str | None = Field(
+        default=None, description="ISO 3166-1 alpha-3 nationality country code"
+    )
+    country: str | None = Field(
+        default=None, description="Fallback ISO 3166-1 alpha-3 country code"
+    )
+    id_country: str | None = Field(
+        default=None, description="ISO 3166-1 alpha-3 expected ID document country code"
+    )
+    poa_country: str | None = Field(
+        default=None, description="ISO 3166-1 alpha-3 expected Proof of Address country code"
+    )
+    address: str | None = Field(default=None, description="Full human-readable address")
+    identification_number: str | None = Field(
+        default=None, description="Document number, tax number, or personal ID"
+    )
+    ip_address: str | None = Field(default=None, description="Expected client IP address")
+    expected_document_types: list[str] | None = Field(
+        default=None,
+        description="Allowed document types (e.g. ['P', 'ID', 'DL', 'RP', 'HIC', 'TC', 'SSC'])",
+    )
+    company_name: str | None = Field(
+        default=None, description="Expected legal business name for KYB workflows"
+    )
+    registry_country: str | None = Field(
+        default=None,
+        description="ISO 3166-1 alpha-2 registry country code (or subdivision) for KYB",
+    )
+    registration_number: str | None = Field(
+        default=None, description="Expected business registry registration number for KYB"
+    )
 
 
 class CreateSessionRequest(BaseModel):
@@ -15,8 +126,8 @@ class CreateSessionRequest(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     workflow_id: str = Field(..., min_length=1, description="Didit workflow UUID/identifier")
-    vendor_data: str = Field(
-        ...,
+    vendor_data: str | None = Field(
+        default=None,
         min_length=1,
         description="Internal reference ID for the user or entity being verified",
     )
@@ -24,14 +135,108 @@ class CreateSessionRequest(BaseModel):
         default=None,
         description="Optional redirect URL after verification completion",
     )
+    callback_method: str | None = Field(
+        default=None,
+        description="HTTP method for callback redirection ('both', 'get', 'post')",
+    )
+    metadata: dict[str, Any] | None = Field(
+        default=None,
+        description="Arbitrary metadata dictionary stored with the session",
+    )
     language: str | None = Field(
         default=None,
         description="Two-letter ISO 639-1 language code (e.g., 'es', 'en')",
+    )
+    contact_details: ContactDetails | dict[str, Any] | None = Field(
+        default=None,
+        description="Contact information to enforce or pre-fill during verification",
+    )
+    expected_details: ExpectedDetails | dict[str, Any] | None = Field(
+        default=None,
+        description="Applicant or business details to cross-validate against extracted data",
+    )
+    portrait_image: str | None = Field(
+        default=None,
+        description="Base64-encoded reference portrait image for face match workflows",
     )
     sandbox_scenario: str | None = Field(
         default=None,
         description="Optional Didit sandbox outcome slug e.g. approve, decline_document_expired",
     )
+
+
+class UpdateSessionStatusRequest(BaseModel):
+    """Payload for PATCH /v3/session/{sessionId}/update-status/."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    new_status: ManualSessionStatus | SessionStatus | str = Field(
+        ...,
+        description="Target status ('Approved', 'Declined', or 'Resubmitted')",
+    )
+    comment: str | None = Field(
+        default=None,
+        description="Free-text review reason stored on the session audit trail",
+    )
+    nodes_to_resubmit: list[dict[str, str]] | None = Field(
+        default=None,
+        description="Specific workflow nodes to resubmit as [{'node_id': ..., 'feature': ...}]",
+    )
+    send_email: bool | None = Field(
+        default=None,
+        description="Whether to email the user about the status change (requires email_address)",
+    )
+    email_address: str | None = Field(
+        default=None,
+        description="Recipient email address when send_email is True",
+    )
+    email_language: str | None = Field(
+        default=None,
+        description="Language code for notification email (e.g. 'en')",
+    )
+
+
+class UpdateSessionStatusResponse(BaseModel):
+    """Response returned by Didit when updating session status.
+
+    Note: Upstream Didit returns only `{"session_id": "<uuid>"}`.
+    To inspect updated decision or status, fetch via client.sessions.get_decision().
+    """
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    session_id: str = Field(..., description="UUID of the updated verification session")
+    status: SessionStatus | str | None = Field(
+        default=None,
+        description="Echoed status if present in response or provided by caller context",
+    )
+    resubmit_info: ResubmitInfo | None = Field(
+        default=None,
+        description="Optional resubmission metadata if present in response",
+    )
+
+    @property
+    def requires_resubmission(self) -> bool:
+        """Return True if status indicates resubmission is required."""
+        return self.status in (SessionStatus.RESUBMITTED, "Resubmitted")
+
+    def __repr__(self) -> str:
+        status_part = f", status={self.status!r}" if self.status is not None else ""
+        return f"UpdateSessionStatusResponse(session_id={self.session_id!r}{status_part})"
+
+    __str__ = __repr__
+
+    def redacted_dump(self) -> dict[str, Any]:
+        """Privacy-safe dump preserving session identifier."""
+        return {
+            "session_id": self.session_id,
+            "status": self.status.value if isinstance(self.status, SessionStatus) else self.status,
+            "requires_resubmission": self.requires_resubmission,
+            "resubmit_info": self.resubmit_info.redacted_dump() if self.resubmit_info else None,
+        }
+
+
+UpdateStatusResponse = UpdateSessionStatusResponse
 
 
 class ResubmitInfo(BaseModel):

@@ -9,7 +9,7 @@ import pytest
 from didit.errors import DiditAPIError, DiditNotFoundError
 from didit.models.decision import DocumentData
 from didit.models.enums import SessionStatus
-from didit.models.session import ResubmitInfo
+from didit.models.session import ResubmitFeature, ResubmitInfo, ResubmitNode
 from didit.simulation import SimulatedAsyncDidit, SimulatedDidit
 from didit.webhooks import verify_webhook_signature
 
@@ -787,10 +787,20 @@ class TestSimulatedAsyncDidit:
         assert res1.requires_resubmission is True
 
         # Test resubmit with nodes
-        res2 = client.sessions.resubmit(s.session_id, nodes_to_resubmit=["document", "face"])
+        res2 = client.sessions.resubmit(
+            s.session_id,
+            nodes_to_resubmit=[
+                ResubmitNode(node_id="doc_resub", feature=ResubmitFeature.OCR),
+                {"node_id": "face_resub", "feature": "FACE_MATCH"},
+                "plain_str",
+            ],
+        )
         assert res2.status == SessionStatus.RESUBMITTED
-        assert res2.resubmit_info == ResubmitInfo(nodes=["document", "face"])
         assert res2.requires_resubmission is True
+        updated_s = client.sessions.get(s.session_id)
+        assert updated_s.resubmit_info == ResubmitInfo(
+            nodes=["doc_resub", "face_resub", "plain_str"]
+        )
 
         # Test update_status with allowed manual status
         res3 = client.sessions.update_status(s.session_id, "Declined")
@@ -817,10 +827,17 @@ class TestSimulatedAsyncDidit:
         client = SimulatedAsyncDidit()
         s = await client.sessions.create(vendor_data="async_sim_resub", workflow_id="wf_sim_async")
 
-        res = await client.sessions.resubmit(s.session_id, nodes_to_resubmit=["liveness"])
+        res = await client.sessions.resubmit(
+            s.session_id,
+            nodes_to_resubmit=[
+                ResubmitNode(node_id="live_node", feature=ResubmitFeature.LIVENESS),
+                {"node_id": "dict_node", "feature": "OCR"},
+            ],
+        )
         assert res.status == SessionStatus.RESUBMITTED
         assert res.requires_resubmission is True
-        assert res.resubmit_info == ResubmitInfo(nodes=["liveness"])
+        updated_s = await client.sessions.get(s.session_id)
+        assert updated_s.resubmit_info == ResubmitInfo(nodes=["live_node", "dict_node"])
 
         res_update = await client.sessions.update_status(s.session_id, SessionStatus.APPROVED)
         assert res_update.status == SessionStatus.APPROVED

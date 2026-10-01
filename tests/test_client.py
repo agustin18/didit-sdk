@@ -23,6 +23,12 @@ from didit.errors import (
     DiditTimeoutError,
 )
 from didit.models.enums import SessionStatus
+from didit.models.session import (
+    ContactDetails,
+    ExpectedDetails,
+    ResubmitFeature,
+    ResubmitNode,
+)
 from didit.transport import RequestOptions
 from didit.webhooks import compute_signature
 
@@ -108,6 +114,53 @@ class TestDiditSyncClient:
         req_json = json.loads(route.calls.last.request.content.decode("utf-8"))
         assert req_json["sandbox_scenario"] == "decline_face_match_low_similarity"
         assert resp.session_id == "sess_sb"
+
+    @respx.mock
+    def test_create_session_with_full_v3_surface(self, client: Didit, base_url: str) -> None:
+        route = respx.post(f"{base_url}/session/").mock(
+            return_value=Response(
+                201,
+                json={
+                    "session_id": "sess_full_v3",
+                    "status": "Not Started",
+                    "workflow_id": "wf_v3",
+                    "vendor_data": "usr_v3",
+                },
+            )
+        )
+        resp = client.sessions.create(
+            vendor_data="usr_v3",
+            workflow_id="wf_v3",
+            callback="https://example.com/callback",
+            callback_method="both",
+            metadata={"user_tier": "enterprise", "tenant_id": 99},
+            contact_details=ContactDetails(
+                email="alice@example.com",
+                send_notification_emails=True,
+                email_lang="es",
+                phone="+34600112233",
+            ),
+            expected_details=ExpectedDetails(
+                first_name="Alice",
+                last_name="Smith",
+                date_of_birth="1992-04-10",
+                nationality="ESP",
+                expected_document_types=["P", "ID"],
+            ),
+            portrait_image="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+        )
+        assert route.called
+        req_json = json.loads(route.calls.last.request.content.decode("utf-8"))
+        assert req_json["workflow_id"] == "wf_v3"
+        assert req_json["vendor_data"] == "usr_v3"
+        assert req_json["callback_method"] == "both"
+        assert req_json["metadata"] == {"user_tier": "enterprise", "tenant_id": 99}
+        assert req_json["contact_details"]["email"] == "alice@example.com"
+        assert req_json["contact_details"]["phone"] == "+34600112233"
+        assert req_json["expected_details"]["first_name"] == "Alice"
+        assert req_json["expected_details"]["expected_document_types"] == ["P", "ID"]
+        assert req_json["portrait_image"].startswith("iVBORw")
+        assert resp.session_id == "sess_full_v3"
 
     @respx.mock
     def test_get_session_success(self, client: Didit, base_url: str) -> None:
@@ -1247,16 +1300,12 @@ class TestDiditSyncClient:
                 200,
                 json={
                     "session_id": "sess_resub_1",
-                    "status": "Resubmitted",
-                    "resubmit_info": {"steps": ["document"]},
                 },
             )
         )
 
         res = client.sessions.resubmit("sess_resub_1")
         assert res.session_id == "sess_resub_1"
-        assert res.status == SessionStatus.RESUBMITTED
-        assert res.requires_resubmission is True
         assert route.called
         sent = json.loads(route.calls[0].request.content)
         assert sent["new_status"] == "Resubmitted"
@@ -1269,19 +1318,114 @@ class TestDiditSyncClient:
                 200,
                 json={
                     "session_id": "sess_resub_2",
-                    "status": "Resubmitted",
-                    "resubmit_info": {"nodes": ["document", "liveness"]},
                 },
             )
         )
 
-        res = client.sessions.resubmit("sess_resub_2", nodes_to_resubmit=["document", "liveness"])
+        res = client.sessions.resubmit(
+            "sess_resub_2",
+            nodes_to_resubmit=[
+                ResubmitNode(node_id="feature_ocr", feature=ResubmitFeature.OCR),
+                {"node_id": "feature_liveness", "feature": "LIVENESS"},
+            ],
+            comment="Please redo OCR and Liveness",
+            send_email=True,
+            email_address="user@example.com",
+            email_language="en",
+        )
         assert res.session_id == "sess_resub_2"
-        assert res.status == SessionStatus.RESUBMITTED
-        assert res.requires_resubmission is True
         sent = json.loads(route.calls[0].request.content)
         assert sent["new_status"] == "Resubmitted"
-        assert sent["nodes_to_resubmit"] == ["document", "liveness"]
+        assert sent["nodes_to_resubmit"] == [
+            {"node_id": "feature_ocr", "feature": "OCR"},
+            {"node_id": "feature_liveness", "feature": "LIVENESS"},
+        ]
+        assert sent["comment"] == "Please redo OCR and Liveness"
+        assert sent["send_email"] is True
+        assert sent["email_address"] == "user@example.com"
+        assert sent["email_language"] == "en"
+
+    def test_resubmit_nodes_invalid_types(self, client: Didit) -> None:
+        with pytest.raises(TypeError, match="must be a ResubmitNode, dict, or string"):
+            client.sessions.resubmit("sess_err", nodes_to_resubmit=[12345])  # type: ignore[list-item]
+
+        with pytest.raises(ValueError, match="must contain 'node_id' and 'feature'"):
+            client.sessions.resubmit("sess_err", nodes_to_resubmit=[{"node_id": "foo"}])
+
+        with pytest.raises(ValueError, match="must contain 'node_id' and 'feature'"):
+            client.sessions.resubmit("sess_err", nodes_to_resubmit=[{"feature": "OCR"}])
+
+    @respx.mock
+    def test_resubmit_nodes_string_inference_matrix(self, client: Didit, base_url: str) -> None:
+        route = respx.patch(f"{base_url}/session/sess_matrix/update-status/").mock(
+            return_value=Response(200, json={"session_id": "sess_matrix"})
+        )
+        res = client.sessions.resubmit(
+            "sess_matrix",
+            nodes_to_resubmit=[
+                "   ",
+                "custom_node:LIVENESS",
+                "live_step",
+                "face_check",
+                "face_match_check",
+                "aml_screening",
+                "poa_check",
+                "address_step",
+                "phone_auth",
+                "email_verify",
+                "doc_front",
+                "ocr_back",
+                "NFC",
+                "unrecognized_step",
+            ],
+        )
+        assert res.session_id == "sess_matrix"
+        sent = json.loads(route.calls[0].request.content)
+        expected_nodes = [
+            {"node_id": "custom_node", "feature": "LIVENESS"},
+            {"node_id": "live_step", "feature": "LIVENESS"},
+            {"node_id": "face_check", "feature": "FACE"},
+            {"node_id": "face_match_check", "feature": "FACE_MATCH"},
+            {"node_id": "aml_screening", "feature": "AML"},
+            {"node_id": "poa_check", "feature": "PROOF_OF_ADDRESS"},
+            {"node_id": "address_step", "feature": "PROOF_OF_ADDRESS"},
+            {"node_id": "phone_auth", "feature": "PHONE_VERIFICATION"},
+            {"node_id": "email_verify", "feature": "EMAIL_VERIFICATION"},
+            {"node_id": "doc_front", "feature": "OCR"},
+            {"node_id": "ocr_back", "feature": "OCR"},
+            {"node_id": "NFC", "feature": "NFC"},
+            {"node_id": "unrecognized_step", "feature": "OCR"},
+        ]
+        assert sent["nodes_to_resubmit"] == expected_nodes
+
+    @respx.mock
+    def test_update_status_response_shapes(self, client: Didit, base_url: str) -> None:
+        # Non-dict JSON response fallback
+        respx.patch(f"{base_url}/session/sess_nondict/update-status/").mock(
+            return_value=Response(200, json=["unexpected", "array"])
+        )
+        r1 = client.sessions.update_status("sess_nondict", SessionStatus.APPROVED)
+        assert r1.session_id == "sess_nondict"
+        assert r1.status == SessionStatus.APPROVED
+
+        # Dict response with explicit status included upstream
+        respx.patch(f"{base_url}/session/sess_explicit_status/update-status/").mock(
+            return_value=Response(
+                200,
+                json={"session_id": "sess_explicit_status", "status": "Declined"},
+            )
+        )
+        r2 = client.sessions.update_status("sess_explicit_status", SessionStatus.DECLINED)
+        assert r2.session_id == "sess_explicit_status"
+        assert r2.status == "Declined"
+
+    def test_update_status_send_email_without_address(self, client: Didit) -> None:
+        with pytest.raises(ValueError, match="email_address is required when send_email is True"):
+            client.sessions.update_status(
+                "sess_err",
+                SessionStatus.APPROVED,
+                send_email=True,
+            )
 
     @pytest.mark.parametrize("invalid_id", ["", "   "])
     def test_resubmit_invalid_session_id(self, client: Didit, invalid_id: str) -> None:
@@ -1295,15 +1439,19 @@ class TestDiditSyncClient:
                 200,
                 json={
                     "session_id": "sess_custom_status",
-                    "status": "Declined",
                 },
             )
         )
 
-        res = client.sessions.update_status("sess_custom_status", SessionStatus.DECLINED)
-        assert res.status == SessionStatus.DECLINED
+        res = client.sessions.update_status(
+            "sess_custom_status",
+            SessionStatus.DECLINED,
+            comment="Suspected fraud",
+        )
+        assert res.session_id == "sess_custom_status"
         sent = json.loads(route.calls[0].request.content)
         assert sent["new_status"] == "Declined"
+        assert sent["comment"] == "Suspected fraud"
 
     @pytest.mark.parametrize(
         "invalid_status",

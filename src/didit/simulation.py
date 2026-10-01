@@ -35,11 +35,13 @@ from didit.models.session import (
     BatchReconciliationReport,
     ObservedSessionState,
     ResubmitInfo,
+    ResubmitNode,
     SessionListItem,
     SessionListPage,
     SessionReconciliationReport,
     SessionResponse,
     SessionStateSource,
+    UpdateSessionStatusResponse,
 )
 from didit.resources.sessions import _secure_write_bytes, _validate_session_list_filters
 from didit.webhooks import compute_signature
@@ -72,11 +74,12 @@ class _SimulatedStorage:
 
     def create(
         self,
-        vendor_data: str,
-        workflow_id: str,
+        vendor_data: str | None = None,
+        workflow_id: str = "",
         callback: str | None = None,
         language: Language | str | None = None,
         sandbox_scenario: str | None = None,
+        **kwargs: Any,
     ) -> SessionResponse:
         if sandbox_scenario is not None and sandbox_scenario not in SUPPORTED_SANDBOX_SCENARIOS:
             raise DiditConfigurationError(
@@ -401,10 +404,15 @@ class _SimulatedStorage:
         self,
         session_id: str,
         new_status: ManualSessionStatus | SessionStatus | str,
-        nodes_to_resubmit: list[str] | None = None,
+        nodes_to_resubmit: Any = None,
         *,
+        comment: str | None = None,
+        send_email: bool | None = None,
+        email_address: str | None = None,
+        email_language: str | None = None,
         options: Any = None,
-    ) -> SessionResponse:
+        **kwargs: Any,
+    ) -> UpdateSessionStatusResponse:
         """Update status of a simulated session (e.g. to 'Resubmitted')."""
         if not session_id or not session_id.strip():
             raise ValueError("session_id must not be empty")
@@ -423,9 +431,21 @@ class _SimulatedStorage:
         )
         session = self.sessions[clean_id]
         session.status = status_enum
+
+        resub_nodes: list[str] | None = None
+        if nodes_to_resubmit is not None:
+            resub_nodes = []
+            for item in nodes_to_resubmit:
+                if isinstance(item, ResubmitNode):
+                    resub_nodes.append(item.node_id)
+                elif isinstance(item, dict):
+                    resub_nodes.append(str(item.get("node_id", "")))
+                else:
+                    resub_nodes.append(str(item))
+
         resub_model = (
-            ResubmitInfo(nodes=nodes_to_resubmit)
-            if nodes_to_resubmit is not None
+            ResubmitInfo(nodes=resub_nodes)
+            if resub_nodes is not None
             else (ResubmitInfo() if status_enum == SessionStatus.RESUBMITTED else None)
         )
         session.resubmit_info = resub_model
@@ -435,20 +455,29 @@ class _SimulatedStorage:
             decision.status = status_enum
             decision.resubmit_info = resub_model
 
-        return session.model_copy(deep=True)
+        return UpdateSessionStatusResponse(session_id=clean_id, status=status_enum)
 
     def resubmit(
         self,
         session_id: str,
-        nodes_to_resubmit: list[str] | None = None,
+        nodes_to_resubmit: Any = None,
         *,
+        comment: str | None = None,
+        send_email: bool | None = None,
+        email_address: str | None = None,
+        email_language: str | None = None,
         options: Any = None,
-    ) -> SessionResponse:
+        **kwargs: Any,
+    ) -> UpdateSessionStatusResponse:
         """Request resubmission for a simulated session."""
         return self.update_status(
             session_id,
             SessionStatus.RESUBMITTED,
             nodes_to_resubmit=nodes_to_resubmit,
+            comment=comment,
+            send_email=send_email,
+            email_address=email_address,
+            email_language=email_language,
             options=options,
         )
 
@@ -556,12 +585,18 @@ class SimulatedSessionsResource:
 
     def create(
         self,
-        vendor_data: str,
+        vendor_data: str | None = None,
         *,
         workflow_id: str,
         callback: str | None = None,
+        callback_method: str | None = None,
+        metadata: dict[str, Any] | None = None,
         language: Language | str | None = None,
+        contact_details: Any = None,
+        expected_details: Any = None,
+        portrait_image: str | None = None,
         sandbox_scenario: str | None = None,
+        options: Any = None,
     ) -> SessionResponse:
         return self._storage.create(
             vendor_data=vendor_data,
@@ -625,30 +660,46 @@ class SimulatedSessionsResource:
     def update_status(
         self,
         session_id: str,
-        new_status: str | SessionStatus,
-        nodes_to_resubmit: list[str] | None = None,
+        new_status: ManualSessionStatus | SessionStatus | str,
+        nodes_to_resubmit: Any = None,
         *,
+        comment: str | None = None,
+        send_email: bool | None = None,
+        email_address: str | None = None,
+        email_language: str | None = None,
         options: Any = None,
-    ) -> SessionResponse:
+    ) -> UpdateSessionStatusResponse:
         """Update status of a simulated session."""
         return self._storage.update_status(
             session_id,
             new_status,
             nodes_to_resubmit=nodes_to_resubmit,
+            comment=comment,
+            send_email=send_email,
+            email_address=email_address,
+            email_language=email_language,
             options=options,
         )
 
     def resubmit(
         self,
         session_id: str,
-        nodes_to_resubmit: list[str] | None = None,
+        nodes_to_resubmit: Any = None,
         *,
+        comment: str | None = None,
+        send_email: bool | None = None,
+        email_address: str | None = None,
+        email_language: str | None = None,
         options: Any = None,
-    ) -> SessionResponse:
+    ) -> UpdateSessionStatusResponse:
         """Request resubmission for a simulated session."""
         return self._storage.resubmit(
             session_id,
             nodes_to_resubmit=nodes_to_resubmit,
+            comment=comment,
+            send_email=send_email,
+            email_address=email_address,
+            email_language=email_language,
             options=options,
         )
 
@@ -869,12 +920,18 @@ class SimulatedAsyncSessionsResource:
 
     async def create(
         self,
-        vendor_data: str,
+        vendor_data: str | None = None,
         *,
         workflow_id: str,
         callback: str | None = None,
+        callback_method: str | None = None,
+        metadata: dict[str, Any] | None = None,
         language: Language | str | None = None,
+        contact_details: Any = None,
+        expected_details: Any = None,
+        portrait_image: str | None = None,
         sandbox_scenario: str | None = None,
+        options: Any = None,
     ) -> SessionResponse:
         return self._storage.create(
             vendor_data=vendor_data,
@@ -940,30 +997,46 @@ class SimulatedAsyncSessionsResource:
     async def update_status(
         self,
         session_id: str,
-        new_status: str | SessionStatus,
-        nodes_to_resubmit: list[str] | None = None,
+        new_status: ManualSessionStatus | SessionStatus | str,
+        nodes_to_resubmit: Any = None,
         *,
+        comment: str | None = None,
+        send_email: bool | None = None,
+        email_address: str | None = None,
+        email_language: str | None = None,
         options: Any = None,
-    ) -> SessionResponse:
+    ) -> UpdateSessionStatusResponse:
         """Update status of a simulated session asynchronously."""
         return self._storage.update_status(
             session_id,
             new_status,
             nodes_to_resubmit=nodes_to_resubmit,
+            comment=comment,
+            send_email=send_email,
+            email_address=email_address,
+            email_language=email_language,
             options=options,
         )
 
     async def resubmit(
         self,
         session_id: str,
-        nodes_to_resubmit: list[str] | None = None,
+        nodes_to_resubmit: Any = None,
         *,
+        comment: str | None = None,
+        send_email: bool | None = None,
+        email_address: str | None = None,
+        email_language: str | None = None,
         options: Any = None,
-    ) -> SessionResponse:
+    ) -> UpdateSessionStatusResponse:
         """Request resubmission for a simulated session asynchronously."""
         return self._storage.resubmit(
             session_id,
             nodes_to_resubmit=nodes_to_resubmit,
+            comment=comment,
+            send_email=send_email,
+            email_address=email_address,
+            email_language=email_language,
             options=options,
         )
 

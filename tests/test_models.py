@@ -11,7 +11,14 @@ from didit.models.decision import (
     ReviewData,
 )
 from didit.models.enums import Language, SessionStatus
-from didit.models.session import CreateSessionRequest, SessionResponse
+from didit.models.session import (
+    CreateSessionRequest,
+    ResubmitFeature,
+    ResubmitInfo,
+    ResubmitNode,
+    SessionResponse,
+    UpdateSessionStatusResponse,
+)
 from didit.models.webhook import WebhookPayload
 
 
@@ -982,3 +989,45 @@ class TestSessionListAndReconciliationModels:
             "available_attempts": 1,
             "max_attempts": 2,
         }
+
+    def test_resubmit_node_model_dump(self) -> None:
+        """Verify ResubmitNode serializes feature enum and raw string properly."""
+        node_enum = ResubmitNode(node_id="ocr_1", feature=ResubmitFeature.OCR)
+        assert node_enum.model_dump() == {"node_id": "ocr_1", "feature": "OCR"}
+
+        node_str = ResubmitNode(node_id="face_1", feature="CUSTOM_FEATURE")
+        assert node_str.model_dump() == {"node_id": "face_1", "feature": "CUSTOM_FEATURE"}
+
+    def test_update_session_status_response_redacted_and_repr(self) -> None:
+        """Verify UpdateSessionStatusResponse string formatting and privacy-safe dumping."""
+        # 1. Without status or resubmit_info
+        r1 = UpdateSessionStatusResponse(session_id="sess_up_1")
+        assert "sess_up_1" in repr(r1)
+        assert str(r1) == repr(r1)
+        assert r1.requires_resubmission is False
+        d1 = r1.redacted_dump()
+        assert d1["session_id"] == "sess_up_1"
+        assert d1["status"] is None
+        assert d1["requires_resubmission"] is False
+        assert d1["resubmit_info"] is None
+
+        # 2. With status Enum and resubmit_info
+        r2 = UpdateSessionStatusResponse(
+            session_id="sess_up_2",
+            status=SessionStatus.RESUBMITTED,
+            resubmit_info=ResubmitInfo(nodes=["doc"]),
+        )
+        assert "Resubmitted" in repr(r2)
+        assert r2.requires_resubmission is True
+        d2 = r2.redacted_dump()
+        assert d2["status"] == "Resubmitted"
+        assert d2["requires_resubmission"] is True
+        assert d2["resubmit_info"] == {
+            "nodes": ["doc"],
+            "available_attempts": None,
+            "max_attempts": None,
+        }
+
+        # 3. With status as raw string
+        r3 = UpdateSessionStatusResponse(session_id="sess_up_3", status="CustomStatus")
+        assert r3.redacted_dump()["status"] == "CustomStatus"
