@@ -62,6 +62,29 @@ class TestDiditSyncClient:
         c.close()
 
     @respx.mock
+    def test_healthcheck_success(self, client: Didit) -> None:
+        route = respx.get("https://verification.didit.me/system/healthcheck").mock(
+            return_value=Response(
+                200,
+                json={"status": "ok", "timestamp": "2026-10-16T12:00:00Z"},
+            )
+        )
+        resp = client.healthcheck()
+        assert route.called
+        assert resp.status == "ok"
+        assert resp.is_healthy is True
+        assert resp.timestamp == "2026-10-16T12:00:00Z"
+        assert "ok" in repr(resp)
+
+    @respx.mock
+    def test_healthcheck_server_error_raises(self, client: Didit) -> None:
+        respx.get("https://verification.didit.me/system/healthcheck").mock(
+            return_value=Response(500, json={"error": "Database down"})
+        )
+        with pytest.raises(DiditServerError):
+            client.healthcheck()
+
+    @respx.mock
     def test_create_session_success(self, client: Didit, base_url: str) -> None:
         route = respx.post(f"{base_url}/session/").mock(
             return_value=Response(

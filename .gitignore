@@ -47,3 +47,10 @@ coverage.xml
 .DS_Store
 *.swp
 *.swo
+
+# Repomix & audit dumps
+repomix-output.xml
+repomix-output.*
+repomix*.xml
+
+

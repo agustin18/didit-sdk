@@ -10,6 +10,7 @@ import httpx
 from didit.config import DiditConfig
 from didit.errors import DiditConfigurationError
 from didit.events import DiditEventSink
+from didit.models.health import HealthcheckResponse
 from didit.models.webhook import WebhookPayload
 from didit.resources.sessions import AsyncSessionsResource, SessionsResource
 from didit.transport import (
@@ -175,6 +176,11 @@ class Didit:
             max_age_seconds=max_age_seconds,
             verify_freshness=verify_freshness,
         )
+
+    def healthcheck(self, *, options: RequestOptions | None = None) -> HealthcheckResponse:
+        """Check service health and operational status (GET /system/healthcheck)."""
+        resp = self._requestor.request("GET", "/system/healthcheck", options=options)
+        return HealthcheckResponse.model_validate(resp.json())
 
     def close(self) -> None:
         """Close the underlying HTTP client."""
@@ -343,6 +349,11 @@ class AsyncDidit:
             max_age_seconds=max_age_seconds,
             verify_freshness=verify_freshness,
         )
+
+    async def healthcheck(self, *, options: RequestOptions | None = None) -> HealthcheckResponse:
+        """Check service health and operational status asynchronously (GET /system/healthcheck)."""
+        resp = await self._requestor.request("GET", "/system/healthcheck", options=options)
+        return HealthcheckResponse.model_validate(resp.json())
 
     async def aclose(self) -> None:
         """Close the underlying asynchronous HTTP client."""

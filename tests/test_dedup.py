@@ -607,6 +607,37 @@ class TestInMemoryReservationStore:
         with pytest.raises(DiditDedupSaturationError, match="reached saturation"):
             store.reserve("evt_4", ttl_seconds=20)
 
+    @pytest.mark.parametrize(
+        "completed_count,processing_count,expected_outcome",
+        [
+            (3, 2, "success"),
+            (0, 5, "saturation"),
+            (4, 1, "success"),
+        ],
+    )
+    def test_selective_lru_eviction_of_completed_leases(
+        self, completed_count: int, processing_count: int, expected_outcome: str
+    ) -> None:
+        store = InMemoryWebhookReservationStore(max_entries=5)
+        for i in range(completed_count):
+            store.reserve(f"comp_{i}", token=f"tok_{i}", ttl_seconds=30)
+            store.complete(f"comp_{i}", token=f"tok_{i}", completed_ttl=86400)
+        for i in range(processing_count):
+            store.reserve(f"proc_{i}", token=f"tok_proc_{i}", ttl_seconds=300)
+
+        if expected_outcome == "success":
+            attempt = store.reserve("new_event", ttl_seconds=30)
+            assert attempt.state == ReservationState.ACQUIRED
+            # Verify the active processing leases are still intact
+            for i in range(processing_count):
+                assert (
+                    store.reserve(f"proc_{i}", token="other_tok").state
+                    == ReservationState.PROCESSING
+                )
+        else:
+            with pytest.raises(DiditDedupSaturationError, match="reached saturation"):
+                store.reserve("new_event", ttl_seconds=30)
+
     def test_concurrent_reservations(self) -> None:
         store = InMemoryWebhookReservationStore(max_entries=100)
         event_id = "evt_conc"

@@ -296,11 +296,19 @@ class InMemoryWebhookReservationStore:
                 if len(self._entries) >= self.max_entries:
                     self._purge_expired_locked(now)
                     if len(self._entries) >= self.max_entries:
-                        raise DiditDedupSaturationError(
-                            f"InMemoryWebhookReservationStore reached saturation "
-                            f"({self.max_entries}) with valid unexpired leases; "
-                            "refuses silent eviction"
-                        )
+                        oldest_completed_key: str | None = None
+                        for k, (state, _, _) in self._entries.items():
+                            if state == ReservationState.COMPLETED:
+                                oldest_completed_key = k
+                                break
+                        if oldest_completed_key is not None:
+                            del self._entries[oldest_completed_key]
+                        else:
+                            raise DiditDedupSaturationError(
+                                f"InMemoryWebhookReservationStore reached saturation "
+                                f"({self.max_entries}) with active unexpired processing leases; "
+                                "refuses silent eviction of in-flight leases"
+                            )
                 expires_at = now + ttl_seconds
                 self._entries[key] = (ReservationState.PROCESSING, tok, expires_at)
                 return ReservationAttempt(
@@ -314,6 +322,7 @@ class InMemoryWebhookReservationStore:
             if curr_state == ReservationState.PROCESSING:
                 if curr_tok == tok:
                     new_expiry = now + ttl_seconds
+                    del self._entries[key]
                     self._entries[key] = (ReservationState.PROCESSING, tok, new_expiry)
                     return ReservationAttempt(
                         state=ReservationState.ACQUIRED,
@@ -342,6 +351,7 @@ class InMemoryWebhookReservationStore:
 
             curr_state, curr_tok, _ = entry
             if curr_state == ReservationState.PROCESSING and curr_tok == token:
+                del self._entries[key]
                 self._entries[key] = (ReservationState.COMPLETED, "", now + completed_ttl)
                 return True
             return curr_state == ReservationState.COMPLETED
@@ -382,6 +392,7 @@ class InMemoryWebhookReservationStore:
 
             curr_state, curr_tok, _ = entry
             if curr_state == ReservationState.PROCESSING and curr_tok == token:
+                del self._entries[key]
                 self._entries[key] = (ReservationState.PROCESSING, token, now + ttl_seconds)
                 return True
             return False
