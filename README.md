@@ -282,7 +282,9 @@ print(f"Risk Score: {phone_risk.score} (Carrier: {phone_risk.carrier_name})")
 
 # IP Risk Assessment (strips GPS coordinates on redacted_dump())
 ip_risk = client.risk.ip("203.0.113.195")
-print(f"IP Status: {ip_risk.status} (Country: {ip_risk.ip_country_code}, VPN: {ip_risk.is_vpn_or_tor})")
+print(
+    f"IP Status: {ip_risk.status} (Country: {ip_risk.ip_country_code}, VPN: {ip_risk.is_vpn_or_tor})"
+)
 ```
 
 
