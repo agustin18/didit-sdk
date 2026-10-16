@@ -58,6 +58,9 @@ def test_openapi_supported_paths_exist(openapi_spec: dict[str, Any]) -> None:
         "/v3/session/{sessionId}/generate-pdf/": "get",
         "/v3/session/{sessionId}/sandbox/arm/": "post",
         "/system/healthcheck": "get",
+        "/v3/email/risk/": "post",
+        "/v3/phone/risk/": "post",
+        "/v3/ip/risk/": "post",
     }
 
     for path, method in expected_endpoints.items():

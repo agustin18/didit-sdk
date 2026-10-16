@@ -12,6 +12,7 @@ from didit.errors import DiditConfigurationError
 from didit.events import DiditEventSink
 from didit.models.health import HealthcheckResponse
 from didit.models.webhook import WebhookPayload
+from didit.resources.risk import AsyncRiskResource, RiskResource
 from didit.resources.sessions import AsyncSessionsResource, SessionsResource
 from didit.transport import (
     RequestOptions,
@@ -93,6 +94,7 @@ class Didit:
         )
         self._event_sink = event_sink
         self.sessions = SessionsResource(self._requestor, event_sink=self._event_sink)
+        self.risk = RiskResource(self._requestor, event_sink=self._event_sink)
 
     @property
     def config(self) -> DiditConfig:
@@ -266,6 +268,7 @@ class AsyncDidit:
         )
 
         self.sessions = AsyncSessionsResource(self._requestor, event_sink=self._event_sink)
+        self.risk = AsyncRiskResource(self._requestor, event_sink=self._event_sink)
 
     @property
     def config(self) -> DiditConfig:

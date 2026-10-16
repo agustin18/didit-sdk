@@ -37,6 +37,12 @@ from didit.models.enums import (
     SessionStatus,
 )
 from didit.models.health import HealthcheckResponse
+from didit.models.risk import (
+    EmailRiskResponse,
+    IPRiskResponse,
+    PhoneRiskResponse,
+    RiskSignals,
+)
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
@@ -1284,6 +1290,194 @@ class SimulatedAsyncSessionsResource:
         )
 
 
+class SimulatedRiskResource:
+    """Synchronous simulated Standalone Risk resource."""
+
+    def __init__(self, storage: _SimulatedStorage) -> None:
+        self._storage = storage
+
+    def email(
+        self,
+        email: str,
+        *,
+        country_code: str | None = None,
+        signals: RiskSignals | dict[str, Any] | None = None,
+        vendor_data: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        enable_social: bool = False,
+        options: RequestOptions | None = None,
+    ) -> EmailRiskResponse:
+        """Simulate email risk scoring."""
+        if not email or not email.strip():
+            raise ValueError("email must not be empty")
+        req_id = f"sim_email_{uuid.uuid4().hex[:12]}"
+        now = datetime.now(timezone.utc).isoformat()
+        return EmailRiskResponse(
+            request_id=req_id,
+            status="Approved",
+            created_at=now,
+            vendor_data=vendor_data,
+            metadata=metadata,
+            email={
+                "status": "Approved",
+                "email": email.strip(),
+                "is_breached": False,
+                "breaches": [],
+                "is_disposable": False,
+                "is_undeliverable": False,
+                "verification_attempts": 0,
+                "verified_at": None,
+                "warnings": [],
+                "lifecycle": [],
+                "matches": [],
+            },
+        )
+
+    def phone(
+        self,
+        phone_number: str,
+        *,
+        country_code: str | None = None,
+        signals: RiskSignals | dict[str, Any] | None = None,
+        vendor_data: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        enable_social: bool = False,
+        options: RequestOptions | None = None,
+    ) -> PhoneRiskResponse:
+        """Simulate phone risk scoring."""
+        if not phone_number or not phone_number.strip():
+            raise ValueError("phone_number must not be empty")
+        req_id = f"sim_phone_{uuid.uuid4().hex[:12]}"
+        now = datetime.now(timezone.utc).isoformat()
+        clean_num = phone_number.strip()
+        return PhoneRiskResponse(
+            request_id=req_id,
+            status="Approved",
+            created_at=now,
+            vendor_data=vendor_data,
+            metadata=metadata,
+            phone={
+                "status": "Approved",
+                "phone_number": clean_num.lstrip("+"),
+                "full_number": clean_num if clean_num.startswith("+") else f"+{clean_num}",
+                "country_code": country_code or "US",
+                "country_name": "United States",
+                "carrier": {"name": "Simulated Wireless", "type": "mobile"},
+                "is_disposable": False,
+                "is_virtual": False,
+                "verification_attempts": 0,
+                "verified_at": None,
+                "warnings": [],
+                "lifecycle": [],
+                "matches": [],
+            },
+        )
+
+    def ip(
+        self,
+        ip_address: str,
+        *,
+        claimed_country: str | None = None,
+        user_agent: str | None = None,
+        vendor_data: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        options: RequestOptions | None = None,
+    ) -> IPRiskResponse:
+        """Simulate IP risk scoring."""
+        if not ip_address or not ip_address.strip():
+            raise ValueError("ip_address must not be empty")
+        req_id = f"sim_ip_{uuid.uuid4().hex[:12]}"
+        now = datetime.now(timezone.utc).isoformat()
+        return IPRiskResponse(
+            request_id=req_id,
+            status="Approved",
+            created_at=now,
+            vendor_data=vendor_data,
+            metadata=metadata,
+            ip={
+                "status": "Approved",
+                "ip_address": ip_address.strip(),
+                "ip_country": "United States",
+                "ip_country_code": claimed_country or "USA",
+                "country_mismatch": False,
+                "is_vpn_or_tor": False,
+                "is_data_center": False,
+                "threat": {},
+            },
+        )
+
+
+class SimulatedAsyncRiskResource:
+    """Asynchronous simulated Standalone Risk resource."""
+
+    def __init__(self, sync_risk: SimulatedRiskResource) -> None:
+        self._sync = sync_risk
+
+    async def email(
+        self,
+        email: str,
+        *,
+        country_code: str | None = None,
+        signals: RiskSignals | dict[str, Any] | None = None,
+        vendor_data: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        enable_social: bool = False,
+        options: RequestOptions | None = None,
+    ) -> EmailRiskResponse:
+        """Simulate asynchronous email risk scoring."""
+        return self._sync.email(
+            email,
+            country_code=country_code,
+            signals=signals,
+            vendor_data=vendor_data,
+            metadata=metadata,
+            enable_social=enable_social,
+            options=options,
+        )
+
+    async def phone(
+        self,
+        phone_number: str,
+        *,
+        country_code: str | None = None,
+        signals: RiskSignals | dict[str, Any] | None = None,
+        vendor_data: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        enable_social: bool = False,
+        options: RequestOptions | None = None,
+    ) -> PhoneRiskResponse:
+        """Simulate asynchronous phone risk scoring."""
+        return self._sync.phone(
+            phone_number,
+            country_code=country_code,
+            signals=signals,
+            vendor_data=vendor_data,
+            metadata=metadata,
+            enable_social=enable_social,
+            options=options,
+        )
+
+    async def ip(
+        self,
+        ip_address: str,
+        *,
+        claimed_country: str | None = None,
+        user_agent: str | None = None,
+        vendor_data: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        options: RequestOptions | None = None,
+    ) -> IPRiskResponse:
+        """Simulate asynchronous IP risk scoring."""
+        return self._sync.ip(
+            ip_address,
+            claimed_country=claimed_country,
+            user_agent=user_agent,
+            vendor_data=vendor_data,
+            metadata=metadata,
+            options=options,
+        )
+
+
 class SimulatedDidit:
     """Synchronous simulated Didit client."""
 
@@ -1293,6 +1487,7 @@ class SimulatedDidit:
         self._storage = _SimulatedStorage()
         self._webhook_secret = webhook_secret
         self.sessions = SimulatedSessionsResource(self._storage)
+        self.risk = SimulatedRiskResource(self._storage)
 
     def approve_session(
         self,
@@ -1368,6 +1563,7 @@ class SimulatedAsyncDidit:
         self._storage = _SimulatedStorage()
         self._webhook_secret = webhook_secret
         self.sessions = SimulatedAsyncSessionsResource(self._storage)
+        self.risk = SimulatedAsyncRiskResource(SimulatedRiskResource(self._storage))
 
     def approve_session(
         self,
