@@ -36,6 +36,7 @@ from didit.models.enums import (
     ManualSessionStatus,
     SessionStatus,
 )
+from didit.models.health import HealthcheckResponse
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
@@ -56,6 +57,7 @@ from didit.resources.sessions import (
     _secure_write_bytes,
     _validate_session_list_filters,
 )
+from didit.transport import RequestOptions
 from didit.webhooks import compute_signature
 
 SUPPORTED_SANDBOX_SCENARIOS: set[str] = {
@@ -1315,6 +1317,13 @@ class SimulatedDidit:
         """Manually decline a session with a review reason."""
         return self._storage.decline(session_id, reason=reason)
 
+    def healthcheck(self, *, options: RequestOptions | None = None) -> HealthcheckResponse:
+        """Simulate system healthcheck response."""
+        return HealthcheckResponse(
+            status="ok",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+
     def generate_webhook_event(
         self, session_id: str, secret: str | None = None
     ) -> tuple[bytes, dict[str, str]]:
@@ -1382,6 +1391,13 @@ class SimulatedAsyncDidit:
     ) -> DecisionResponse:
         """Manually decline a session with a review reason."""
         return self._storage.decline(session_id, reason=reason)
+
+    async def healthcheck(self, *, options: RequestOptions | None = None) -> HealthcheckResponse:
+        """Simulate asynchronous system healthcheck response."""
+        return HealthcheckResponse(
+            status="ok",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
 
     def generate_webhook_event(
         self, session_id: str, secret: str | None = None

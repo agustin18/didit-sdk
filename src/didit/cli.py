@@ -245,7 +245,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     conn_err_reason: str | None = None
     start_time = time.monotonic()
     try:
-        with httpx.Client(timeout=10.0) as http_client:
+        with httpx.Client(timeout=10.0, follow_redirects=False) as http_client:
             health_resp = http_client.get(health_url)
             latency_ms = (time.monotonic() - start_time) * 1000.0
             if health_resp.status_code == 200:
@@ -703,7 +703,7 @@ def _cmd_sandbox_scenarios(args: argparse.Namespace) -> int:
     scenarios = SANDBOX_SCENARIOS
     remote_error: str | None = None
     try:
-        with httpx.Client(timeout=5.0) as http_client:
+        with httpx.Client(timeout=5.0, follow_redirects=False) as http_client:
             resp = http_client.get(live_url, headers=headers)
             if resp.is_success:
                 data = resp.json()

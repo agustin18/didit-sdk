@@ -14,6 +14,7 @@ from didit.models.enums import (
     ManualSessionStatus,
     SessionStatus,
 )
+from didit.models.health import HealthcheckResponse
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
@@ -47,6 +48,7 @@ __all__ = [
     "DecisionResponse",
     "DocumentData",
     "ExpectedDetails",
+    "HealthcheckResponse",
     "Language",
     "ManualSessionStatus",
     "ObservedSessionState",

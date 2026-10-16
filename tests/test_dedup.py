@@ -101,6 +101,15 @@ class TestInMemoryDedupStore:
         with pytest.raises(DiditDedupSaturationError, match="reached saturation"):
             store.claim("evt_4", ttl_seconds=20)
 
+    def test_saturation_with_evict_on_saturation_true(self) -> None:
+        store = InMemoryWebhookDedupStore(max_entries=2, evict_on_saturation=True)
+        assert store.claim("evt_1", ttl_seconds=60) is True
+        assert store.claim("evt_2", ttl_seconds=60) is True
+        # Both unexpired, capacity is 2. Adding evt_3 evicts evt_1 (LRU)
+        assert store.claim("evt_3", ttl_seconds=60) is True
+        # evt_1 was evicted, so claiming it again succeeds
+        assert store.claim("evt_1", ttl_seconds=60) is True
+
     def test_thread_safety_concurrent_claims(self) -> None:
         store = InMemoryWebhookDedupStore(max_entries=500)
         key = "evt_concurrent"
@@ -607,6 +616,37 @@ class TestInMemoryReservationStore:
         with pytest.raises(DiditDedupSaturationError, match="reached saturation"):
             store.reserve("evt_4", ttl_seconds=20)
 
+    @pytest.mark.parametrize(
+        "completed_count,processing_count,expected_outcome",
+        [
+            (3, 2, "success"),
+            (0, 5, "saturation"),
+            (4, 1, "success"),
+        ],
+    )
+    def test_selective_lru_eviction_of_completed_leases(
+        self, completed_count: int, processing_count: int, expected_outcome: str
+    ) -> None:
+        store = InMemoryWebhookReservationStore(max_entries=5)
+        for i in range(completed_count):
+            store.reserve(f"comp_{i}", token=f"tok_{i}", ttl_seconds=30)
+            store.complete(f"comp_{i}", token=f"tok_{i}", completed_ttl=86400)
+        for i in range(processing_count):
+            store.reserve(f"proc_{i}", token=f"tok_proc_{i}", ttl_seconds=300)
+
+        if expected_outcome == "success":
+            attempt = store.reserve("new_event", ttl_seconds=30)
+            assert attempt.state == ReservationState.ACQUIRED
+            # Verify the active processing leases are still intact
+            for i in range(processing_count):
+                assert (
+                    store.reserve(f"proc_{i}", token="other_tok").state
+                    == ReservationState.PROCESSING
+                )
+        else:
+            with pytest.raises(DiditDedupSaturationError, match="reached saturation"):
+                store.reserve("new_event", ttl_seconds=30)
+
     def test_concurrent_reservations(self) -> None:
         store = InMemoryWebhookReservationStore(max_entries=100)
         event_id = "evt_conc"
@@ -653,6 +693,18 @@ class TestInMemoryReservationStore:
         assert await store2.aclaim("legacy_async", ttl_seconds=30) is False
         await store2.arelease_claim("legacy_async")
         assert await store2.aclaim("legacy_async", ttl_seconds=30) is True
+
+    def test_claim_backward_compatibility_eviction_on_saturation(self) -> None:
+        store = InMemoryWebhookReservationStore(max_entries=3)
+        assert store.claim("c1", ttl_seconds=86400) is True
+        assert store.claim("c2", ttl_seconds=86400) is True
+        assert store.claim("c3", ttl_seconds=86400) is True
+        # Duplicate claims return False
+        assert store.claim("c1", ttl_seconds=86400) is False
+        # Store is full with 3 completed claims. Adding c4 evicts c1 (the oldest completed)
+        assert store.claim("c4", ttl_seconds=86400) is True
+        # c1 was evicted, so claiming c1 again succeeds
+        assert store.claim("c1", ttl_seconds=86400) is True
 
 
 class TestRedisReservationStore:

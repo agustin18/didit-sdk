@@ -72,6 +72,7 @@ from didit.models.enums import (
     ManualSessionStatus,
     SessionStatus,
 )
+from didit.models.health import HealthcheckResponse
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
@@ -135,6 +136,7 @@ __all__ = [
     "DocumentData",
     "ExpectedDetails",
     "FaceMatchResult",
+    "HealthcheckResponse",
     "IdVerificationResult",
     "InMemoryWebhookDedupStore",
     "InMemoryWebhookReservationStore",

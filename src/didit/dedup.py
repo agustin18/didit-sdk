@@ -209,10 +209,11 @@ class InMemoryWebhookDedupStore:
     cryptographic and operational replay defense guarantees are never silently compromised.
     """
 
-    def __init__(self, max_entries: int = 10_000) -> None:
+    def __init__(self, max_entries: int = 10_000, *, evict_on_saturation: bool = False) -> None:
         if max_entries < 1:
             raise ValueError("max_entries must be greater than or equal to 1")
         self.max_entries = max_entries
+        self.evict_on_saturation = evict_on_saturation
         self._entries: dict[str, float] = {}
         self._lock = threading.Lock()
 
@@ -233,10 +234,14 @@ class InMemoryWebhookDedupStore:
             if len(self._entries) >= self.max_entries:
                 self._purge_expired_locked(now)
                 if len(self._entries) >= self.max_entries:
-                    raise DiditDedupSaturationError(
-                        f"InMemoryWebhookDedupStore reached saturation ({self.max_entries}) "
-                        f"with valid unexpired claims; refuses silent eviction"
-                    )
+                    if self.evict_on_saturation:
+                        oldest_key = next(iter(self._entries))
+                        del self._entries[oldest_key]
+                    else:
+                        raise DiditDedupSaturationError(
+                            f"InMemoryWebhookDedupStore reached saturation ({self.max_entries}) "
+                            f"with valid unexpired claims; refuses silent eviction"
+                        )
 
             self._entries[key] = now + ttl_seconds
             return True
@@ -296,11 +301,19 @@ class InMemoryWebhookReservationStore:
                 if len(self._entries) >= self.max_entries:
                     self._purge_expired_locked(now)
                     if len(self._entries) >= self.max_entries:
-                        raise DiditDedupSaturationError(
-                            f"InMemoryWebhookReservationStore reached saturation "
-                            f"({self.max_entries}) with valid unexpired leases; "
-                            "refuses silent eviction"
-                        )
+                        oldest_completed_key: str | None = None
+                        for k, (state, _, _) in self._entries.items():
+                            if state == ReservationState.COMPLETED:
+                                oldest_completed_key = k
+                                break
+                        if oldest_completed_key is not None:
+                            del self._entries[oldest_completed_key]
+                        else:
+                            raise DiditDedupSaturationError(
+                                f"InMemoryWebhookReservationStore reached saturation "
+                                f"({self.max_entries}) with active unexpired processing leases; "
+                                "refuses silent eviction of in-flight leases"
+                            )
                 expires_at = now + ttl_seconds
                 self._entries[key] = (ReservationState.PROCESSING, tok, expires_at)
                 return ReservationAttempt(
@@ -314,6 +327,7 @@ class InMemoryWebhookReservationStore:
             if curr_state == ReservationState.PROCESSING:
                 if curr_tok == tok:
                     new_expiry = now + ttl_seconds
+                    del self._entries[key]
                     self._entries[key] = (ReservationState.PROCESSING, tok, new_expiry)
                     return ReservationAttempt(
                         state=ReservationState.ACQUIRED,
@@ -342,6 +356,7 @@ class InMemoryWebhookReservationStore:
 
             curr_state, curr_tok, _ = entry
             if curr_state == ReservationState.PROCESSING and curr_tok == token:
+                del self._entries[key]
                 self._entries[key] = (ReservationState.COMPLETED, "", now + completed_ttl)
                 return True
             return curr_state == ReservationState.COMPLETED
@@ -382,15 +397,20 @@ class InMemoryWebhookReservationStore:
 
             curr_state, curr_tok, _ = entry
             if curr_state == ReservationState.PROCESSING and curr_tok == token:
+                del self._entries[key]
                 self._entries[key] = (ReservationState.PROCESSING, token, now + ttl_seconds)
                 return True
             return False
 
     # Backward compatibility with WebhookDedupStore
     def claim(self, key: str, ttl_seconds: int = 86400) -> bool:
-        """Backward-compatible claim using default lease acquisition."""
-        attempt = self.reserve(key, ttl_seconds=ttl_seconds)
-        return attempt.state == ReservationState.ACQUIRED
+        """Backward-compatible claim using default lease acquisition and immediate completion."""
+        tok = secrets.token_urlsafe(16)
+        attempt = self.reserve(key, token=tok, ttl_seconds=30)
+        if attempt.state == ReservationState.ACQUIRED:
+            self.complete(key, token=tok, completed_ttl=ttl_seconds)
+            return True
+        return False
 
     def release_claim(self, key: str) -> None:
         """Backward-compatible best-effort release."""
