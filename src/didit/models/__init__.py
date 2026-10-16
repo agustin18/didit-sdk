@@ -12,6 +12,9 @@ from didit.models.enums import (
     CallbackMethod,
     Language,
     ManualSessionStatus,
+    SessionImportFormat,
+    SessionImportStatus,
+    SessionImportType,
     SessionStatus,
 )
 from didit.models.health import HealthcheckResponse
@@ -43,6 +46,11 @@ from didit.models.session import (
     UpdateSessionStatusResponse,
     UpdateStatusResponse,
 )
+from didit.models.session_imports import (
+    SessionImportError,
+    SessionImportErrorPage,
+    SessionImportJob,
+)
 from didit.models.webhook import WebhookPayload
 
 __all__ = [
@@ -72,6 +80,12 @@ __all__ = [
     "ResubmitNode",
     "ReviewData",
     "RiskSignals",
+    "SessionImportError",
+    "SessionImportErrorPage",
+    "SessionImportFormat",
+    "SessionImportJob",
+    "SessionImportStatus",
+    "SessionImportType",
     "SessionListItem",
     "SessionListPage",
     "SessionReconciliationReport",

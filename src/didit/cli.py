@@ -860,6 +860,132 @@ def _cmd_risk_ip(args: argparse.Namespace) -> int:
     return _emit_success({}, is_json=False, text_lines=text_lines)
 
 
+def _cmd_session_imports_create(args: argparse.Namespace) -> int:
+    """Create an asynchronous verification import job."""
+    is_json = getattr(args, "json", False)
+    client = _get_client(args)
+    file_arg = getattr(args, "file", None)
+    url_arg = getattr(args, "url", None)
+
+    if file_arg and url_arg:
+        return _emit_error(
+            "INVALID_ARGUMENT",
+            "Cannot provide both --file and --url. Choose one.",
+            is_json=is_json,
+            exit_code=2,
+        )
+    if not file_arg and not url_arg:
+        return _emit_error(
+            "INVALID_ARGUMENT",
+            "Provide either --file <path> or --url <https-url>.",
+            is_json=is_json,
+            exit_code=2,
+        )
+
+    try:
+        job = client.session_imports.create(
+            import_type=args.type,
+            workflow_id=getattr(args, "workflow_id", None),
+            file=file_arg,
+            source_file_url=url_arg,
+            source_format=getattr(args, "format", None),
+        )
+    except FileNotFoundError as exc:
+        return _emit_error("FILE_NOT_FOUND", str(exc), is_json=is_json)
+
+    if is_json:
+        return _emit_success(job.model_dump(), is_json=True)
+
+    text_lines = [
+        f"Import Job ID:  {job.uuid}",
+        f"Status:         {job.status.value}",
+        f"Type:           {job.import_type.value}",
+        f"Source Format:  {job.source_format.value}",
+        f"Source File:    {job.source_filename}",
+        f"Total Rows:     {job.total_rows}",
+        f"Processed Rows: {job.processed_rows}",
+        f"Failed Rows:    {job.failed_count}",
+    ]
+    return _emit_success({}, is_json=False, text_lines=text_lines)
+
+
+def _cmd_session_imports_get(args: argparse.Namespace) -> int:
+    """Retrieve details and progress of a verification import job."""
+    is_json = getattr(args, "json", False)
+    client = _get_client(args)
+    job = client.session_imports.get(args.import_id)
+
+    if is_json:
+        return _emit_success(job.model_dump(), is_json=True)
+
+    text_lines = [
+        f"Import Job ID:  {job.uuid}",
+        f"Status:         {job.status.value}",
+        f"Type:           {job.import_type.value}",
+        f"Source Format:  {job.source_format.value}",
+        f"Source File:    {job.source_filename}",
+        f"Total Rows:     {job.total_rows}",
+        f"Processed Rows: {job.processed_rows}",
+        f"Created Rows:   {job.created_count}",
+        f"Failed Rows:    {job.failed_count}",
+    ]
+    if job.last_error:
+        text_lines.append(f"Last Error:     {job.last_error}")
+    return _emit_success({}, is_json=False, text_lines=text_lines)
+
+
+def _cmd_session_imports_errors(args: argparse.Namespace) -> int:
+    """List row validation errors for a verification import job."""
+    is_json = getattr(args, "json", False)
+    include_sensitive = getattr(args, "include_sensitive", False)
+    client = _get_client(args)
+    page = client.session_imports.list_errors(
+        args.import_id,
+        limit=getattr(args, "limit", 50),
+        offset=getattr(args, "offset", 0),
+    )
+
+    if is_json:
+        dump = page.model_dump() if include_sensitive else page.redacted_dump()
+        return _emit_success(dump, is_json=True)
+
+    text_lines = [f"Total Errors: {page.count} (showing {len(page.results)})"]
+    for err in page.results:
+        ext_info = f" [external_id={err.external_id}]" if err.external_id else ""
+        text_lines.append(f"  - Row {err.row_number}{ext_info}: {err.error}")
+    return _emit_success({}, is_json=False, text_lines=text_lines)
+
+
+def _cmd_session_imports_template(args: argparse.Namespace) -> int:
+    """Download canonical CSV template header for an import type."""
+    is_json = getattr(args, "json", False)
+    client = _get_client(args)
+    csv_text = client.session_imports.get_template(import_type=args.type)
+
+    out_file = getattr(args, "output", None)
+    if out_file:
+        out_path = Path(out_file).resolve()
+        out_path.write_text(csv_text, encoding="utf-8")
+        if is_json:
+            return _emit_success(
+                {"saved_to": str(out_path), "bytes": len(csv_text.encode("utf-8"))},
+                is_json=True,
+            )
+        return _emit_success(
+            {},
+            is_json=False,
+            text_lines=[f"Template saved to {out_path} ({len(csv_text.encode('utf-8'))} bytes)"],
+        )
+
+    if is_json:
+        return _emit_success({"import_type": args.type, "template_csv": csv_text}, is_json=True)
+
+    sys.stdout.write(csv_text)
+    if not csv_text.endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
 class JSONAwareArgumentParser(argparse.ArgumentParser):
     """ArgumentParser that emits structured JSON envelopes on error when --json is passed."""
 
@@ -1146,6 +1272,66 @@ def build_parser() -> argparse.ArgumentParser:
     risk_ip.add_argument("--user-agent", help="Optional user agent observed by backend")
     risk_ip.add_argument("--vendor-data", help="Optional external correlation identifier")
     risk_ip.set_defaults(func=_cmd_risk_ip)
+
+    # didit session-imports
+    imports_parser = subparsers.add_parser(
+        "session-imports",
+        help="Manage batch verification imports",
+        description="Create, monitor, and inspect verification import jobs and templates.",
+        parents=[common_parser],
+    )
+    import_subparsers = imports_parser.add_subparsers(
+        dest="imports_command",
+        metavar="<import-command>",
+        parser_class=JSONAwareArgumentParser,
+    )
+
+    # didit session-imports create
+    import_create = import_subparsers.add_parser(
+        "create", help="Create a verification import job", parents=[common_parser]
+    )
+    import_create.add_argument(
+        "--type",
+        choices=["user_verification", "business_verification", "status_rules", "transactions"],
+        default="user_verification",
+        help="Type of entity to import (default: user_verification)",
+    )
+    import_create.add_argument("--workflow-id", help="Workflow UUID to attach imported sessions")
+    import_create.add_argument("--file", help="Path to local canonical CSV or NDJSON file")
+    import_create.add_argument("--url", help="Public HTTPS URL pointing to source file")
+    import_create.add_argument(
+        "--format", choices=["csv", "ndjson"], help="Explicit source file format"
+    )
+    import_create.set_defaults(func=_cmd_session_imports_create)
+
+    # didit session-imports get
+    import_get = import_subparsers.add_parser(
+        "get", help="Retrieve an import job status", parents=[common_parser]
+    )
+    import_get.add_argument("import_id", help="UUID of the import job to query")
+    import_get.set_defaults(func=_cmd_session_imports_get)
+
+    # didit session-imports errors
+    import_errors = import_subparsers.add_parser(
+        "errors", help="List row validation errors for an import job", parents=[common_parser]
+    )
+    import_errors.add_argument("import_id", help="UUID of the import job")
+    import_errors.add_argument("--limit", type=int, default=50, help="Page size (default: 50)")
+    import_errors.add_argument("--offset", type=int, default=0, help="Page offset (default: 0)")
+    import_errors.set_defaults(func=_cmd_session_imports_errors)
+
+    # didit session-imports template
+    import_template = import_subparsers.add_parser(
+        "template", help="Download CSV import template", parents=[common_parser]
+    )
+    import_template.add_argument(
+        "--type",
+        choices=["user_verification", "business_verification", "status_rules", "transactions"],
+        default="user_verification",
+        help="Entity type template to download (default: user_verification)",
+    )
+    import_template.add_argument("-o", "--output", help="File path to save the template CSV")
+    import_template.set_defaults(func=_cmd_session_imports_template)
 
     return parser
 

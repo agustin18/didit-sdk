@@ -25,12 +25,17 @@ Unofficial, community-maintained Python client for the [Didit](https://didit.me)
 - **Complete Session Lifecycle**: Covers all 10 documented Didit session statuses (`Not Started`, `In Progress`, `In Review`, `Approved`, `Declined`, `Expired`, `Abandoned`, `Kyc Expired`, `Resubmitted`, `Awaiting User`) with granular state inspection (`is_decided`, `is_closed`, `requires_review`, `requires_user_action`, `requires_resubmission`).
 - **Resubmission & Manual Review**: Full resubmission support (`client.sessions.resubmit()`) and review status transitions (`client.sessions.update_status()`).
 - **Official Compliance PDF Reports**: Download verification audit reports (`client.sessions.generate_pdf_report()` / `download_pdf_report()`) with binary header (`%PDF-`), MIME format validation, and atomic disk writes with private permissions.
-- **Production CLI (`didit`)**: Inspect sessions, download PDF reports, verify webhook signatures, query sandbox scenarios, and run diagnostic health checks with zero-credential exposure in command arguments.
+- **Session Imports API**: Batch ingestion of historical verification sessions, custom status rules, and transactions via streaming multipart file upload (up to 25 MB) or remote HTTPS URLs (`client.session_imports.create()`), progress monitoring (`get()`), error inspection (`list_errors()`), and canonical CSV template retrieval (`get_template()`).
+- **Standalone Risk Assessment APIs**: Independent intelligence and fraud scoring for email addresses (`client.risk.email()`), phone numbers (`client.risk.phone()`), and IP addresses (`client.risk.ip()`) with allowlist-based PII redaction and automatic GPS coordinate stripping.
+- **Root System Healthcheck**: Rapid unauthenticated diagnostic probes against `/system/healthcheck` (`client.healthcheck()`) returning typed `HealthcheckResponse`.
+- **Production CLI (`didit`)**: Inspect sessions, download PDF reports, verify webhook signatures, run session imports, evaluate risk intelligence, query sandbox scenarios, and run diagnostic health checks with zero-credential exposure in command arguments.
 - **Cryptographic Security & DoS Defense**: Constant-time HMAC-SHA256 signature verification (`X-Signature-V2` & `X-Signature`), full UTF-8 Unicode canonical JSON support (`ensure_ascii=False`, `allow_nan=False`), authoritative signed body anti-replay verification with strict header matching, and bounded body limits (HTTP 413) to prevent memory exhaustion.
-- **Webhook Deduplication**: Thread-safe in-memory and atomic Redis deduplication stores (`InMemoryWebhookDedupStore`, `RedisWebhookDedupStore`, `AsyncRedisWebhookDedupStore`) with configurable duplicate actions (`respond_ok`, `pass`, `raise`).
+- **Webhook Deduplication**: Thread-safe in-memory and atomic Redis deduplication stores (`InMemoryWebhookDedupStore`, `RedisWebhookDedupStore`, `AsyncRedisWebhookDedupStore`) with configurable duplicate actions (`respond_ok`, `pass`, `raise`) and LRU eviction support.
 - **Multi-Framework Integrations**: Native adapters for **FastAPI** (`DiditWebhookGuard`), **Django** (`@didit_webhook_view`), and **Flask** (`@didit_webhook`).
 - **Resilient HTTP Engine**: Deterministic jittered exponential backoff retries with fail-fast budget timers for transient errors (HTTP 429, 502, 503, 504).
-- **High-Fidelity Sandbox Parity**: 16 official Didit sandbox outcome simulation slugs (`approve`, `decline_document_expired`, `decline_face_match_low_similarity`, `decline_aml_hit`, `review_face_match_borderline`, `review_aml_possible_match`, etc.) and calibrated 0–100 biometric confidence scoring.
+- **High-Fidelity Sandbox Parity**: 16 official Didit sandbox outcome simulation slugs (`approve`, `decline_document_expired`, `decline_face_match_low_similarity`, `decline_aml_hit`, `review_face_match_borderline`, `review_aml_possible_match`, etc.) and calibrated 0-100 biometric confidence scoring.
+
+
 
 ---
 
@@ -258,7 +263,70 @@ report_path = client.sessions.download_pdf_report(
 pdf_bytes = client.sessions.generate_pdf_report("sess_12345")
 ```
 
+### 7. Standalone Risk Assessment
+
+Query Didit's unbundled risk intelligence APIs independently of KYC verification sessions with strict PII and GPS redaction:
+
+```python
+from didit import Didit
+
+client = Didit()
+
+# Email Risk Assessment
+email_risk = client.risk.email("user@example.com", enable_social=True)
+print(f"Risk Score: {email_risk.score} (Undeliverable: {email_risk.is_undeliverable})")
+
+# Phone Risk Assessment
+phone_risk = client.risk.phone("+14155552671", enable_social=True)
+print(f"Risk Score: {phone_risk.score} (Carrier: {phone_risk.carrier_name})")
+
+# IP Risk Assessment (strips GPS coordinates on redacted_dump())
+ip_risk = client.risk.ip("203.0.113.195")
+print(
+    f"IP Status: {ip_risk.status} (Country: {ip_risk.ip_country_code}, VPN: {ip_risk.is_vpn_or_tor})"
+)
+```
+
+
+### 8. Session Imports API
+
+Batch ingest historical verification sessions, custom status rules, or transaction reconciliation records:
+
+```python
+from didit import Didit, SessionImportType, SessionImportFormat
+
+client = Didit()
+
+# 1. Download canonical CSV template
+template_csv = client.session_imports.get_template(import_type=SessionImportType.USER_VERIFICATION)
+
+# 2. Upload a file (multipart streaming upload up to 25 MB)
+job = client.session_imports.create(
+    import_type=SessionImportType.USER_VERIFICATION,
+    file="path/to/sessions.csv",
+    source_format=SessionImportFormat.CSV,
+)
+print(f"Import Job Started: {job.uuid} (Status: {job.status.value})")
+
+# Or ingest large files directly via public HTTPS URL
+job_url = client.session_imports.create(
+    import_type=SessionImportType.STATUS_RULES,
+    source_file_url="https://storage.mycompany.com/imports/rules.ndjson",
+)
+
+# 3. Check progress and counters
+status = client.session_imports.get(job.uuid)
+print(f"Processed: {status.processed_rows}/{status.total_rows} (Failed: {status.failed_count})")
+
+# 4. Inspect row-level validation errors
+if status.failed_count > 0:
+    errors = client.session_imports.list_errors(job.uuid, limit=10)
+    for err in errors.results:
+        print(f"Row {err.row_number} [{err.external_id}]: {err.error}")
+```
+
 ---
+
 
 ## Webhook Integrations & Tokenized Reservation Protocol
 
@@ -503,7 +571,45 @@ didit sandbox scenarios
 didit sandbox scenarios --category decline
 ```
 
+#### Standalone Risk Queries (`didit risk`)
+
+Evaluate fraud risk intelligence for emails, phone numbers, or IP addresses:
+
+```bash
+# Email risk assessment
+didit risk email user@example.com --enable-social
+
+# Phone number risk assessment
+didit risk phone "+14155552671" --enable-social
+
+# IP address risk assessment (JSON mode)
+didit --json risk ip 203.0.113.195
+```
+
+
+#### Session Imports Manager (`didit session-imports`)
+
+Manage asynchronous batch verification and status rule import jobs:
+
+```bash
+# Download CSV template header
+didit session-imports template --type user_verification -o template.csv
+
+# Create an import job via local file
+didit session-imports create --type user_verification --file sessions.csv
+
+# Create an import job via remote URL (JSON mode)
+didit --json session-imports create --type status_rules --url https://storage.corp.com/rules.ndjson
+
+# Retrieve import status and counters
+didit session-imports get 3f9c1a2b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+
+# List row-level validation errors (PII-redacted by default)
+didit session-imports errors 3f9c1a2b-4d5e-4f60-8a7b-9c0d1e2f3a4b --limit 20
+```
+
 ---
+
 
 ## Exception Handling
 

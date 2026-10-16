@@ -116,7 +116,7 @@ jobs:
         run: |
           uv venv --clear /tmp/smoke-wheel-env
           uv pip install --python /tmp/smoke-wheel-env/bin/python dist/didit_sdk-*-py3-none-any.whl
-          /tmp/smoke-wheel-env/bin/python -c "import didit; assert didit.__version__ == '0.3.0'"
+          /tmp/smoke-wheel-env/bin/python -c "import didit; assert didit.__version__ == '0.4.0'"
           /tmp/smoke-wheel-env/bin/didit --version
           /tmp/smoke-wheel-env/bin/didit --help
 
@@ -124,5 +124,6 @@ jobs:
         run: |
           uv venv --clear /tmp/smoke-sdist-env
           uv pip install --python /tmp/smoke-sdist-env/bin/python dist/didit_sdk-*.tar.gz
-          /tmp/smoke-sdist-env/bin/python -c "import didit; assert didit.__version__ == '0.3.0'"
+          /tmp/smoke-sdist-env/bin/python -c "import didit; assert didit.__version__ == '0.4.0'"
           /tmp/smoke-sdist-env/bin/didit --version
+

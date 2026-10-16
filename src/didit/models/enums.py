@@ -187,3 +187,39 @@ class CallbackMethod(str, Enum):
     INITIATOR = "initiator"
     COMPLETER = "completer"
     BOTH = "both"
+
+
+class SessionImportType(str, Enum):
+    """Type of entity to import into Didit according to OpenAPI specification."""
+
+    USER_VERIFICATION = "user_verification"
+    BUSINESS_VERIFICATION = "business_verification"
+    STATUS_RULES = "status_rules"
+    TRANSACTIONS = "transactions"
+
+
+class SessionImportFormat(str, Enum):
+    """File format for verification imports."""
+
+    CSV = "csv"
+    NDJSON = "ndjson"
+
+
+class SessionImportStatus(str, Enum):
+    """Lifecycle statuses for asynchronous verification import jobs."""
+
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    PAUSED = "PAUSED"
+    CANCELLED = "CANCELLED"
+
+    @property
+    def is_terminal(self) -> bool:
+        """Return True if import job has finished processing."""
+        return self in (
+            SessionImportStatus.COMPLETED,
+            SessionImportStatus.FAILED,
+            SessionImportStatus.CANCELLED,
+        )
