@@ -746,6 +746,120 @@ def _cmd_sandbox_scenarios(args: argparse.Namespace) -> int:
     return _emit_success({}, is_json=False, text_lines=text_lines)
 
 
+def _cmd_risk_email(args: argparse.Namespace) -> int:
+    """Score an email address using Didit Standalone Email Risk API."""
+    is_json = getattr(args, "json", False)
+    include_sensitive = getattr(args, "include_sensitive", False)
+    client = _get_client(args)
+    resp = client.risk.email(
+        args.email,
+        country_code=getattr(args, "country_code", None),
+        vendor_data=getattr(args, "vendor_data", None),
+        enable_social=getattr(args, "enable_social", False),
+    )
+
+    if is_json:
+        dump = resp.model_dump() if include_sensitive else resp.redacted_dump()
+        return _emit_success(dump, is_json=True)
+
+    email_display = (
+        resp.email.get("email")
+        if include_sensitive
+        else (resp.redacted_dump().get("email", {}).get("email") or resp.email.get("email"))
+    )
+    text_lines = [
+        f"Request ID: {resp.request_id}",
+        f"Status:     {resp.status}",
+        f"Email:      {email_display}",
+    ]
+    if resp.is_breached is not None:
+        text_lines.append(f"Breached:   {resp.is_breached}")
+    if resp.is_disposable is not None:
+        text_lines.append(f"Disposable: {resp.is_disposable}")
+    if resp.vendor_data:
+        text_lines.append(f"Vendor Data: {resp.vendor_data}")
+    return _emit_success({}, is_json=False, text_lines=text_lines)
+
+
+def _cmd_risk_phone(args: argparse.Namespace) -> int:
+    """Score a phone number using Didit Standalone Phone Risk API."""
+    is_json = getattr(args, "json", False)
+    include_sensitive = getattr(args, "include_sensitive", False)
+    client = _get_client(args)
+    resp = client.risk.phone(
+        args.phone_number,
+        country_code=getattr(args, "country_code", None),
+        vendor_data=getattr(args, "vendor_data", None),
+        enable_social=getattr(args, "enable_social", False),
+    )
+
+    if is_json:
+        dump = resp.model_dump() if include_sensitive else resp.redacted_dump()
+        return _emit_success(dump, is_json=True)
+
+    phone_display = (
+        resp.phone.get("full_number")
+        if include_sensitive
+        else (
+            resp.redacted_dump().get("phone", {}).get("full_number")
+            or resp.phone.get("full_number")
+        )
+    )
+    text_lines = [
+        f"Request ID: {resp.request_id}",
+        f"Status:     {resp.status}",
+        f"Phone:      {phone_display}",
+    ]
+    if resp.carrier_name:
+        text_lines.append(f"Carrier:    {resp.carrier_name}")
+    if resp.is_disposable is not None:
+        text_lines.append(f"Disposable: {resp.is_disposable}")
+    if resp.is_virtual is not None:
+        text_lines.append(f"Virtual:    {resp.is_virtual}")
+    if resp.vendor_data:
+        text_lines.append(f"Vendor Data: {resp.vendor_data}")
+    return _emit_success({}, is_json=False, text_lines=text_lines)
+
+
+def _cmd_risk_ip(args: argparse.Namespace) -> int:
+    """Score an IP address using Didit Standalone IP Risk API."""
+    is_json = getattr(args, "json", False)
+    include_sensitive = getattr(args, "include_sensitive", False)
+    client = _get_client(args)
+    resp = client.risk.ip(
+        args.ip_address,
+        claimed_country=getattr(args, "claimed_country", None),
+        user_agent=getattr(args, "user_agent", None),
+        vendor_data=getattr(args, "vendor_data", None),
+    )
+
+    if is_json:
+        dump = resp.model_dump() if include_sensitive else resp.redacted_dump()
+        return _emit_success(dump, is_json=True)
+
+    ip_display = (
+        resp.ip.get("ip_address")
+        if include_sensitive
+        else (resp.redacted_dump().get("ip", {}).get("ip_address") or resp.ip.get("ip_address"))
+    )
+    text_lines = [
+        f"Request ID: {resp.request_id}",
+        f"Status:     {resp.status}",
+        f"IP Address: {ip_display}",
+    ]
+    if resp.ip_country_code:
+        text_lines.append(f"Country:    {resp.ip_country_code}")
+    if resp.country_mismatch is not None:
+        text_lines.append(f"Mismatch:   {resp.country_mismatch}")
+    if resp.is_vpn_or_tor is not None:
+        text_lines.append(f"VPN/Tor:    {resp.is_vpn_or_tor}")
+    if resp.is_data_center is not None:
+        text_lines.append(f"DataCenter: {resp.is_data_center}")
+    if resp.vendor_data:
+        text_lines.append(f"Vendor Data: {resp.vendor_data}")
+    return _emit_success({}, is_json=False, text_lines=text_lines)
+
+
 class JSONAwareArgumentParser(argparse.ArgumentParser):
     """ArgumentParser that emits structured JSON envelopes on error when --json is passed."""
 
@@ -989,6 +1103,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sandbox_scenarios.set_defaults(func=_cmd_sandbox_scenarios)
 
+    # didit risk
+    risk_parser = subparsers.add_parser(
+        "risk",
+        help="Standalone risk assessment operations (Email, Phone, IP)",
+        parents=[common_parser],
+    )
+    risk_subparsers = risk_parser.add_subparsers(
+        dest="risk_subcommand", parser_class=JSONAwareArgumentParser
+    )
+
+    # didit risk email
+    risk_email = risk_subparsers.add_parser(
+        "email", help="Risk-score an email address", parents=[common_parser]
+    )
+    risk_email.add_argument("email", help="Email address to evaluate")
+    risk_email.add_argument("--country-code", help="Optional ISO country code hint")
+    risk_email.add_argument("--vendor-data", help="Optional external correlation identifier")
+    risk_email.add_argument(
+        "--enable-social", action="store_true", help="Query online platforms footprint"
+    )
+    risk_email.set_defaults(func=_cmd_risk_email)
+
+    # didit risk phone
+    risk_phone = risk_subparsers.add_parser(
+        "phone", help="Risk-score a phone number", parents=[common_parser]
+    )
+    risk_phone.add_argument("phone_number", help="Phone number to evaluate in E.164 format")
+    risk_phone.add_argument("--country-code", help="Optional ISO country code hint")
+    risk_phone.add_argument("--vendor-data", help="Optional external correlation identifier")
+    risk_phone.add_argument(
+        "--enable-social", action="store_true", help="Query online platforms footprint"
+    )
+    risk_phone.set_defaults(func=_cmd_risk_phone)
+
+    # didit risk ip
+    risk_ip = risk_subparsers.add_parser(
+        "ip", help="Risk-score an IP address", parents=[common_parser]
+    )
+    risk_ip.add_argument("ip_address", help="IPv4 or IPv6 address to evaluate")
+    risk_ip.add_argument("--claimed-country", help="Optional ISO country claimed by user")
+    risk_ip.add_argument("--user-agent", help="Optional user agent observed by backend")
+    risk_ip.add_argument("--vendor-data", help="Optional external correlation identifier")
+    risk_ip.set_defaults(func=_cmd_risk_ip)
+
     return parser
 
 
@@ -1030,6 +1188,8 @@ def main(argv: list[str] | None = None) -> int:
         return _emit_error("CONNECTION_ERROR", str(exc), is_json=is_json)
     except DiditSignatureError as exc:
         return _emit_error("SIGNATURE_VERIFICATION_FAILED", str(exc), is_json=is_json)
+    except DiditAPIError as exc:
+        return _emit_error("API_ERROR", str(exc), is_json=is_json)
     except Exception:
         if debug:
             traceback.print_exc(file=sys.stderr)

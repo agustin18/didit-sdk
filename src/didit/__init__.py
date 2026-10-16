@@ -73,6 +73,15 @@ from didit.models.enums import (
     SessionStatus,
 )
 from didit.models.health import HealthcheckResponse
+from didit.models.risk import (
+    EmailRiskRequest,
+    EmailRiskResponse,
+    IPRiskRequest,
+    IPRiskResponse,
+    PhoneRiskRequest,
+    PhoneRiskResponse,
+    RiskSignals,
+)
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
@@ -93,6 +102,7 @@ from didit.models.session import (
     UpdateStatusResponse,
 )
 from didit.models.webhook import WebhookPayload
+from didit.resources.risk import AsyncRiskResource, RiskResource
 from didit.simulation import SimulatedAsyncDidit, SimulatedDidit
 from didit.transport import RequestOptions, RetryPolicy
 from didit.webhooks import parse_webhook_payload, verify_webhook_signature
@@ -103,6 +113,7 @@ __all__ = [
     "AsyncDidit",
     "AsyncRedisWebhookDedupStore",
     "AsyncRedisWebhookReservationStore",
+    "AsyncRiskResource",
     "AsyncSessionStateSource",
     "AsyncWebhookDedupStore",
     "AsyncWebhookReservationStore",
@@ -134,9 +145,13 @@ __all__ = [
     "DiditSignatureError",
     "DiditTimeoutError",
     "DocumentData",
+    "EmailRiskRequest",
+    "EmailRiskResponse",
     "ExpectedDetails",
     "FaceMatchResult",
     "HealthcheckResponse",
+    "IPRiskRequest",
+    "IPRiskResponse",
     "IdVerificationResult",
     "InMemoryWebhookDedupStore",
     "InMemoryWebhookReservationStore",
@@ -144,6 +159,8 @@ __all__ = [
     "LivenessResult",
     "ManualSessionStatus",
     "ObservedSessionState",
+    "PhoneRiskRequest",
+    "PhoneRiskResponse",
     "RateLimitObserved",
     "ReconciliationDriftObserved",
     "RedisWebhookDedupStore",
@@ -157,6 +174,8 @@ __all__ = [
     "ResubmitNode",
     "RetryPolicy",
     "ReviewData",
+    "RiskResource",
+    "RiskSignals",
     "SessionListItem",
     "SessionListPage",
     "SessionReconciliationReport",

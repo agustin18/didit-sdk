@@ -15,6 +15,15 @@ from didit.models.enums import (
     SessionStatus,
 )
 from didit.models.health import HealthcheckResponse
+from didit.models.risk import (
+    EmailRiskRequest,
+    EmailRiskResponse,
+    IPRiskRequest,
+    IPRiskResponse,
+    PhoneRiskRequest,
+    PhoneRiskResponse,
+    RiskSignals,
+)
 from didit.models.session import (
     AsyncSessionStateSource,
     BatchReconciliationReport,
@@ -47,15 +56,22 @@ __all__ = [
     "CreateSessionRequest",
     "DecisionResponse",
     "DocumentData",
+    "EmailRiskRequest",
+    "EmailRiskResponse",
     "ExpectedDetails",
     "HealthcheckResponse",
+    "IPRiskRequest",
+    "IPRiskResponse",
     "Language",
     "ManualSessionStatus",
     "ObservedSessionState",
+    "PhoneRiskRequest",
+    "PhoneRiskResponse",
     "ResubmitFeature",
     "ResubmitInfo",
     "ResubmitNode",
     "ReviewData",
+    "RiskSignals",
     "SessionListItem",
     "SessionListPage",
     "SessionReconciliationReport",
