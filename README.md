@@ -1,3 +1,9 @@
+<p align="center">
+  <a href="https://github.com/agustin18/didit-sdk">
+    <img src="https://raw.githubusercontent.com/agustin18/didit-sdk/main/docs/assets/logo.png" width="130" alt="didit-sdk logo">
+  </a>
+</p>
+
 # didit-sdk
 
 [![CI](https://github.com/agustin18/didit-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/agustin18/didit-sdk/actions/workflows/ci.yml)
