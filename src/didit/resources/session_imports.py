@@ -44,13 +44,35 @@ def _normalize_source_format(
 
 
 def _extract_stream_filename(file: Any, fallback: str = "import.csv") -> str:
-
     obj_name = getattr(file, "name", None)
     if isinstance(obj_name, Path):
         return obj_name.name
     if obj_name:
         return str(obj_name)
     return fallback
+
+
+MAX_UPLOAD_BYTES: int = 25 * 1024 * 1024
+
+
+def _validate_pagination_params(limit: int, offset: int) -> None:
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    if offset < 0:
+        raise ValueError("offset must be >= 0")
+
+
+def _inject_template_headers(options: RequestOptions | None) -> RequestOptions:
+    merged_headers = dict(options.headers) if (options and options.headers) else {}
+    if not any(k.lower() == "accept" for k in merged_headers):
+        merged_headers["Accept"] = "text/csv, */*"
+    return RequestOptions(
+        idempotency_key=options.idempotency_key if options else None,
+        timeout=options.timeout if options else None,
+        max_retries=options.max_retries if options else None,
+        headers=merged_headers,
+        deadline=options.deadline if options else None,
+    )
 
 
 class SessionImportsResource:
@@ -144,6 +166,12 @@ class SessionImportsResource:
         else:
             raise TypeError(f"Unsupported file type: {type(file).__name__}")
 
+        if len(file_content) > MAX_UPLOAD_BYTES:
+            raise ValueError(
+                "Import file exceeds maximum upload size of 25 MB; "
+                "use source_file_url for larger files"
+            )
+
         fmt = _normalize_source_format(source_format, filename=target_filename)
         if fmt:
             data["source_format"] = fmt
@@ -187,6 +215,7 @@ class SessionImportsResource:
         """List row-level validation errors for an import job ordered by row_number."""
         if not import_id or not import_id.strip():
             raise ValueError("import_id must not be empty")
+        _validate_pagination_params(limit, offset)
         clean_id = import_id.strip()
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         resp = self._requestor.request(
@@ -206,11 +235,12 @@ class SessionImportsResource:
         """Download canonical CSV template header and structure for an import type."""
         type_str = _normalize_import_type(import_type)
         params = {"import_type": type_str}
+        eff_options = _inject_template_headers(options)
         resp = self._requestor.request(
             "GET",
             "/session/imports/template/",
             params=params,
-            options=options,
+            options=eff_options,
         )
         return resp.text
 
@@ -302,6 +332,12 @@ class AsyncSessionImportsResource:
         else:
             raise TypeError(f"Unsupported file type: {type(file).__name__}")
 
+        if len(file_content) > MAX_UPLOAD_BYTES:
+            raise ValueError(
+                "Import file exceeds maximum upload size of 25 MB; "
+                "use source_file_url for larger files"
+            )
+
         fmt = _normalize_source_format(source_format, filename=target_filename)
         if fmt:
             data["source_format"] = fmt
@@ -345,6 +381,7 @@ class AsyncSessionImportsResource:
         """Asynchronously list row-level validation errors for an import job."""
         if not import_id or not import_id.strip():
             raise ValueError("import_id must not be empty")
+        _validate_pagination_params(limit, offset)
         clean_id = import_id.strip()
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         resp = await self._requestor.request(
@@ -364,10 +401,11 @@ class AsyncSessionImportsResource:
         """Asynchronously download canonical CSV template header for an import type."""
         type_str = _normalize_import_type(import_type)
         params = {"import_type": type_str}
+        eff_options = _inject_template_headers(options)
         resp = await self._requestor.request(
             "GET",
             "/session/imports/template/",
             params=params,
-            options=options,
+            options=eff_options,
         )
         return resp.text

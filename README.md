@@ -27,13 +27,14 @@ Unofficial, community-maintained Python client for the [Didit](https://didit.me)
 - **Official Compliance PDF Reports**: Download verification audit reports (`client.sessions.generate_pdf_report()` / `download_pdf_report()`) with binary header (`%PDF-`), MIME format validation, and atomic disk writes with private permissions.
 - **Session Imports API**: Batch ingestion of historical verification sessions, custom status rules, and transactions via streaming multipart file upload (up to 25 MB) or remote HTTPS URLs (`client.session_imports.create()`), progress monitoring (`get()`), error inspection (`list_errors()`), and canonical CSV template retrieval (`get_template()`).
 - **Standalone Risk Assessment APIs**: Independent intelligence and fraud scoring for email addresses (`client.risk.email()`), phone numbers (`client.risk.phone()`), and IP addresses (`client.risk.ip()`) with allowlist-based PII redaction and automatic GPS coordinate stripping.
-- **Root System Healthcheck**: Rapid unauthenticated diagnostic probes against `/system/healthcheck/` (`client.healthcheck()`) returning typed `HealthcheckResponse`.
+- **Root System Healthcheck**: Rapid unauthenticated diagnostic probes against `/system/healthcheck` (`client.healthcheck()`) returning typed `HealthcheckResponse`.
 - **Production CLI (`didit`)**: Inspect sessions, download PDF reports, verify webhook signatures, run session imports, evaluate risk intelligence, query sandbox scenarios, and run diagnostic health checks with zero-credential exposure in command arguments.
 - **Cryptographic Security & DoS Defense**: Constant-time HMAC-SHA256 signature verification (`X-Signature-V2` & `X-Signature`), full UTF-8 Unicode canonical JSON support (`ensure_ascii=False`, `allow_nan=False`), authoritative signed body anti-replay verification with strict header matching, and bounded body limits (HTTP 413) to prevent memory exhaustion.
 - **Webhook Deduplication**: Thread-safe in-memory and atomic Redis deduplication stores (`InMemoryWebhookDedupStore`, `RedisWebhookDedupStore`, `AsyncRedisWebhookDedupStore`) with configurable duplicate actions (`respond_ok`, `pass`, `raise`) and LRU eviction support.
 - **Multi-Framework Integrations**: Native adapters for **FastAPI** (`DiditWebhookGuard`), **Django** (`@didit_webhook_view`), and **Flask** (`@didit_webhook`).
 - **Resilient HTTP Engine**: Deterministic jittered exponential backoff retries with fail-fast budget timers for transient errors (HTTP 429, 502, 503, 504).
-- **High-Fidelity Sandbox Parity**: 16 official Didit sandbox outcome simulation slugs (`approve`, `decline_document_expired`, `decline_face_match_low_similarity`, `decline_aml_hit`, `review_face_match_borderline`, `review_aml_possible_match`, etc.) and calibrated 0–100 biometric confidence scoring.
+- **High-Fidelity Sandbox Parity**: 16 official Didit sandbox outcome simulation slugs (`approve`, `decline_document_expired`, `decline_face_match_low_similarity`, `decline_aml_hit`, `review_face_match_borderline`, `review_aml_possible_match`, etc.) and calibrated 0-100 biometric confidence scoring.
+
 
 
 ---
@@ -272,17 +273,18 @@ from didit import Didit
 client = Didit()
 
 # Email Risk Assessment
-email_risk = client.risk.email("user@example.com", enable_intelligence=True)
-print(f"Risk Score: {email_risk.score} (Deliverable: {email_risk.deliverable})")
+email_risk = client.risk.email("user@example.com", enable_social=True)
+print(f"Risk Score: {email_risk.score} (Undeliverable: {email_risk.is_undeliverable})")
 
 # Phone Risk Assessment
-phone_risk = client.risk.phone("+14155552671", enable_intelligence=True)
-print(f"Risk Score: {phone_risk.score} (Carrier: {phone_risk.carrier})")
+phone_risk = client.risk.phone("+14155552671", enable_social=True)
+print(f"Risk Score: {phone_risk.score} (Carrier: {phone_risk.carrier_name})")
 
 # IP Risk Assessment (strips GPS coordinates on redacted_dump())
 ip_risk = client.risk.ip("203.0.113.195")
-print(f"IP Score: {ip_risk.score} (Country: {ip_risk.country_code}, VPN: {ip_risk.is_vpn})")
+print(f"IP Status: {ip_risk.status} (Country: {ip_risk.ip_country_code}, VPN: {ip_risk.is_vpn_or_tor})")
 ```
+
 
 ### 8. Session Imports API
 
@@ -573,14 +575,15 @@ Evaluate fraud risk intelligence for emails, phone numbers, or IP addresses:
 
 ```bash
 # Email risk assessment
-didit risk email user@example.com --intelligence
+didit risk email user@example.com --enable-social
 
 # Phone number risk assessment
-didit risk phone "+14155552671" --intelligence
+didit risk phone "+14155552671" --enable-social
 
 # IP address risk assessment (JSON mode)
 didit --json risk ip 203.0.113.195
 ```
+
 
 #### Session Imports Manager (`didit session-imports`)
 

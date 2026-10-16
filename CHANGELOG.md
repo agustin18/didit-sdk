@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Session Imports API (`client.session_imports` / `async_client.session_imports`):**
   - Full support for Didit Session Imports API: `POST /v3/session/imports/`, `GET /v3/session/imports/{importId}/`, `GET /v3/session/imports/{importId}/errors/`, and `GET /v3/session/imports/template/`.
   - Supports both local file multipart streaming uploads up to 25 MB and remote HTTPS URL ingestion (`source_file_url`).
-  - Strict enum typing: `SessionImportType` (`user_verification`, `status_rules`, `transactions`), `SessionImportFormat` (`csv`, `ndjson`), and `SessionImportStatus` (`PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELLED`).
+  - Strict enum typing: `SessionImportType` (`user_verification`, `business_verification`, `status_rules`, `transactions`), `SessionImportFormat` (`csv`, `ndjson`), and `SessionImportStatus` (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`, `CANCELLED`, `PAUSED`).
   - Privacy safeguards: `raw_row` is excluded from standard `__repr__` / `__str__` and masked to `"[REDACTED]"` in `SessionImportError.redacted_dump()` and `SessionImportErrorPage.redacted_dump()`.
   - Full offline simulation parity across `SimulatedDidit` and `SimulatedAsyncDidit` (`SimulatedSessionImportsResource`).
   - Production CLI subcommands: `didit session-imports create`, `get`, `errors`, and `template`.
@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Production CLI commands: `didit risk email`, `phone`, and `ip`.
   - High-fidelity offline simulation: `SimulatedRiskResource` and `SimulatedAsyncRiskResource`.
 - **Root Transport & System Health Check (`client.healthcheck()` / `async_client.healthcheck()`):**
-  - Fast unauthenticated diagnostic probe against `/system/healthcheck/` returning typed `HealthcheckResponse`.
+  - Fast unauthenticated diagnostic probe against `/system/healthcheck` returning typed `HealthcheckResponse`.
+
   - Enhanced HTTP transport layer in `_resolve_url()` correctly handling root-level paths (`/system/`, `/v1/`) without prefix duplication.
   - Hardened transport redirects (`follow_redirects=False`) across diagnostic CLI probes (`didit doctor`, `didit sandbox scenarios`).
 - **Crash-Resilient Webhook Dedup LRU & Eviction Protection:**

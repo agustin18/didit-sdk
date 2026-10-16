@@ -74,7 +74,7 @@ class SessionImportError(BaseModel):
         default=None, description="Caller-supplied idempotency key for this row"
     )
     error: str = Field(..., description="Diagnostic error message explaining the failure")
-    raw_row: dict[str, Any] = Field(
+    raw_row: dict[str, Any] | None = Field(
         default_factory=dict, description="Raw dictionary containing the rejected row data"
     )
     created_at: str = Field(..., description="ISO 8601 timestamp when error was recorded")
@@ -91,7 +91,8 @@ class SessionImportError(BaseModel):
     def redacted_dump(self) -> dict[str, Any]:
         """Privacy-safe dictionary dump redacting the raw row data containing potential PII."""
         data = copy.deepcopy(self.model_dump())
-        data["raw_row"] = "[REDACTED]"
+        if "raw_row" in data and data["raw_row"] is not None:
+            data["raw_row"] = "[REDACTED]"
         return data
 
 

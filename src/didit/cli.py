@@ -1278,9 +1278,12 @@ def build_parser() -> argparse.ArgumentParser:
         "session-imports",
         help="Manage batch verification imports",
         description="Create, monitor, and inspect verification import jobs and templates.",
+        parents=[common_parser],
     )
     import_subparsers = imports_parser.add_subparsers(
-        dest="imports_command", metavar="<import-command>"
+        dest="imports_command",
+        metavar="<import-command>",
+        parser_class=JSONAwareArgumentParser,
     )
 
     # didit session-imports create

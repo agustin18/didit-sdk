@@ -119,6 +119,18 @@ class TestSessionImportModels:
         assert dump["raw_row"] == "[REDACTED]"
         assert dump["error"] == "status: invalid value 'unknown_status'"
 
+        # Verify raw_row=None handling
+        err_none = SessionImportError(
+            uuid="err-none",
+            row_number=2,
+            error="format error",
+            raw_row=None,
+            created_at="2026-05-17T08:44:02Z",
+        )
+        assert err_none.raw_row is None
+        dump_none = err_none.redacted_dump()
+        assert dump_none["raw_row"] is None
+
     def test_session_import_error_page_redacted_dump(self) -> None:
         err1 = SessionImportError(
             uuid="err-1",
@@ -316,6 +328,9 @@ class TestSyncSessionImportsResource:
         with pytest.raises(TypeError, match="Unsupported file type"):
             client.session_imports.create(file=12345)  # type: ignore[arg-type]
 
+        with pytest.raises(ValueError, match="exceeds maximum upload size of 25 MB"):
+            client.session_imports.create(file=b"x" * (25 * 1024 * 1024 + 1))
+
     @respx.mock
     def test_get_import_job(self, client: Didit, base_url: str) -> None:
         respx.get(f"{base_url}/session/imports/job-456/").respond(
@@ -373,15 +388,26 @@ class TestSyncSessionImportsResource:
 
         with pytest.raises(ValueError, match="import_id must not be empty"):
             client.session_imports.list_errors("   ")
+        with pytest.raises(ValueError, match="limit must be >= 1"):
+            client.session_imports.list_errors("job-456", limit=0)
+        with pytest.raises(ValueError, match="offset must be >= 0"):
+            client.session_imports.list_errors("job-456", offset=-1)
 
     @respx.mock
     def test_get_template(self, client: Didit, base_url: str) -> None:
+        from didit.transport import RequestOptions
+
         respx.get(f"{base_url}/session/imports/template/").respond(
             200,
             text="external_id,workflow_id,vendor_data\n",
         )
         tmpl = client.session_imports.get_template(import_type=SessionImportType.USER_VERIFICATION)
         assert "external_id,workflow_id" in tmpl
+
+        tmpl_custom = client.session_imports.get_template(
+            options=RequestOptions(headers={"Accept": "text/plain", "X-Custom": "1"})
+        )
+        assert "external_id,workflow_id" in tmpl_custom
 
 
 # =========================================================================
@@ -471,6 +497,13 @@ class TestAsyncSessionImportsResource:
         tmpl = await async_client.session_imports.get_template()
         assert "external_id" in tmpl
 
+        from didit.transport import RequestOptions
+
+        tmpl_custom = await async_client.session_imports.get_template(
+            options=RequestOptions(headers={"Accept": "text/csv", "X-Custom": "2"})
+        )
+        assert "external_id" in tmpl_custom
+
     @pytest.mark.asyncio
     async def test_async_validations(self, async_client: AsyncDidit) -> None:
         with pytest.raises(ValueError, match="Provide either 'file' or 'source_file_url'"):
@@ -488,11 +521,20 @@ class TestAsyncSessionImportsResource:
         with pytest.raises(TypeError):
             await async_client.session_imports.create(file=123)  # type: ignore[arg-type]
 
+        with pytest.raises(ValueError, match="exceeds maximum upload size of 25 MB"):
+            await async_client.session_imports.create(file=b"x" * (25 * 1024 * 1024 + 1))
+
         with pytest.raises(ValueError, match="import_id must not be empty"):
             await async_client.session_imports.get("")
 
         with pytest.raises(ValueError, match="import_id must not be empty"):
             await async_client.session_imports.list_errors("")
+
+        with pytest.raises(ValueError, match="limit must be >= 1"):
+            await async_client.session_imports.list_errors("job-1", limit=0)
+
+        with pytest.raises(ValueError, match="offset must be >= 0"):
+            await async_client.session_imports.list_errors("job-1", offset=-1)
 
     @pytest.mark.asyncio
     @respx.mock
@@ -1028,3 +1070,14 @@ class TestSessionImportsCLI:
         assert exit_code_nonl == 0
         out_nonl, _ = capsys.readouterr()
         assert out_nonl == "header_no_newline\n"
+
+    def test_cli_session_imports_invalid_argument_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("DIDIT_API_KEY", "cli_test_key")
+        exit_code = main(["--json", "session-imports", "create", "--invalid-flag-foo"])
+        assert exit_code == 2
+        out, _ = capsys.readouterr()
+        data = json.loads(out)
+        assert data["status"] == "error"
+        assert data["error"]["code"] == "INVALID_ARGUMENT"
