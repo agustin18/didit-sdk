@@ -5,7 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-17
+
+### Added
+- **Session Imports API (`client.session_imports` / `async_client.session_imports`):**
+  - Full support for Didit Session Imports API: `POST /v3/session/imports/`, `GET /v3/session/imports/{importId}/`, `GET /v3/session/imports/{importId}/errors/`, and `GET /v3/session/imports/template/`.
+  - Supports both local file multipart streaming uploads up to 25 MB and remote HTTPS URL ingestion (`source_file_url`).
+  - Strict enum typing: `SessionImportType` (`user_verification`, `status_rules`, `transactions`), `SessionImportFormat` (`csv`, `ndjson`), and `SessionImportStatus` (`PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELLED`).
+  - Privacy safeguards: `raw_row` is excluded from standard `__repr__` / `__str__` and masked to `"[REDACTED]"` in `SessionImportError.redacted_dump()` and `SessionImportErrorPage.redacted_dump()`.
+  - Full offline simulation parity across `SimulatedDidit` and `SimulatedAsyncDidit` (`SimulatedSessionImportsResource`).
+  - Production CLI subcommands: `didit session-imports create`, `get`, `errors`, and `template`.
+- **Standalone Risk Assessment APIs (`client.risk` / `async_client.risk`):**
+  - Direct access to Didit's standalone intelligence and risk analysis endpoints: `client.risk.email()`, `client.risk.phone()`, and `client.risk.ip()`.
+  - Strongly typed domain models: `EmailRiskRequest`, `EmailRiskResponse`, `PhoneRiskRequest`, `PhoneRiskResponse`, `IPRiskRequest`, `IPRiskResponse`, and `RiskSignals`.
+  - Privacy and geolocation hardening: allowlist-based redaction in `redacted_dump()` masking email addresses, phone numbers, IP addresses, sub-matches (`matches[]`), and social media profiles (`email_social`, `phone_social`), while stripping precise GPS coordinates (`latitude`, `longitude`).
+  - Production CLI commands: `didit risk email`, `phone`, and `ip`.
+  - High-fidelity offline simulation: `SimulatedRiskResource` and `SimulatedAsyncRiskResource`.
+- **Root Transport & System Health Check (`client.healthcheck()` / `async_client.healthcheck()`):**
+  - Fast unauthenticated diagnostic probe against `/system/healthcheck/` returning typed `HealthcheckResponse`.
+  - Enhanced HTTP transport layer in `_resolve_url()` correctly handling root-level paths (`/system/`, `/v1/`) without prefix duplication.
+  - Hardened transport redirects (`follow_redirects=False`) across diagnostic CLI probes (`didit doctor`, `didit sandbox scenarios`).
+- **Crash-Resilient Webhook Dedup LRU & Eviction Protection:**
+  - Eviction support in `InMemoryWebhookDedupStore` with `evict_on_saturation` flag to prevent saturation failures without Redis.
+  - Explicit immediate transition to `ReservationState.COMPLETED` in `InMemoryWebhookReservationStore.claim()` for seamless backward compatibility.
+
 ## [0.3.0] - 2026-10-01
+
 
 ### Added
 - **Direct-to-Disk PDF Report Download (`sessions.download_pdf_report()` / `sessions.adownload_pdf_report()`):**

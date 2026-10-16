@@ -9,7 +9,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, BinaryIO, Literal
 
 from didit.errors import (
     DiditAPIError,
@@ -34,6 +34,9 @@ from didit.models.enums import (
     CallbackMethod,
     Language,
     ManualSessionStatus,
+    SessionImportFormat,
+    SessionImportStatus,
+    SessionImportType,
     SessionStatus,
 )
 from didit.models.health import HealthcheckResponse
@@ -57,6 +60,11 @@ from didit.models.session import (
     SessionResponse,
     SessionStateSource,
     UpdateSessionStatusResponse,
+)
+from didit.models.session_imports import (
+    SessionImportError,
+    SessionImportErrorPage,
+    SessionImportJob,
 )
 from didit.resources.sessions import (
     _normalize_nodes_to_resubmit,
@@ -91,6 +99,8 @@ class _SimulatedStorage:
         self.sessions: dict[str, SessionResponse] = {}
         self.decisions: dict[str, DecisionResponse] = {}
         self.created_at: dict[str, float] = {}
+        self.import_jobs: dict[str, SessionImportJob] = {}
+        self.import_errors: dict[str, list[SessionImportError]] = {}
 
     def create(
         self,
@@ -1303,7 +1313,7 @@ class SimulatedRiskResource:
         country_code: str | None = None,
         signals: RiskSignals | dict[str, Any] | None = None,
         vendor_data: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        metadata: JsonValue | None = None,
         enable_social: bool = False,
         options: RequestOptions | None = None,
     ) -> EmailRiskResponse:
@@ -1340,7 +1350,7 @@ class SimulatedRiskResource:
         country_code: str | None = None,
         signals: RiskSignals | dict[str, Any] | None = None,
         vendor_data: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        metadata: JsonValue | None = None,
         enable_social: bool = False,
         options: RequestOptions | None = None,
     ) -> PhoneRiskResponse:
@@ -1380,7 +1390,7 @@ class SimulatedRiskResource:
         claimed_country: str | None = None,
         user_agent: str | None = None,
         vendor_data: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        metadata: JsonValue | None = None,
         options: RequestOptions | None = None,
     ) -> IPRiskResponse:
         """Simulate IP risk scoring."""
@@ -1420,7 +1430,7 @@ class SimulatedAsyncRiskResource:
         country_code: str | None = None,
         signals: RiskSignals | dict[str, Any] | None = None,
         vendor_data: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        metadata: JsonValue | None = None,
         enable_social: bool = False,
         options: RequestOptions | None = None,
     ) -> EmailRiskResponse:
@@ -1442,7 +1452,7 @@ class SimulatedAsyncRiskResource:
         country_code: str | None = None,
         signals: RiskSignals | dict[str, Any] | None = None,
         vendor_data: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        metadata: JsonValue | None = None,
         enable_social: bool = False,
         options: RequestOptions | None = None,
     ) -> PhoneRiskResponse:
@@ -1464,7 +1474,7 @@ class SimulatedAsyncRiskResource:
         claimed_country: str | None = None,
         user_agent: str | None = None,
         vendor_data: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        metadata: JsonValue | None = None,
         options: RequestOptions | None = None,
     ) -> IPRiskResponse:
         """Simulate asynchronous IP risk scoring."""
@@ -1478,6 +1488,232 @@ class SimulatedAsyncRiskResource:
         )
 
 
+class SimulatedSessionImportsResource:
+    """Synchronous simulated Session Imports resource."""
+
+    def __init__(self, storage: _SimulatedStorage) -> None:
+        self._storage = storage
+
+    def create(
+        self,
+        *,
+        import_type: SessionImportType | str = SessionImportType.USER_VERIFICATION,
+        workflow_id: str | None = None,
+        file: str | Path | BinaryIO | bytes | None = None,
+        filename: str | None = None,
+        source_file_url: str | None = None,
+        source_format: SessionImportFormat | str | None = None,
+        options: RequestOptions | None = None,
+    ) -> SessionImportJob:
+        """Simulate creating an import job."""
+        if file is None and not source_file_url:
+            raise ValueError("Provide either 'file' or 'source_file_url'")
+        if file is not None and source_file_url:
+            raise ValueError("Cannot provide both 'file' and 'source_file_url'")
+
+        type_enum = (
+            import_type
+            if isinstance(import_type, SessionImportType)
+            else SessionImportType(str(import_type))
+        )
+        job_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+
+        if source_file_url:
+            clean_url = source_file_url.strip()
+            if not clean_url:
+                raise ValueError("source_file_url must not be empty")
+            src_name = clean_url.split("/")[-1] or "remote_file"
+            fmt = (
+                source_format
+                if isinstance(source_format, SessionImportFormat)
+                else (
+                    SessionImportFormat(str(source_format))
+                    if source_format
+                    else (
+                        SessionImportFormat.NDJSON
+                        if src_name.endswith(".ndjson")
+                        else SessionImportFormat.CSV
+                    )
+                )
+            )
+        else:
+            if isinstance(file, (str, Path)):
+                p = Path(file).resolve()
+                if not p.is_file():
+                    raise FileNotFoundError(f"Import file '{p}' not found")
+                src_name = filename or p.name
+            elif isinstance(file, bytes):
+                src_name = filename or "import.csv"
+            elif file is not None and hasattr(file, "read"):
+                obj_name = getattr(file, "name", None)
+                if isinstance(obj_name, Path):
+                    src_name = filename or obj_name.name
+                elif obj_name:
+                    src_name = filename or str(obj_name)
+                else:
+                    src_name = filename or "import.csv"
+
+            else:
+                raise TypeError(f"Unsupported file type: {type(file).__name__}")
+
+            fmt = (
+                source_format
+                if isinstance(source_format, SessionImportFormat)
+                else (
+                    SessionImportFormat(str(source_format))
+                    if source_format
+                    else (
+                        SessionImportFormat.NDJSON
+                        if src_name.endswith(".ndjson")
+                        else SessionImportFormat.CSV
+                    )
+                )
+            )
+
+        job = SessionImportJob(
+            uuid=job_id,
+            status=SessionImportStatus.COMPLETED,
+            import_type=type_enum,
+            source_format=fmt,
+            source_filename=src_name,
+            total_rows=10,
+            processed_rows=10,
+            checkpoint_row=10,
+            created_count=9,
+            updated_count=0,
+            skipped_count=0,
+            failed_count=1,
+            total_media_bytes=1024,
+            last_error=None,
+            created_at=now,
+            updated_at=now,
+            started_at=now,
+            completed_at=now,
+        )
+        self._storage.import_jobs[job_id] = job
+        self._storage.import_errors[job_id] = [
+            SessionImportError(
+                uuid=str(uuid.uuid4()),
+                row_number=5,
+                external_id="sim_ext_5",
+                error="status: invalid value 'unknown_status'",
+                raw_row={"external_id": "sim_ext_5", "status": "unknown_status"},
+                created_at=now,
+            )
+        ]
+        return job
+
+    def get(
+        self,
+        import_id: str,
+        *,
+        options: RequestOptions | None = None,
+    ) -> SessionImportJob:
+        """Simulate retrieving an import job."""
+        if not import_id or not import_id.strip():
+            raise ValueError("import_id must not be empty")
+        clean_id = import_id.strip()
+        job = self._storage.import_jobs.get(clean_id)
+        if not job:
+            raise DiditNotFoundError(f"Import job '{clean_id}' not found", status_code=404)
+        return job
+
+    def list_errors(
+        self,
+        import_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        options: RequestOptions | None = None,
+    ) -> SessionImportErrorPage:
+        """Simulate listing import errors."""
+        if not import_id or not import_id.strip():
+            raise ValueError("import_id must not be empty")
+        clean_id = import_id.strip()
+        if clean_id not in self._storage.import_jobs:
+            raise DiditNotFoundError(f"Import job '{clean_id}' not found", status_code=404)
+        all_errors = self._storage.import_errors.get(clean_id, [])
+        slice_errors = all_errors[offset : offset + limit]
+        return SessionImportErrorPage(
+            count=len(all_errors),
+            next=None,
+            previous=None,
+            results=slice_errors,
+        )
+
+    def get_template(
+        self,
+        *,
+        import_type: SessionImportType | str = SessionImportType.USER_VERIFICATION,
+        options: RequestOptions | None = None,
+    ) -> str:
+        """Simulate downloading canonical CSV template."""
+        if isinstance(import_type, SessionImportType):
+            type_str = import_type.value
+        else:
+            type_str = str(import_type)
+        return f"external_id,status,created_at,type\n# Template for {type_str}\n"
+
+
+class SimulatedAsyncSessionImportsResource:
+    """Asynchronous simulated Session Imports resource."""
+
+    def __init__(self, sync_imports: SimulatedSessionImportsResource) -> None:
+        self._sync = sync_imports
+
+    async def create(
+        self,
+        *,
+        import_type: SessionImportType | str = SessionImportType.USER_VERIFICATION,
+        workflow_id: str | None = None,
+        file: str | Path | BinaryIO | bytes | None = None,
+        filename: str | None = None,
+        source_file_url: str | None = None,
+        source_format: SessionImportFormat | str | None = None,
+        options: RequestOptions | None = None,
+    ) -> SessionImportJob:
+        """Simulate asynchronously creating an import job."""
+        return self._sync.create(
+            import_type=import_type,
+            workflow_id=workflow_id,
+            file=file,
+            filename=filename,
+            source_file_url=source_file_url,
+            source_format=source_format,
+            options=options,
+        )
+
+    async def get(
+        self,
+        import_id: str,
+        *,
+        options: RequestOptions | None = None,
+    ) -> SessionImportJob:
+        """Simulate asynchronously retrieving an import job."""
+        return self._sync.get(import_id, options=options)
+
+    async def list_errors(
+        self,
+        import_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        options: RequestOptions | None = None,
+    ) -> SessionImportErrorPage:
+        """Simulate asynchronously listing import errors."""
+        return self._sync.list_errors(import_id, limit=limit, offset=offset, options=options)
+
+    async def get_template(
+        self,
+        *,
+        import_type: SessionImportType | str = SessionImportType.USER_VERIFICATION,
+        options: RequestOptions | None = None,
+    ) -> str:
+        """Simulate asynchronously downloading canonical CSV template."""
+        return self._sync.get_template(import_type=import_type, options=options)
+
+
 class SimulatedDidit:
     """Synchronous simulated Didit client."""
 
@@ -1488,6 +1724,7 @@ class SimulatedDidit:
         self._webhook_secret = webhook_secret
         self.sessions = SimulatedSessionsResource(self._storage)
         self.risk = SimulatedRiskResource(self._storage)
+        self.session_imports = SimulatedSessionImportsResource(self._storage)
 
     def approve_session(
         self,
@@ -1564,6 +1801,9 @@ class SimulatedAsyncDidit:
         self._webhook_secret = webhook_secret
         self.sessions = SimulatedAsyncSessionsResource(self._storage)
         self.risk = SimulatedAsyncRiskResource(SimulatedRiskResource(self._storage))
+        self.session_imports = SimulatedAsyncSessionImportsResource(
+            SimulatedSessionImportsResource(self._storage)
+        )
 
     def approve_session(
         self,

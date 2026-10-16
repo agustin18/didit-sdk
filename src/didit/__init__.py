@@ -70,6 +70,9 @@ from didit.models.enums import (
     CallbackMethod,
     Language,
     ManualSessionStatus,
+    SessionImportFormat,
+    SessionImportStatus,
+    SessionImportType,
     SessionStatus,
 )
 from didit.models.health import HealthcheckResponse
@@ -101,8 +104,17 @@ from didit.models.session import (
     UpdateSessionStatusResponse,
     UpdateStatusResponse,
 )
+from didit.models.session_imports import (
+    SessionImportError,
+    SessionImportErrorPage,
+    SessionImportJob,
+)
 from didit.models.webhook import WebhookPayload
 from didit.resources.risk import AsyncRiskResource, RiskResource
+from didit.resources.session_imports import (
+    AsyncSessionImportsResource,
+    SessionImportsResource,
+)
 from didit.simulation import SimulatedAsyncDidit, SimulatedDidit
 from didit.transport import RequestOptions, RetryPolicy
 from didit.webhooks import parse_webhook_payload, verify_webhook_signature
@@ -114,6 +126,7 @@ __all__ = [
     "AsyncRedisWebhookDedupStore",
     "AsyncRedisWebhookReservationStore",
     "AsyncRiskResource",
+    "AsyncSessionImportsResource",
     "AsyncSessionStateSource",
     "AsyncWebhookDedupStore",
     "AsyncWebhookReservationStore",
@@ -176,6 +189,13 @@ __all__ = [
     "ReviewData",
     "RiskResource",
     "RiskSignals",
+    "SessionImportError",
+    "SessionImportErrorPage",
+    "SessionImportFormat",
+    "SessionImportJob",
+    "SessionImportStatus",
+    "SessionImportType",
+    "SessionImportsResource",
     "SessionListItem",
     "SessionListPage",
     "SessionReconciliationReport",

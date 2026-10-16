@@ -14,19 +14,21 @@ Our primary directive is **Veracity Over Speed**: providing verifiable cryptogra
 
 ## 2. Committed 1.x Feature Scope: Verification Sessions & KYC
 
-The 1.x line of `didit-sdk` commits to the following functional domains, distinguishing between capabilities available today and those finalizing in the v0.3.0 milestone:
+The 1.x line of `didit-sdk` commits to the following functional domains, distinguishing between capabilities available today and those finalizing in the v0.4.0 milestone:
 
 | Domain | Supported Capabilities | Milestone Status |
 | :--- | :--- | :--- |
 | **Verification Sessions** | Creation, configuration, metadata attachment, status retrieval, and resilient polling. | Implemented in v0.2.x |
 | **Decisions & Warnings** | Decision retrieval (`get_decision`), risk normalization, multi-warning categorization, and review breakdown. | Implemented in v0.2.x |
 | **Session Lifecycle Actions** | Pure snapshot session reconciliation (`reconcile`, `reconcile_range`), resubmission requests (`resubmit`), and direct-to-disk streaming compliance PDF report generation (`download_pdf_report`). | Implemented in v0.3.0 |
+| **Session Imports API** | Historical verification session, status rules, and transaction data ingestion via multipart streaming upload (up to 25 MB) and remote HTTPS URL (`POST /v3/session/imports/`, `GET /v3/session/imports/{id}/`, `errors/`, `template/`). | Implemented in v0.4.0 |
+| **Standalone Risk APIs** | Direct, unbundled risk intelligence for email (`client.risk.email()`), phone (`client.risk.phone()`), and IP address (`client.risk.ip()`) with strict PII and GPS redaction. | Implemented in v0.4.0 |
 | **Webhook Ingestion** | Constant-time HMAC-SHA256 signature verification, Didit X-Signature-V2 canonical JSON formatting, and anti-replay defense. | Implemented in v0.2.x |
-| **Distributed Deduplication & Leases** | Crash-recoverable Tokenized Webhook Reservation Protocol backed by Redis (Lua CAS atomic leases) and thread-safe memory stores. | Implemented in v0.3.0 |
+| **Distributed Deduplication & Leases** | Crash-recoverable Tokenized Webhook Reservation Protocol backed by Redis (Lua CAS atomic leases) and thread-safe memory stores with LRU eviction. | Implemented in v0.3.0 / v0.4.0 |
 | **Framework Adapters** | First-class, dependency-isolated guards for **FastAPI**, **Django 5.2+**, and **Flask 3.1+**. | Implemented in v0.2.x |
 | **Sandbox & Simulation** | Offline simulation harness (`SimulatedDidit`, `SimulatedAsyncDidit`), live sandbox scenario cataloging (`GET /v1/sandbox/scenarios/`), and test fixture builders. | Implemented in v0.2.x / v0.3.0 |
-| **Security & Privacy** | Automatic PII redaction (`redacted_dump()`), zero-PII safe exceptions by default (`capture_sensitive_response=False`). | Implemented in v0.2.x / v0.3.0 |
-| **Live Contract Testing** | Automated periodic CI testing against live Didit sandbox endpoints with strict fail-closed credentials gate; continuous offline matrix validation. | Implemented in v0.3.0 |
+| **Security & Privacy** | Automatic PII redaction (`redacted_dump()`), zero-PII safe exceptions by default (`capture_sensitive_response=False`). | Implemented in v0.2.x / v0.3.0 / v0.4.0 |
+| **Live Contract Testing** | Automated periodic CI testing against live Didit sandbox endpoints with strict fail-closed credentials gate; continuous offline matrix validation. | Implemented in v0.3.0 / v0.4.0 |
 
 ---
 
@@ -36,13 +38,14 @@ To guarantee long-term API stability (LTS), zero unnecessary dependencies, and 1
 
 - **Didit Business / KYB (Know Your Business):** Company registration checks, ultimate beneficial owner (UBO) structures, and corporate registries.
 - **Consolidated User Management:** Centralized identity profiles, user merging, and persistent cross-session profile storage.
-- **Transactions & Travel Rule:** AML transaction monitoring, crypto-asset transfer compliance, and VASPs messaging.
+- **Ongoing Financial Transactions & Travel Rule:** Real-time AML payment transaction monitoring, crypto-asset transfer compliance, and live VASPs messaging (note: batch file ingestion of historical transactions for KYC session reconciliation is supported via `client.session_imports`).
 - **Payments & Wallets:** Direct on-chain identity binding, token transfers, or payment rail processing.
 
 > [!NOTE]
 > If Didit platform features outside Verification Sessions are needed in your architecture, they should be managed through custom clients or future dedicated packages (`didit-kyb`, `didit-travelrule`). The core `didit-sdk 1.x` contract will remain frozen and protected against non-KYC feature churn.
 
 ---
+
 
 ## 4. API Freeze and Stability Guarantees
 

@@ -448,6 +448,8 @@ class _SyncRequestor:
         path: str,
         *,
         json: Any = None,
+        data: Mapping[str, Any] | None = None,
+        files: Any | None = None,
         params: Mapping[str, Any] | None = None,
         options: RequestOptions | None = None,
     ) -> httpx.Response:
@@ -455,6 +457,7 @@ class _SyncRequestor:
 
         Enforces follow_redirects=False to prevent cross-origin credential leaks.
         Synchronous timeouts enforce socket-level limits and monotonic deadline budgets.
+        Supports application/json, form data, and multipart/form-data file uploads.
         """
         effective_opts = _merge_options(self._default_options, options)
         url = _resolve_url(self._base_url, path)
@@ -469,6 +472,8 @@ class _SyncRequestor:
                 method=method,
                 url=url,
                 json=json,
+                data=data,
+                files=files,
                 params=params,
                 headers=headers,
                 timeout=eff_to,
@@ -834,6 +839,8 @@ class _AsyncRequestor:
         path: str,
         *,
         json: Any = None,
+        data: Mapping[str, Any] | None = None,
+        files: Any | None = None,
         params: Mapping[str, Any] | None = None,
         options: RequestOptions | None = None,
     ) -> httpx.Response:
@@ -842,6 +849,7 @@ class _AsyncRequestor:
         Enforces follow_redirects=False to prevent cross-origin credential leaks,
         and applies an outer wall-clock timeout via asyncio.wait_for to prevent slow-drip
         transmission attacks.
+        Supports application/json, form data, and multipart/form-data file uploads.
         """
         effective_opts = _merge_options(self._default_options, options)
         url = _resolve_url(self._base_url, path)
@@ -856,6 +864,8 @@ class _AsyncRequestor:
                 method=method,
                 url=url,
                 json=json,
+                data=data,
+                files=files,
                 params=params,
                 headers=headers,
                 timeout=eff_to,

@@ -69,6 +69,13 @@ def test_live_upstream_supported_paths_exist(live_openapi_spec: dict[str, Any]) 
         "/v3/session/{sessionId}/generate-pdf/": "get",
         "/v3/session/{sessionId}/sandbox/arm/": "post",
         "/system/healthcheck": "get",
+        "/v3/email/risk/": "post",
+        "/v3/phone/risk/": "post",
+        "/v3/ip/risk/": "post",
+        "/v3/session/imports/": "post",
+        "/v3/session/imports/{importId}/": "get",
+        "/v3/session/imports/{importId}/errors/": "get",
+        "/v3/session/imports/template/": "get",
     }
 
     for path, method in expected_endpoints.items():
