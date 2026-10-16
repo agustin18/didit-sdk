@@ -101,6 +101,15 @@ class TestInMemoryDedupStore:
         with pytest.raises(DiditDedupSaturationError, match="reached saturation"):
             store.claim("evt_4", ttl_seconds=20)
 
+    def test_saturation_with_evict_on_saturation_true(self) -> None:
+        store = InMemoryWebhookDedupStore(max_entries=2, evict_on_saturation=True)
+        assert store.claim("evt_1", ttl_seconds=60) is True
+        assert store.claim("evt_2", ttl_seconds=60) is True
+        # Both unexpired, capacity is 2. Adding evt_3 evicts evt_1 (LRU)
+        assert store.claim("evt_3", ttl_seconds=60) is True
+        # evt_1 was evicted, so claiming it again succeeds
+        assert store.claim("evt_1", ttl_seconds=60) is True
+
     def test_thread_safety_concurrent_claims(self) -> None:
         store = InMemoryWebhookDedupStore(max_entries=500)
         key = "evt_concurrent"
@@ -684,6 +693,18 @@ class TestInMemoryReservationStore:
         assert await store2.aclaim("legacy_async", ttl_seconds=30) is False
         await store2.arelease_claim("legacy_async")
         assert await store2.aclaim("legacy_async", ttl_seconds=30) is True
+
+    def test_claim_backward_compatibility_eviction_on_saturation(self) -> None:
+        store = InMemoryWebhookReservationStore(max_entries=3)
+        assert store.claim("c1", ttl_seconds=86400) is True
+        assert store.claim("c2", ttl_seconds=86400) is True
+        assert store.claim("c3", ttl_seconds=86400) is True
+        # Duplicate claims return False
+        assert store.claim("c1", ttl_seconds=86400) is False
+        # Store is full with 3 completed claims. Adding c4 evicts c1 (the oldest completed)
+        assert store.claim("c4", ttl_seconds=86400) is True
+        # c1 was evicted, so claiming c1 again succeeds
+        assert store.claim("c1", ttl_seconds=86400) is True
 
 
 class TestRedisReservationStore:

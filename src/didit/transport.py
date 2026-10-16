@@ -132,7 +132,7 @@ def _resolve_url(base_url: str, path: str) -> str:
                 f"does not match base origin {base_url!r}"
             )
         return path
-    if path.startswith("/system/"):
+    if path.startswith(("/system/", "/v1/")):
         base_parts = urlsplit(base_url)
         origin = f"{base_parts.scheme}://{base_parts.netloc}"
         clean_path = path.lstrip("/")

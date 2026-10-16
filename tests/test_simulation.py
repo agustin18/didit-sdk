@@ -863,3 +863,18 @@ class TestSimulatedAsyncDidit:
 
         with pytest.raises(ValueError, match="Invalid manual status transition"):
             await client.sessions.update_status(s.session_id, "In Review")
+
+    def test_simulated_healthcheck(self) -> None:
+        client = SimulatedDidit()
+        resp = client.healthcheck()
+        assert resp.status == "ok"
+        assert resp.is_healthy is True
+        assert resp.timestamp is not None
+
+    @pytest.mark.asyncio
+    async def test_async_simulated_healthcheck(self) -> None:
+        client = SimulatedAsyncDidit()
+        resp = await client.healthcheck()
+        assert resp.status == "ok"
+        assert resp.is_healthy is True
+        assert resp.timestamp is not None
