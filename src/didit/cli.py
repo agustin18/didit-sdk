@@ -751,15 +751,12 @@ def _cmd_risk_email(args: argparse.Namespace) -> int:
     is_json = getattr(args, "json", False)
     include_sensitive = getattr(args, "include_sensitive", False)
     client = _get_client(args)
-    try:
-        resp = client.risk.email(
-            args.email,
-            country_code=getattr(args, "country_code", None),
-            vendor_data=getattr(args, "vendor_data", None),
-            enable_social=getattr(args, "enable_social", False),
-        )
-    except Exception as exc:
-        return _emit_error("API_ERROR", str(exc), is_json=is_json)
+    resp = client.risk.email(
+        args.email,
+        country_code=getattr(args, "country_code", None),
+        vendor_data=getattr(args, "vendor_data", None),
+        enable_social=getattr(args, "enable_social", False),
+    )
 
     if is_json:
         dump = resp.model_dump() if include_sensitive else resp.redacted_dump()
@@ -789,15 +786,12 @@ def _cmd_risk_phone(args: argparse.Namespace) -> int:
     is_json = getattr(args, "json", False)
     include_sensitive = getattr(args, "include_sensitive", False)
     client = _get_client(args)
-    try:
-        resp = client.risk.phone(
-            args.phone_number,
-            country_code=getattr(args, "country_code", None),
-            vendor_data=getattr(args, "vendor_data", None),
-            enable_social=getattr(args, "enable_social", False),
-        )
-    except Exception as exc:
-        return _emit_error("API_ERROR", str(exc), is_json=is_json)
+    resp = client.risk.phone(
+        args.phone_number,
+        country_code=getattr(args, "country_code", None),
+        vendor_data=getattr(args, "vendor_data", None),
+        enable_social=getattr(args, "enable_social", False),
+    )
 
     if is_json:
         dump = resp.model_dump() if include_sensitive else resp.redacted_dump()
@@ -832,15 +826,12 @@ def _cmd_risk_ip(args: argparse.Namespace) -> int:
     is_json = getattr(args, "json", False)
     include_sensitive = getattr(args, "include_sensitive", False)
     client = _get_client(args)
-    try:
-        resp = client.risk.ip(
-            args.ip_address,
-            claimed_country=getattr(args, "claimed_country", None),
-            user_agent=getattr(args, "user_agent", None),
-            vendor_data=getattr(args, "vendor_data", None),
-        )
-    except Exception as exc:
-        return _emit_error("API_ERROR", str(exc), is_json=is_json)
+    resp = client.risk.ip(
+        args.ip_address,
+        claimed_country=getattr(args, "claimed_country", None),
+        user_agent=getattr(args, "user_agent", None),
+        vendor_data=getattr(args, "vendor_data", None),
+    )
 
     if is_json:
         dump = resp.model_dump() if include_sensitive else resp.redacted_dump()
@@ -1197,6 +1188,8 @@ def main(argv: list[str] | None = None) -> int:
         return _emit_error("CONNECTION_ERROR", str(exc), is_json=is_json)
     except DiditSignatureError as exc:
         return _emit_error("SIGNATURE_VERIFICATION_FAILED", str(exc), is_json=is_json)
+    except DiditAPIError as exc:
+        return _emit_error("API_ERROR", str(exc), is_json=is_json)
     except Exception:
         if debug:
             traceback.print_exc(file=sys.stderr)

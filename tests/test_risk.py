@@ -107,6 +107,7 @@ class TestRiskModels:
             status="Approved",
             created_at="2026-10-16T12:00:00Z",
             vendor_data="lead-999",
+            metadata="custom-str-metadata",
             email={
                 "status": "Approved",
                 "email": "alice@example.com",
@@ -114,13 +115,42 @@ class TestRiskModels:
                 "breaches": [{"name": "breach_1"}],
                 "is_disposable": False,
                 "is_undeliverable": False,
+                "matches": [
+                    {"email": "alice@example.com", "vendor_data": "lead-old"},
+                    {"email": None},
+                ],
+                "email_social": {"profiles_registered": 2, "details": "secret"},
+                "enrichment": {"score": 42.5},
             },
+            email_social={"top_level": "secret_social"},
         )
         assert resp.is_approved is True
         assert resp.is_breached is True
         assert resp.is_disposable is False
         assert resp.is_undeliverable is False
         assert resp.request_id == "req-email-123"
+        assert resp.metadata == "custom-str-metadata"
+        assert resp.score == 42.5
+        assert resp.enrichment == {"score": 42.5}
+
+        # Test fallback to email_intelligence when enrichment absent
+        resp_fallback = EmailRiskResponse(
+            request_id="req-fb",
+            status="Approved",
+            created_at="2026-10-16T12:00:00Z",
+            email={"email_intelligence": {"score": 88}},
+        )
+        assert resp_fallback.score == 88.0
+        assert resp_fallback.enrichment == {"score": 88}
+
+        resp_no_enrich = EmailRiskResponse(
+            request_id="req-none",
+            status="Approved",
+            created_at="2026-10-16T12:00:00Z",
+            email={},
+        )
+        assert resp_no_enrich.score is None
+        assert resp_no_enrich.enrichment is None
 
         repr_resp = repr(resp)
         assert "alice@example.com" not in repr_resp
@@ -129,20 +159,70 @@ class TestRiskModels:
         redacted_resp = resp.redacted_dump()
         assert redacted_resp["status"] == "Approved"
         assert redacted_resp["email"]["email"] == "a***e@example.com"
+        assert redacted_resp["email"]["matches"][0]["email"] == "a***e@example.com"
+        assert redacted_resp["email"]["matches"][1]["email"] is None
+        assert redacted_resp["email"]["email_social"] == "[REDACTED]"
+        assert redacted_resp["email_social"] == "[REDACTED]"
+
+        # Test raw dict signals in EmailRiskRequest
+        # (e.g. via model_construct or untyped deserialization)
+        req_dict_signals = EmailRiskRequest.model_construct(
+            email="alice@example.com",
+            signals={"ip": "1.2.3.4", "device_id": "device-12345678", "extra": "val"},
+        )
+        redacted_req_dict = req_dict_signals.redacted_dump()
+        assert redacted_req_dict["signals"]["ip"] == "1.2.*.*"
+        assert redacted_req_dict["signals"]["device_id"] == "dev***78"
+        assert redacted_req_dict["signals"]["extra"] == "val"
+
+        # Test non-numeric score returns None
+        resp_bad_score = EmailRiskResponse(
+            request_id="r-bad",
+            status="Approved",
+            created_at="now",
+            email={"enrichment": {"score": "not_a_number"}},
+        )
+        assert resp_bad_score.score is None
+
+        # Test dict signals without ip or device_id
+        req_dict_empty = EmailRiskRequest.model_construct(
+            email="alice@example.com", signals={"other": 123}
+        )
+        assert req_dict_empty.redacted_dump()["signals"] == {"other": 123}
 
     def test_phone_risk_models(self) -> None:
         req = PhoneRiskRequest(
             phone_number="+14155552671",
             country_code="US",
             vendor_data="lead-555",
+            metadata=[1, 2, 3],
             enable_social=True,
         )
         assert req.phone_number == "+14155552671"
         assert "+14155552671" not in repr(req)
         assert "+14***71" in repr(req)
+        assert req.metadata == [1, 2, 3]
 
         redacted_req = req.redacted_dump()
         assert redacted_req["phone_number"] == "+14***71"
+
+        # Raw dict signals in PhoneRiskRequest
+        phone_req_dict = PhoneRiskRequest.model_construct(
+            phone_number="+14155552671",
+            signals={"ip": "192.168.1.1", "device_id": "short"},
+        )
+        redacted_phone_dict = phone_req_dict.redacted_dump()
+        assert redacted_phone_dict["signals"]["ip"] == "192.168.*.*"
+        assert redacted_phone_dict["signals"]["device_id"] == "***"
+
+        # Test non-numeric score returns None in phone
+        phone_bad_score = PhoneRiskResponse(
+            request_id="r-bad-p",
+            status="Approved",
+            created_at="now",
+            phone={"enrichment": {"score": "invalid"}},
+        )
+        assert phone_bad_score.score is None
 
         # Response model
         resp = PhoneRiskResponse(
@@ -156,12 +236,39 @@ class TestRiskModels:
                 "is_disposable": False,
                 "is_virtual": False,
                 "carrier": {"name": "Verizon", "type": "mobile"},
+                "matches": [
+                    {"phone_number": "+14155552671"},
+                    {"phone_number": None},
+                ],
+                "phone_social": {"profiles_registered": 1},
+                "enrichment": {"score": 15.0},
             },
+            phone_social={"raw": "details"},
         )
         assert resp.is_approved is True
         assert resp.is_disposable is False
         assert resp.is_virtual is False
         assert resp.carrier_name == "Verizon"
+        assert resp.score == 15.0
+        assert resp.enrichment == {"score": 15.0}
+
+        resp_phone_fb = PhoneRiskResponse(
+            request_id="r-phone-fb",
+            status="Approved",
+            created_at="2026-10-16T12:00:00Z",
+            phone={"phone_intelligence": {"score": 33}},
+        )
+        assert resp_phone_fb.score == 33.0
+        assert resp_phone_fb.enrichment == {"score": 33}
+
+        resp_phone_empty = PhoneRiskResponse(
+            request_id="r-phone-empty",
+            status="Approved",
+            created_at="2026-10-16T12:00:00Z",
+            phone={},
+        )
+        assert resp_phone_empty.score is None
+        assert resp_phone_empty.enrichment is None
 
         repr_resp = repr(resp)
         assert "+14155552671" not in repr_resp
@@ -169,14 +276,21 @@ class TestRiskModels:
         redacted_resp = resp.redacted_dump()
         assert redacted_resp["status"] == "Approved"
         assert redacted_resp["phone"]["full_number"] == "+14***71"
+        assert redacted_resp["phone"]["phone_number"] == "415***71"
+        assert redacted_resp["phone"]["matches"][0]["phone_number"] == "+14***71"
+        assert redacted_resp["phone"]["matches"][1]["phone_number"] is None
+        assert redacted_resp["phone"]["phone_social"] == "[REDACTED]"
+        assert redacted_resp["phone_social"] == "[REDACTED]"
 
     def test_ip_risk_models(self) -> None:
         req = IPRiskRequest(
             ip_address="8.8.8.8",
             claimed_country="ESP",
             user_agent="Mozilla/5.0",
+            metadata=12345,
         )
         assert req.ip_address == "8.8.8.8"
+        assert req.metadata == 12345
         assert "8.8.8.8" not in repr(req)
 
         redacted_req = req.redacted_dump()
@@ -192,6 +306,8 @@ class TestRiskModels:
                 "status": "In Review",
                 "ip_address": "8.8.8.8",
                 "ip_country_code": "USA",
+                "latitude": 37.386,
+                "longitude": -122.0838,
                 "is_vpn_or_tor": True,
                 "is_data_center": True,
                 "country_mismatch": True,
@@ -210,6 +326,8 @@ class TestRiskModels:
         redacted_resp = resp.redacted_dump()
         assert redacted_resp["status"] == "In Review"
         assert redacted_resp["ip"]["ip_address"] == "8.8.*.*"
+        assert "latitude" not in redacted_resp["ip"]
+        assert "longitude" not in redacted_resp["ip"]
 
     def test_masking_edge_cases(self) -> None:
         from didit.models.risk import _mask_email, _mask_ip, _mask_phone
@@ -573,6 +691,21 @@ class TestRiskCLI:
         assert exit_code_json == 1
         out_json, _ = capsys.readouterr()
         assert "API_ERROR" in out_json
+
+    @respx.mock
+    def test_cli_risk_domain_exceptions_bubble(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], base_url: str
+    ) -> None:
+        monkeypatch.setenv("DIDIT_API_KEY", "cli_test_key")
+        # 403 maps to DiditPermissionError -> PERMISSION_DENIED
+        respx.post(f"{base_url}/email/risk/").respond(
+            403,
+            json={"error": "permission_denied", "message": "Risk API feature disabled"},
+        )
+        exit_code = main(["--json", "risk", "email", "test@example.com"])
+        assert exit_code == 1
+        out, _ = capsys.readouterr()
+        assert "PERMISSION_DENIED" in out
 
     @respx.mock
     def test_cli_risk_phone_api_error_and_json(

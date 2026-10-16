@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 
 def _mask_email(email: str | None) -> str | None:
@@ -57,6 +57,16 @@ def _mask_device_id(device_id: str | None) -> str | None:
     if len(cleaned) <= 6:
         return "***"
     return f"{cleaned[:3]}***{cleaned[-2:]}"
+
+
+def _mask_signals_dict(signals_dict: dict[str, Any]) -> dict[str, Any]:
+    """Mask IP and device_id in a raw signals dictionary."""
+    data = dict(signals_dict)
+    if "ip" in data and data["ip"] is not None:
+        data["ip"] = _mask_ip(str(data["ip"]))
+    if "device_id" in data and data["device_id"] is not None:
+        data["device_id"] = _mask_device_id(str(data["device_id"]))
+    return data
 
 
 class RiskSignals(BaseModel):
@@ -114,7 +124,7 @@ class EmailRiskRequest(BaseModel):
     vendor_data: str | None = Field(
         default=None, description="Stable external reference identifier"
     )
-    metadata: dict[str, Any] | None = Field(
+    metadata: JsonValue | None = Field(
         default=None, description="Optional non-sensitive customer metadata"
     )
     enable_social: bool = Field(
@@ -131,11 +141,13 @@ class EmailRiskRequest(BaseModel):
     __str__ = __repr__
 
     def redacted_dump(self) -> dict[str, Any]:
-        """Privacy-safe dictionary dump with email address masked."""
+        """Privacy-safe dictionary dump with email address and signals masked."""
         data = self.model_dump()
         data["email"] = _mask_email(self.email)
         if isinstance(self.signals, RiskSignals):
             data["signals"] = self.signals.redacted_dump()
+        elif isinstance(data.get("signals"), dict):
+            data["signals"] = _mask_signals_dict(data["signals"])
         return data
 
 
@@ -148,7 +160,7 @@ class EmailRiskResponse(BaseModel):
     status: str = Field(..., description="Final decision outcome (Approved, In Review, Declined)")
     created_at: str = Field(..., description="ISO 8601 timestamp of evaluation")
     vendor_data: str | None = Field(default=None, description="Echo of provided vendor_data")
-    metadata: dict[str, Any] | None = Field(default=None, description="Echo of provided metadata")
+    metadata: JsonValue | None = Field(default=None, description="Echo of provided metadata")
     email: dict[str, Any] = Field(
         default_factory=dict, description="Detailed email risk intelligence and deliverability"
     )
@@ -173,6 +185,27 @@ class EmailRiskResponse(BaseModel):
         """Return True if address was found undeliverable."""
         return self.email.get("is_undeliverable")
 
+    @property
+    def enrichment(self) -> dict[str, Any] | None:
+        """Normalized intelligence object (alias of email_intelligence)."""
+        enrich = self.email.get("enrichment")
+        if isinstance(enrich, dict):
+            return enrich
+        intel = self.email.get("email_intelligence")
+        if isinstance(intel, dict):
+            return intel
+        return None
+
+    @property
+    def score(self) -> float | None:
+        """Calculated risk score from enrichment or email intelligence."""
+        enrich = self.enrichment
+        if isinstance(enrich, dict):
+            raw_score = enrich.get("score")
+            if isinstance(raw_score, (int, float)):
+                return float(raw_score)
+        return None
+
     def __repr__(self) -> str:
         return (
             f"EmailRiskResponse(request_id={self.request_id!r}, "
@@ -183,12 +216,21 @@ class EmailRiskResponse(BaseModel):
     __str__ = __repr__
 
     def redacted_dump(self) -> dict[str, Any]:
-        """Privacy-safe dictionary dump redacting email PII."""
+        """Privacy-safe dictionary dump redacting email PII, matches, and social footprint."""
         data = copy.deepcopy(self.model_dump())
         if "email" in data and isinstance(data["email"], dict):
             raw_email = data["email"].get("email")
             if raw_email:
                 data["email"]["email"] = _mask_email(raw_email)
+            matches = data["email"].get("matches")
+            if isinstance(matches, list):
+                for match in matches:
+                    if isinstance(match, dict) and match.get("email"):
+                        match["email"] = _mask_email(match["email"])
+            if "email_social" in data["email"]:
+                data["email"]["email_social"] = "[REDACTED]"
+        if "email_social" in data:
+            data["email_social"] = "[REDACTED]"
         return data
 
 
@@ -207,7 +249,7 @@ class PhoneRiskRequest(BaseModel):
     vendor_data: str | None = Field(
         default=None, description="Stable external reference identifier"
     )
-    metadata: dict[str, Any] | None = Field(
+    metadata: JsonValue | None = Field(
         default=None, description="Optional non-sensitive customer metadata"
     )
     enable_social: bool = Field(
@@ -224,11 +266,13 @@ class PhoneRiskRequest(BaseModel):
     __str__ = __repr__
 
     def redacted_dump(self) -> dict[str, Any]:
-        """Privacy-safe dictionary dump with phone number masked."""
+        """Privacy-safe dictionary dump with phone number and signals masked."""
         data = self.model_dump()
         data["phone_number"] = _mask_phone(self.phone_number)
         if isinstance(self.signals, RiskSignals):
             data["signals"] = self.signals.redacted_dump()
+        elif isinstance(data.get("signals"), dict):
+            data["signals"] = _mask_signals_dict(data["signals"])
         return data
 
 
@@ -241,7 +285,7 @@ class PhoneRiskResponse(BaseModel):
     status: str = Field(..., description="Final decision outcome (Approved, In Review, Declined)")
     created_at: str = Field(..., description="ISO 8601 timestamp of evaluation")
     vendor_data: str | None = Field(default=None, description="Echo of provided vendor_data")
-    metadata: dict[str, Any] | None = Field(default=None, description="Echo of provided metadata")
+    metadata: JsonValue | None = Field(default=None, description="Echo of provided metadata")
     phone: dict[str, Any] = Field(
         default_factory=dict, description="Detailed phone risk intelligence, carrier, and line type"
     )
@@ -269,6 +313,27 @@ class PhoneRiskResponse(BaseModel):
             return carrier.get("name")
         return None
 
+    @property
+    def enrichment(self) -> dict[str, Any] | None:
+        """Normalized intelligence object (alias of phone_intelligence)."""
+        enrich = self.phone.get("enrichment")
+        if isinstance(enrich, dict):
+            return enrich
+        intel = self.phone.get("phone_intelligence")
+        if isinstance(intel, dict):
+            return intel
+        return None
+
+    @property
+    def score(self) -> float | None:
+        """Calculated risk score from enrichment or phone intelligence."""
+        enrich = self.enrichment
+        if isinstance(enrich, dict):
+            raw_score = enrich.get("score")
+            if isinstance(raw_score, (int, float)):
+                return float(raw_score)
+        return None
+
     def __repr__(self) -> str:
         return (
             f"PhoneRiskResponse(request_id={self.request_id!r}, "
@@ -279,7 +344,7 @@ class PhoneRiskResponse(BaseModel):
     __str__ = __repr__
 
     def redacted_dump(self) -> dict[str, Any]:
-        """Privacy-safe dictionary dump redacting phone PII."""
+        """Privacy-safe dictionary dump redacting phone PII, matches, and social footprint."""
         data = copy.deepcopy(self.model_dump())
         if "phone" in data and isinstance(data["phone"], dict):
             raw_phone = data["phone"].get("phone_number")
@@ -288,6 +353,15 @@ class PhoneRiskResponse(BaseModel):
             full_phone = data["phone"].get("full_number")
             if full_phone:
                 data["phone"]["full_number"] = _mask_phone(full_phone)
+            matches = data["phone"].get("matches")
+            if isinstance(matches, list):
+                for match in matches:
+                    if isinstance(match, dict) and match.get("phone_number"):
+                        match["phone_number"] = _mask_phone(match["phone_number"])
+            if "phone_social" in data["phone"]:
+                data["phone"]["phone_social"] = "[REDACTED]"
+        if "phone_social" in data:
+            data["phone_social"] = "[REDACTED]"
         return data
 
 
@@ -306,7 +380,7 @@ class IPRiskRequest(BaseModel):
     vendor_data: str | None = Field(
         default=None, description="Stable external reference identifier"
     )
-    metadata: dict[str, Any] | None = Field(
+    metadata: JsonValue | None = Field(
         default=None, description="Optional non-sensitive customer metadata"
     )
 
@@ -334,7 +408,7 @@ class IPRiskResponse(BaseModel):
     status: str = Field(..., description="Final decision outcome (Approved or In Review)")
     created_at: str = Field(..., description="ISO 8601 timestamp of evaluation")
     vendor_data: str | None = Field(default=None, description="Echo of provided vendor_data")
-    metadata: dict[str, Any] | None = Field(default=None, description="Echo of provided metadata")
+    metadata: JsonValue | None = Field(default=None, description="Echo of provided metadata")
     ip: dict[str, Any] = Field(
         default_factory=dict, description="Detailed IP geolocation, ASN, and threat analysis"
     )
@@ -374,10 +448,12 @@ class IPRiskResponse(BaseModel):
     __str__ = __repr__
 
     def redacted_dump(self) -> dict[str, Any]:
-        """Privacy-safe dictionary dump redacting IP address."""
+        """Privacy-safe dictionary dump redacting IP address and precise GPS coordinates."""
         data = copy.deepcopy(self.model_dump())
         if "ip" in data and isinstance(data["ip"], dict):
             raw_ip = data["ip"].get("ip_address")
             if raw_ip:
                 data["ip"]["ip_address"] = _mask_ip(raw_ip)
+            data["ip"].pop("latitude", None)
+            data["ip"].pop("longitude", None)
         return data

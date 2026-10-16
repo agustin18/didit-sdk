@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from pydantic import JsonValue
+
 from didit.events import DiditEventSink
 from didit.models.risk import (
     EmailRiskResponse,
@@ -55,7 +57,7 @@ class RiskResource:
         country_code: str | None = None,
         signals: RiskSignals | dict[str, Any] | None = None,
         vendor_data: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        metadata: JsonValue | None = None,
         enable_social: bool = False,
         options: RequestOptions | None = None,
     ) -> EmailRiskResponse:
@@ -91,7 +93,7 @@ class RiskResource:
         country_code: str | None = None,
         signals: RiskSignals | dict[str, Any] | None = None,
         vendor_data: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        metadata: JsonValue | None = None,
         enable_social: bool = False,
         options: RequestOptions | None = None,
     ) -> PhoneRiskResponse:
@@ -127,7 +129,7 @@ class RiskResource:
         claimed_country: str | None = None,
         user_agent: str | None = None,
         vendor_data: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        metadata: JsonValue | None = None,
         options: RequestOptions | None = None,
     ) -> IPRiskResponse:
         """Perform standalone risk scoring and threat analysis for an IP address."""
@@ -181,7 +183,7 @@ class AsyncRiskResource:
         country_code: str | None = None,
         signals: RiskSignals | dict[str, Any] | None = None,
         vendor_data: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        metadata: JsonValue | None = None,
         enable_social: bool = False,
         options: RequestOptions | None = None,
     ) -> EmailRiskResponse:
@@ -217,7 +219,7 @@ class AsyncRiskResource:
         country_code: str | None = None,
         signals: RiskSignals | dict[str, Any] | None = None,
         vendor_data: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        metadata: JsonValue | None = None,
         enable_social: bool = False,
         options: RequestOptions | None = None,
     ) -> PhoneRiskResponse:
@@ -253,7 +255,7 @@ class AsyncRiskResource:
         claimed_country: str | None = None,
         user_agent: str | None = None,
         vendor_data: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        metadata: JsonValue | None = None,
         options: RequestOptions | None = None,
     ) -> IPRiskResponse:
         """Asynchronously perform standalone risk scoring and threat analysis for an IP address."""
