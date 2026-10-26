@@ -14,7 +14,7 @@ Execution:
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -30,6 +30,23 @@ from didit.models.session import ResubmitFeature
 LIVE_OPENAPI_URL = "https://docs.didit.me/openapi-25.json"
 
 
+def _resolve_ref(spec: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    """Resolve local JSON Schema references used by the live upstream spec."""
+    seen: set[str] = set()
+    while "$ref" in schema:
+        ref = schema["$ref"]
+        if not isinstance(ref, str) or not ref.startswith("#/") or ref in seen:
+            break
+        seen.add(ref)
+        target: Any = spec
+        for part in ref[2:].split("/"):
+            target = target[part.replace("~1", "/").replace("~0", "~")]
+        if not isinstance(target, dict):
+            break
+        schema = cast(dict[str, Any], target)
+    return schema
+
+
 @pytest.fixture(scope="module")
 def live_openapi_spec() -> dict[str, Any]:
     """Fetch live Didit OpenAPI specification from official docs URL."""
@@ -42,11 +59,27 @@ def live_openapi_spec() -> dict[str, Any]:
     try:
         resp = httpx.get(LIVE_OPENAPI_URL, timeout=30.0, follow_redirects=True)
         resp.raise_for_status()
-        return resp.json()
+        return cast(dict[str, Any], resp.json())
     except Exception as exc:
         pytest.fail(
             f"Failed to fetch live Didit OpenAPI specification from {LIVE_OPENAPI_URL}: {exc}"
         )
+
+
+def test_resolve_ref_follows_local_reference() -> None:
+    spec = {
+        "components": {
+            "schemas": {
+                "SessionDecision": {
+                    "properties": {"status": {"enum": ["Approved"]}},
+                }
+            }
+        }
+    }
+    assert (
+        _resolve_ref(spec, {"$ref": "#/components/schemas/SessionDecision"})
+        == spec["components"]["schemas"]["SessionDecision"]
+    )
 
 
 def test_live_upstream_spec_metadata(live_openapi_spec: dict[str, Any]) -> None:
@@ -137,6 +170,7 @@ def test_live_upstream_decision_status_enum(live_openapi_spec: dict[str, Any]) -
         "content"
     ]["application/json"]["schema"]
 
+    decision_schema = _resolve_ref(live_openapi_spec, decision_schema)
     upstream_statuses = set(decision_schema["properties"]["status"]["enum"])
     sdk_statuses = {s.value for s in SessionStatus}
     assert sdk_statuses == upstream_statuses, (
