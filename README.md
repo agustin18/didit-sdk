@@ -1,13 +1,14 @@
 # didit-sdk
 
+> [!IMPORTANT]
+> This repository contains the community 0.x line of `didit-sdk` (0.1.0-0.4.0). The official SDK is now maintained by Didit at https://github.com/didit-protocol/sdk-python. `pip install didit-sdk` now installs the official 1.x line. The 0.x releases remain available on PyPI for historical reference.
+
 [![CI](https://github.com/agustin18/didit-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/agustin18/didit-sdk/actions/workflows/ci.yml)
-[![PyPI version](https://img.shields.io/pypi/v/didit-sdk.svg)](https://pypi.org/project/didit-sdk/)
-[![Python versions](https://img.shields.io/pypi/pyversions/didit-sdk.svg)](https://pypi.org/project/didit-sdk/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Checked with mypy](https://img.shields.io/badge/mypy-strict-blue)](https://mypy-lang.org/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-Unofficial, community-maintained Python client for the [Didit](https://didit.me) Identity Verification & KYC API.
+Community 0.x implementation of the Didit Python SDK (historical).
 
 > [!NOTE]
 > **Supported Scope**: `didit-sdk` strictly targets **Verification Sessions, Decision Extraction, and KYC Webhook Ingestion**. For detailed architectural boundaries, excluded APIs (KYB, Travel Rule, etc.), and stability guarantees, see [SUPPORTED_SCOPE.md](SUPPORTED_SCOPE.md).
@@ -41,20 +42,22 @@ Unofficial, community-maintained Python client for the [Didit](https://didit.me)
 
 ## Installation
 
+> The official `didit-sdk` 1.x line is maintained by Didit. `pip install didit-sdk` now installs the official SDK. To install the historical 0.x line, pin `0.4.0`.
+
 ```bash
-# Core SDK (httpx + pydantic)
-pip install didit-sdk
+# Historical 0.x line (httpx + pydantic)
+pip install "didit-sdk==0.4.0"
 
 # With framework integrations
-pip install "didit-sdk[fastapi]"
-pip install "didit-sdk[django]"
-pip install "didit-sdk[flask]"
+pip install "didit-sdk[fastapi]==0.4.0"
+pip install "didit-sdk[django]==0.4.0"
+pip install "didit-sdk[flask]==0.4.0"
 
 # With Redis webhook deduplication store
-pip install "didit-sdk[redis]"
+pip install "didit-sdk[redis]==0.4.0"
 
 # All optional dependencies
-pip install "didit-sdk[all]"
+pip install "didit-sdk[all]==0.4.0"
 ```
 
 ---
