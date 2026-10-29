@@ -1,14 +1,17 @@
 # didit-sdk
 
-> [!IMPORTANT]
-> This repository contains the community 0.x line of `didit-sdk` (0.1.0-0.4.0). The official SDK is now maintained by Didit at https://github.com/didit-protocol/sdk-python. `pip install didit-sdk` now installs the official 1.x line. The 0.x releases remain available on PyPI for historical reference.
+## Historical 0.x repository
+
+**This repository contains the community 0.x line of `didit-sdk` (0.1.0-0.4.0).**  
+**The official SDK is now maintained by Didit: [didit-protocol/sdk-python](https://github.com/didit-protocol/sdk-python).**  
+`pip install didit-sdk` now installs the official 1.x line. The 0.x releases remain available on PyPI for historical reference.
+
+---
 
 [![CI](https://github.com/agustin18/didit-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/agustin18/didit-sdk/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Checked with mypy](https://img.shields.io/badge/mypy-strict-blue)](https://mypy-lang.org/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-
-Community 0.x implementation of the Didit Python SDK (historical).
 
 > [!NOTE]
 > **Supported Scope**: `didit-sdk` strictly targets **Verification Sessions, Decision Extraction, and KYC Webhook Ingestion**. For detailed architectural boundaries, excluded APIs (KYB, Travel Rule, etc.), and stability guarantees, see [SUPPORTED_SCOPE.md](SUPPORTED_SCOPE.md).
