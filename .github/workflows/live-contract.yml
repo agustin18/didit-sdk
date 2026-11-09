@@ -16,9 +16,6 @@ on:
         description: "Specific sandbox scenario to test (or 'all')"
         required: false
         default: "all"
-  schedule:
-    # Run weekly on Monday at 04:00 UTC
-    - cron: "0 4 * * 1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -48,7 +45,7 @@ jobs:
         run: uv run pytest tests/test_openapi_contract_drift.py -v
 
       - name: Run Live Upstream OpenAPI Drift Gate
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch'
         env:
           DIDIT_CHECK_UPSTREAM_DRIFT: "1"
         run: uv run pytest tests/test_upstream_openapi_drift.py -v
@@ -91,7 +88,7 @@ jobs:
           DIDIT_API_KEY: ${{ secrets.DIDIT_API_KEY }}
         run: |
           if [ -z "${DIDIT_API_KEY}" ]; then
-            if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
               echo "::error::DIDIT_API_KEY is missing on ${{ github.event_name }}. Failing closed."
               exit 1
             else

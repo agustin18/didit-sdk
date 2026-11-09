@@ -1118,7 +1118,11 @@ class TestSessionListAndReconciliationModels:
         n3 = ResubmitNode(node_id="step_live", feature="liveness")  # type: ignore[arg-type]
         assert n3.feature == ResubmitFeature.LIVENESS
 
-        # 3. Model dump serializes feature to string
+        # 3. Upstream schema-valid GEOLOCATION feature is accepted
+        n4 = ResubmitNode(node_id="step_geo", feature="geolocation")  # type: ignore[arg-type]
+        assert n4.feature == ResubmitFeature.GEOLOCATION
+
+        # 4. Model dump serializes feature to string
         d = n1.model_dump()
         assert d["feature"] == "OCR"
 

@@ -6,6 +6,8 @@
 **The official SDK is now maintained by Didit: [didit-protocol/sdk-python](https://github.com/didit-protocol/sdk-python).**  
 `pip install didit-sdk` now installs the official 1.x line. The 0.x releases remain available on PyPI for historical reference.
 
+The 0.x line is frozen. The live upstream OpenAPI drift audit runs only on manual `workflow_dispatch`; it is not scheduled for this historical branch.
+
 ---
 
 [![CI](https://github.com/agustin18/didit-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/agustin18/didit-sdk/actions/workflows/ci.yml)

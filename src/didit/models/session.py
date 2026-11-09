@@ -43,6 +43,7 @@ class ResubmitFeature(str, Enum):
     KYB_REGISTRY = "KYB_REGISTRY"
     KYB_KEY_PEOPLE = "KYB_KEY_PEOPLE"
     KYB = "KYB"
+    GEOLOCATION = "GEOLOCATION"
 
 
 class ResubmitNode(BaseModel):
